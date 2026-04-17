@@ -1,0 +1,53 @@
+node_modules
+dist
+electron-dist
+.npm-cache
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+
+# Local tooling
+.codex
+.codex/
+.vscode/
+.idea/
+
+# OS noise
+.DS_Store
+
+# Local runtime caches
+.home/
+.cache/
+.chrome-tmp/
+.electron-cache/
+claude code/
+
+# Python virtualenvs and caches
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Local outputs
+retrieval_*.JPG
+retrieval_*.JPEG
+retrieval_*.jpg
+retrieval_*.jpeg
+.memolens-state/
+app-state/
+
+# Local databases and photos
+local-photo-library/
+*.db
+*.sqlite
+*.sqlite3
+
+# Personal documents
+*.pdf
+*.docx
