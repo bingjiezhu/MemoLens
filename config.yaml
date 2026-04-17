@@ -1,0 +1,104 @@
+app:
+  image_library_dir: ./local-photo-library
+  sqlite_db_path: null
+  process_image_width: 512
+
+embedding:
+  backend: semantic_hash
+  semantic_dimensions: 512
+  device: null
+  clip_model_id: openai/clip-vit-base-patch32
+  dino_model_id: facebook/dinov2-base
+  text_model_id: semantic-hash-v1
+  text_device: null
+  text_query_prefix: "search_query: "
+  text_document_prefix: "search_document: "
+  text_max_length: 512
+
+geocode:
+  enabled: false
+  user_agent: image-retrieval-local/0.1
+
+retrieval:
+  semantic_hints:
+    santa monica park:
+      - ferris wheel
+      - amusement park
+      - pier
+      - beach
+      - pacific park
+    santa monica pier:
+      - ferris wheel
+      - amusement park
+      - beach
+      - pacific park
+    pacific park:
+      - ferris wheel
+      - santa monica pier
+      - amusement park
+
+vlm:
+  vision_active: minimax_vl01
+  query_active: minimax_m27
+  profiles:
+    openai_gpt41_mini:
+      provider: openai
+      base_url: https://api.openai.com/v1
+      api_key_env: OPENAI_API_KEY
+      model: gpt-4.1-mini
+      temperature: 0.1
+      max_tokens: 400
+      response_format:
+        type: json_object
+    ollama_qwen35_27b:
+      provider: ollama
+      base_url: http://localhost:11434/v1
+      model: qwen3.5:27b
+      temperature: 0.1
+      max_tokens: 400
+      response_format:
+        type: json_object
+    dashscope_qwen_vl_plus:
+      provider: dashscope
+      base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      api_key_env: DASHSCOPE_API_KEY
+      model: qwen-vl-plus
+      temperature: 0.1
+      max_tokens: 400
+      response_format:
+        type: json_object
+    minimax_text01:
+      provider: minimax
+      base_url: https://api.minimax.io/v1
+      api_key_env: MINIMAX_KEY
+      model: MiniMax-Text-01
+      temperature: 0.1
+      max_tokens: 400
+      response_format:
+        type: json_object
+    minimax_m27:
+      provider: minimax
+      base_url: https://api.minimax.io/v1
+      api_key_env: MINIMAX_KEY
+      model: MiniMax-M2.7
+      temperature: 0.1
+      max_tokens: 400
+      response_format:
+        type: json_object
+    minimax_vl01:
+      provider: minimax
+      base_url: https://api.minimax.io/v1
+      api_key_env: MINIMAX_KEY
+      model: MiniMax-VL-01
+      temperature: 0.1
+      max_tokens: 400
+      response_format:
+        type: json_object
+    vertex_gemini25_flash:
+      provider: vertex
+      base_url: https://us-central1-aiplatform.googleapis.com/v1
+      model: gemini-2.5-flash
+      temperature: 0.1
+      max_tokens: 500
+      response_format:
+        type: json_object

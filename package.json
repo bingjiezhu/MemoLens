@@ -1,0 +1,32 @@
+{
+  "name": "memolens-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "electron-dist/electron/main.js",
+  "scripts": {
+    "setup:mac": "bash ./scripts/bootstrap_mac.sh",
+    "dev": "vite",
+    "build:renderer": "tsc --noEmit && vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run build:renderer && npm run build:electron",
+    "electron": "npm run build && bash ./scripts/prepare_desktop_runtime.sh && bash ./scripts/run_desktop_runtime.sh",
+    "electron:open": "bash ./scripts/prepare_desktop_runtime.sh && bash ./scripts/run_desktop_runtime.sh",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "verify:local": "python3 scripts/verify_local_deployment.py && npm run typecheck"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^5.0.4",
+    "electron": "^41.1.1",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.0"
+  }
+}
