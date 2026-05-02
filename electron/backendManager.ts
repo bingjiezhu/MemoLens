@@ -2,14 +2,17 @@ import {
   spawn,
   type ChildProcess,
 } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import type {
   DesktopBackendStatus,
   DesktopSettings,
 } from "../src/query/types.js";
 import { getCanonicalAppStateDir } from "./appPaths.js";
+import { DEFAULT_BACKEND_URL } from "./desktopSettings.js";
 
-const BACKEND_STARTUP_TIMEOUT_MS = 15000;
+const BACKEND_STARTUP_TIMEOUT_MS = 30000;
 const HEALTH_POLL_INTERVAL_MS = 500;
 
 let managedBackendProcess: ChildProcess | null = null;
@@ -23,18 +26,6 @@ function sleep(durationMs: number): Promise<void> {
 
 function normalizeBackendUrl(url: string): string {
   return url.trim().replace(/\/+$/, "");
-}
-
-function canAutoStartBackend(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return (
-      parsed.protocol === "http:" &&
-      (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost")
-    );
-  } catch {
-    return false;
-  }
 }
 
 function resolveBackendPort(url: string): string {
@@ -119,11 +110,61 @@ async function waitForHealthy(url: string): Promise<boolean> {
   return false;
 }
 
+function loadDotEnvVars(projectRoot: string): Record<string, string> {
+  const envVars: Record<string, string> = {};
+  const envFiles = [
+    join(projectRoot, ".env"),
+    join(projectRoot, "backend", ".env"),
+  ];
+
+  for (const envPath of envFiles) {
+    try {
+      const content = readFileSync(envPath, "utf-8");
+      for (const rawLine of content.split("\n")) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith("#") || !line.includes("=")) {
+          continue;
+        }
+        const eqIndex = line.indexOf("=");
+        const key = line.slice(0, eqIndex).trim();
+        let value = line.slice(eqIndex + 1).trim();
+        if (
+          value.length >= 2 &&
+          value[0] === value[value.length - 1] &&
+          (value[0] === "'" || value[0] === '"' || value[0] === "`")
+        ) {
+          value = value.slice(1, -1);
+        }
+        if (key) {
+          envVars[key] = value;
+        }
+      }
+    } catch {
+      // .env file may not exist; that is fine.
+    }
+  }
+
+  return envVars;
+}
+
+function killManagedProcess(): void {
+  if (managedBackendProcess !== null) {
+    try {
+      if (managedBackendProcess.exitCode === null) {
+        managedBackendProcess.kill("SIGTERM");
+      }
+    } catch {
+      // ignore
+    }
+    managedBackendProcess = null;
+  }
+}
+
 export async function ensureBackendReady(
   projectRoot: string,
   settings: DesktopSettings,
 ): Promise<DesktopBackendStatus> {
-  const url = normalizeBackendUrl(settings.backendUrl);
+  const url = normalizeBackendUrl(DEFAULT_BACKEND_URL);
 
   if (await isBackendHealthy(url)) {
     return {
@@ -143,20 +184,18 @@ export async function ensureBackendReady(
     };
   }
 
-  if (!canAutoStartBackend(url)) {
-    return {
-      state: "unavailable",
-      message: "Desktop auto-start only supports localhost backend URLs.",
-      url,
-      startedByApp: false,
-    };
+  // Kill any previously managed process that has exited or is unresponsive.
+  if (managedBackendProcess !== null && managedBackendProcess.exitCode !== null) {
+    killManagedProcess();
   }
 
-  if (managedBackendProcess === null || managedBackendProcess.exitCode !== null) {
+  if (managedBackendProcess === null) {
     managedBackendStartError = null;
+    const dotEnvVars = loadDotEnvVars(projectRoot);
     const nextProcess = spawn(settings.pythonCommand, ["backend/app.py"], {
       cwd: projectRoot,
       env: {
+        ...dotEnvVars,
         ...process.env,
         MEMOLENS_APP_STATE_DIR: getCanonicalAppStateDir(),
         MEMOLENS_BACKEND_PORT: resolveBackendPort(url),
@@ -173,6 +212,37 @@ export async function ensureBackendReady(
     return {
       state: "started",
       message: "Local backend started by the desktop app.",
+      url,
+      startedByApp: true,
+    };
+  }
+
+  // First attempt failed — kill the process and try once more.
+  console.log("[memolens-backend] first start attempt failed, retrying…");
+  killManagedProcess();
+  await sleep(1000);
+
+  managedBackendStartError = null;
+  const dotEnvVars = loadDotEnvVars(projectRoot);
+  const retryProcess = spawn(settings.pythonCommand, ["backend/app.py"], {
+    cwd: projectRoot,
+    env: {
+      ...dotEnvVars,
+      ...process.env,
+      MEMOLENS_APP_STATE_DIR: getCanonicalAppStateDir(),
+      MEMOLENS_BACKEND_PORT: resolveBackendPort(url),
+      MEMOLENS_BACKEND_DEBUG: "0",
+      PYTHONUNBUFFERED: "1",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  managedBackendProcess = retryProcess;
+  attachLogging(retryProcess);
+
+  if (await waitForHealthy(url)) {
+    return {
+      state: "started",
+      message: "Local backend started by the desktop app (retry succeeded).",
       url,
       startedByApp: true,
     };

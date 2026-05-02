@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 
 from flask import Blueprint, abort, current_app, jsonify, request, send_file
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from core.app_settings import load_persisted_app_settings, save_persisted_app_settings
 from core.db import ImageIndexRepository
+from core.local_model_runtime import detect_local_model_runtime
 from core.schemas import RetrievedImageSummary, parse_indexing_request, parse_retrieval_request
 from backend.src import reload_runtime
 
@@ -50,6 +53,9 @@ SUPPORTED_LIBRARY_FILE_EXTENSIONS = {
     ".heic",
     ".heif",
 }
+DEFAULT_PREVIEW_WIDTH = 1800
+MIN_PREVIEW_WIDTH = 128
+MAX_PREVIEW_WIDTH = 3200
 
 
 def _error_response(message: str, status_code: int = 400):
@@ -115,6 +121,41 @@ def _resolve_image_library_dir(
     return image_library_dir
 
 
+def _resolve_library_file(relative_path: str, *, root_path_override: str | None) -> Path:
+    if Path(relative_path).suffix.lower() not in SUPPORTED_LIBRARY_FILE_EXTENSIONS:
+        abort(404)
+
+    settings = current_app.config["SETTINGS"]
+    library_root = (
+        Path(root_path_override).expanduser().resolve()
+        if isinstance(root_path_override, str) and root_path_override.strip()
+        else settings.image_library_dir.resolve()
+    )
+    if not library_root.exists() or not library_root.is_dir():
+        abort(404)
+    file_path = (library_root / relative_path).resolve()
+
+    try:
+        file_path.relative_to(library_root)
+    except ValueError:
+        abort(404)
+
+    if not file_path.exists() or not file_path.is_file():
+        abort(404)
+
+    return file_path
+
+
+def _parse_preview_width(raw_value: str | None) -> int:
+    if raw_value is None or not raw_value.strip():
+        return DEFAULT_PREVIEW_WIDTH
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return DEFAULT_PREVIEW_WIDTH
+    return max(MIN_PREVIEW_WIDTH, min(parsed, MAX_PREVIEW_WIDTH))
+
+
 def _parse_copywriter_images(payload: object) -> list[RetrievedImageSummary]:
     if not isinstance(payload, list) or not payload:
         raise ValueError("`images` must be a non-empty list.")
@@ -162,6 +203,7 @@ def _parse_copywriter_images(payload: object) -> list[RetrievedImageSummary]:
 def healthz():
     settings = current_app.config["SETTINGS"]
     repository = current_app.extensions["image_index_repository"]
+    local_model_runtime = detect_local_model_runtime(settings.vlm_profile_catalog)
     return jsonify(
         {
             "status": "ok",
@@ -174,6 +216,10 @@ def healthz():
             "query_profile": settings.query_profile_name,
             "embedding_backend": settings.embedding_backend,
             "available_vlm_profiles": list(settings.available_vlm_profiles),
+            "vlm_profile_catalog": [
+                entry.to_dict() for entry in settings.vlm_profile_catalog
+            ],
+            "local_model_runtime": local_model_runtime.to_dict(),
             "index_stats": repository.summarize_index_health(),
         }
     )
@@ -183,6 +229,7 @@ def healthz():
 def get_settings():
     settings = current_app.config["SETTINGS"]
     persisted = load_persisted_app_settings(settings.app_state_dir)
+    local_model_runtime = detect_local_model_runtime(settings.vlm_profile_catalog)
     return jsonify(
         {
             "object": "memolens.settings",
@@ -198,6 +245,10 @@ def get_settings():
             },
             "persisted": persisted.to_dict(),
             "available_vlm_profiles": list(settings.available_vlm_profiles),
+            "vlm_profile_catalog": [
+                entry.to_dict() for entry in settings.vlm_profile_catalog
+            ],
+            "local_model_runtime": local_model_runtime.to_dict(),
         }
     )
 
@@ -278,6 +329,12 @@ def update_settings():
             },
             "persisted": persisted.to_dict(),
             "available_vlm_profiles": list(reloaded.available_vlm_profiles),
+            "vlm_profile_catalog": [
+                entry.to_dict() for entry in reloaded.vlm_profile_catalog
+            ],
+            "local_model_runtime": detect_local_model_runtime(
+                reloaded.vlm_profile_catalog
+            ).to_dict(),
         }
     )
 
@@ -481,26 +538,49 @@ def get_library_file(relative_path: str):
     if not _request_is_local():
         return _local_only_error()
 
-    if Path(relative_path).suffix.lower() not in SUPPORTED_LIBRARY_FILE_EXTENSIONS:
-        abort(404)
-
-    settings = current_app.config["SETTINGS"]
-    root_path_override = request.args.get("root_path")
-    library_root = (
-        Path(root_path_override).expanduser().resolve()
-        if isinstance(root_path_override, str) and root_path_override.strip()
-        else settings.image_library_dir.resolve()
+    file_path = _resolve_library_file(
+        relative_path,
+        root_path_override=request.args.get("root_path"),
     )
-    if not library_root.exists() or not library_root.is_dir():
-        abort(404)
-    file_path = (library_root / relative_path).resolve()
+    return send_file(Path(file_path), conditional=True)
+
+
+@api_blueprint.route("/v1/library/previews/<path:relative_path>", methods=["GET"])
+def get_library_preview(relative_path: str):
+    if not _request_is_local():
+        return _local_only_error()
+
+    file_path = _resolve_library_file(
+        relative_path,
+        root_path_override=request.args.get("root_path"),
+    )
+    preview_width = _parse_preview_width(request.args.get("width"))
 
     try:
-        file_path.relative_to(library_root)
-    except ValueError:
-        abort(404)
+        with Image.open(file_path) as source:
+            try:
+                source.seek(0)
+            except EOFError:
+                pass
+            image = ImageOps.exif_transpose(source).convert("RGB")
+    except (OSError, UnidentifiedImageError):
+        abort(415)
 
-    if not file_path.exists() or not file_path.is_file():
-        abort(404)
+    if image.width > preview_width:
+        target_height = max(1, round(image.height * preview_width / image.width))
+        image = image.resize(
+            (preview_width, target_height),
+            getattr(Image, "Resampling", Image).LANCZOS,
+        )
 
-    return send_file(Path(file_path), conditional=True)
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=88, optimize=True)
+    buffer.seek(0)
+
+    response = send_file(
+        buffer,
+        mimetype="image/jpeg",
+        conditional=False,
+    )
+    response.headers["Cache-Control"] = "private, max-age=3600"
+    return response

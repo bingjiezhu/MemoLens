@@ -35,6 +35,11 @@ venv/
 .mypy_cache/
 
 # Local outputs
+tmp/
+output/
+electron.log
+test_*.cjs
+test_*.html
 retrieval_*.JPG
 retrieval_*.JPEG
 retrieval_*.jpg
@@ -51,3 +56,12 @@ local-photo-library/
 # Personal documents
 *.pdf
 *.docx
+docs/project/
+scripts/build_memolens_doc.sh
+scripts/build_project_docs.sh
+scripts/render_memolens_doc.py
+scripts/render_project_image_pdf.py
+scripts/run_desktop_debug.sh
+
+# Cleanup staging when macOS Trash is unavailable in the sandbox
+docs/archive/pending-trash-*/

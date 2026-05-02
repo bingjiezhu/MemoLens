@@ -92,7 +92,6 @@ export interface DesktopFolderSelection {
 export interface DesktopIndexingStartOptions {
   folderPath: string;
   dbPath?: string;
-  apiBase?: string;
   model?: string | null;
   reindex?: boolean;
 }
@@ -122,7 +121,6 @@ export interface DesktopIndexingResult {
 }
 
 export interface DesktopSettings {
-  backendUrl: string;
   pythonCommand: string;
   autoStartBackend: boolean;
   defaultLibraryDir: string | null;
@@ -147,6 +145,37 @@ export interface BackendSettingsEffective {
   embedding_backend: string;
 }
 
+export interface VlmProfileCatalogEntry {
+  name: string;
+  label: string;
+  provider: string;
+  model: string;
+  execution: "local" | "api" | string;
+  capabilities: string[];
+  family: string | null;
+  summary: string | null;
+}
+
+export interface LocalMachineInfo {
+  platform: string;
+  architecture: string;
+  model_name: string | null;
+  chip: string | null;
+  memory_gb: number | null;
+}
+
+export interface LocalModelRuntimeSummary {
+  machine: LocalMachineInfo;
+  ollama_installed: boolean;
+  ollama_binary: string | null;
+  ollama_reachable: boolean;
+  recommended_query_profile_name: string | null;
+  recommended_vision_profile_name: string | null;
+  summary: string;
+  recommendation_basis: string;
+  commands: string[];
+}
+
 export interface BackendSettingsResponse {
   object: string;
   effective: BackendSettingsEffective;
@@ -157,4 +186,6 @@ export interface BackendSettingsResponse {
     >
   >;
   available_vlm_profiles: string[];
+  vlm_profile_catalog: VlmProfileCatalogEntry[];
+  local_model_runtime: LocalModelRuntimeSummary;
 }

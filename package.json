@@ -7,6 +7,8 @@
   "scripts": {
     "setup:mac": "bash ./scripts/bootstrap_mac.sh",
     "dev": "vite",
+    "dev:local": "bash ./scripts/dev_local.sh",
+    "quality:backfill": "python3 scripts/backfill_image_quality.py",
     "build:renderer": "tsc --noEmit && vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
     "build": "npm run build:renderer && npm run build:electron",

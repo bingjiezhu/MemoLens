@@ -59,6 +59,10 @@ class StoredImageRecord:
     embedding_blob: bytes
     created_at: str
     updated_at: str
+    aesthetic_score: float | None = None
+    aesthetic_model: str | None = None
+    technical_quality_score: float | None = None
+    aesthetic_updated_at: str | None = None
 
     def to_transport_dict(self) -> dict[str, object]:
         return {
@@ -88,6 +92,10 @@ class StoredImageRecord:
             ),
             "embedding_backend": self.embedding_backend,
             "embedding_b64": base64.b64encode(self.embedding_blob).decode("utf-8"),
+            "aesthetic_score": self.aesthetic_score,
+            "aesthetic_model": self.aesthetic_model,
+            "technical_quality_score": self.technical_quality_score,
+            "aesthetic_updated_at": self.aesthetic_updated_at,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

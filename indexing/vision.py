@@ -63,21 +63,33 @@ class OpenAICompatibleVisionClient:
             if self.settings.vision_provider == "vertex":
                 return self._describe_image_with_vertex(prepared_image, model)
 
-            payload = {
+            # Ollama (and other OpenAI-compatible providers) path.
+            # Ollama quirks:
+            #   1. response_format=json_object + vision = empty response,
+            #      so we skip it for Ollama and rely on the prompt instead.
+            #   2. System message content must be a plain string, not an
+            #      array of content parts, for vision to work.
+            is_ollama = self.settings.vision_provider == "ollama"
+
+            if is_ollama:
+                system_content = VISION_PROMPT
+            else:
+                system_content = [{"type": "text", "text": VISION_PROMPT}]
+
+            create_kwargs = {
                 "model": model,
                 "temperature": self.settings.vision_temperature,
-                "response_format": self.settings.vision_response_format,
                 "messages": [
                     {
                         "role": "system",
-                        "content": [{"type": "text", "text": VISION_PROMPT}],
+                        "content": system_content,
                     },
                     {
                         "role": "user",
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Generate tags and a short description for this image.",
+                                "text": "Generate tags and a short description for this image. Respond with strict JSON only.",
                             },
                             {
                                 "type": "image_url",
@@ -92,20 +104,21 @@ class OpenAICompatibleVisionClient:
                         ],
                     },
                 ],
+                "max_tokens": self.settings.vision_max_tokens,
             }
 
-            response = self._get_client().chat.completions.create(
-                model=payload["model"],
-                temperature=payload["temperature"],
-                response_format=payload["response_format"],
-                messages=payload["messages"],
-                max_tokens=self.settings.vision_max_tokens,
-            )
+            if not is_ollama and self.settings.vision_response_format:
+                create_kwargs["response_format"] = self.settings.vision_response_format
+
+            response = self._get_client().chat.completions.create(**create_kwargs)
 
             content = response.choices[0].message.content
             parsed = coerce_json_object(content)
             return self._coerce_metadata_from_parsed(parsed, prepared_image.source_name)
-        except Exception:
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            print(f"[VISION ERROR] {prepared_image.source_name}: {exc}", flush=True)
             return self._fallback_metadata(prepared_image.source_name)
 
     def _describe_image_with_minimax(

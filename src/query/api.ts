@@ -127,6 +127,22 @@ function encodeRelativePath(relativePath: string): string {
     .join("/");
 }
 
+function buildPreviewImageUrl(
+  apiBase: string,
+  relativePath: string,
+  imageLibraryDir: string | null | undefined,
+): string {
+  const encodedRelativePath = encodeRelativePath(relativePath);
+  const params = new URLSearchParams({
+    width: "1800",
+  });
+  if (imageLibraryDir && imageLibraryDir.trim().length > 0) {
+    params.set("root_path", imageLibraryDir);
+  }
+
+  return `${apiBase.replace(/\/$/, "")}/v1/library/previews/${encodedRelativePath}?${params.toString()}`;
+}
+
 function inferSlot(image: RetrievalApiImage, index: number): string {
   const searchable = `${image.filename} ${image.description} ${image.tags.join(" ")}`.toLowerCase();
   const matched = SLOT_KEYWORDS.find(({ keywords }) =>
@@ -147,12 +163,7 @@ function toPhotoAsset(
   imageLibraryDir: string | null | undefined,
 ): PhotoAsset {
   const location = [image.place_name, image.country].filter(Boolean).join(" · ") || "Local library";
-  const encodedRelativePath = encodeRelativePath(image.relative_path);
-  const rootPathQuery =
-    imageLibraryDir && imageLibraryDir.trim().length > 0
-      ? `?root_path=${encodeURIComponent(imageLibraryDir)}`
-      : "";
-  const imageUrl = `${apiBase}/v1/library/files/${encodedRelativePath}${rootPathQuery}`;
+  const imageUrl = buildPreviewImageUrl(apiBase, image.relative_path, imageLibraryDir);
 
   return {
     id: image.id,

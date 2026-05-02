@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 import json
 import os
 import sys
@@ -19,7 +20,7 @@ def main() -> int:
     photos_dir = state_dir / "photos"
     photos_dir.mkdir(parents=True, exist_ok=True)
     image_path = photos_dir / "quiet_beach_sunset.jpg"
-    Image.new("RGB", (48, 32), color=(210, 180, 140)).save(image_path, format="JPEG")
+    Image.new("RGB", (256, 128), color=(210, 180, 140)).save(image_path, format="JPEG")
     note_path = photos_dir / "notes.txt"
     note_path.write_text("not an image", encoding="utf-8")
 
@@ -132,10 +133,21 @@ def main() -> int:
     repository = ImageIndexRepository(state_dir / "storage" / "photo_index.db")
     repository.ensure_schema()
     stored_candidates = repository.fetch_candidates()
+    stored_candidate = stored_candidates[0] if stored_candidates else None
     image_file_response = client.get(
         f"/v1/library/files/renamed/{relocated_image_path.name}",
         query_string={"root_path": str(photos_dir)},
     )
+    image_preview_response = client.get(
+        f"/v1/library/previews/renamed/{relocated_image_path.name}",
+        query_string={"root_path": str(photos_dir), "width": "128"},
+    )
+    preview_format = None
+    preview_size: tuple[int, int] | None = None
+    if image_preview_response.status_code == 200:
+        with Image.open(BytesIO(image_preview_response.data)) as preview_image:
+            preview_format = preview_image.format
+            preview_size = preview_image.size
     note_file_response = client.get(
         f"/v1/library/files/{note_path.name}",
         query_string={"root_path": str(photos_dir)},
@@ -161,6 +173,125 @@ def main() -> int:
         normalized_tag_terms=["portrait"],
         normalized_candidate_terms=["portrait", "face", "person"],
     )
+    expanded_people_exclusions = RetrievalService._expand_excluded_terms(["people"])
+    prepared_people_exclusions = [
+        normalized
+        for _term, normalized in RetrievalService._prepare_query_terms(expanded_people_exclusions)
+    ]
+    child_filter_active = RetrievalService._should_exclude_candidate(
+        excluded_terms=prepared_people_exclusions,
+        normalized_tag_terms=RetrievalService._normalize_candidate_terms(["children"]),
+        normalized_candidate_terms=RetrievalService._normalize_candidate_terms(
+            ["two children walking"]
+        ),
+    )
+    exclusion_only_plan = app.extensions["query_planner"]._fallback_plan(
+        text="不要人",
+        current_datetime="2026-04-30T12:00:00-07:00",
+        top_k_override=3,
+    )
+    exclusion_only_query = exclusion_only_plan.query
+    mountain_no_people_plan = app.extensions["query_planner"]._fallback_plan(
+        text="9张有山景的图，但是不要有人",
+        current_datetime="2026-04-30T12:00:00-07:00",
+        top_k_override=9,
+    )
+    mountain_no_people_query = mountain_no_people_plan.query
+    no_people_terms = RetrievalService._filter_absence_terms(
+        normalized_candidate_terms=["no person", "person", "human", "mountain"],
+        normalized_blob="no person mountain",
+    )
+    no_person_similarity = RetrievalService._pair_term_similarity("person", "no person")
+    strict_driver_river_match = RetrievalService._strict_term_presence_normalized(
+        normalized_term="driver",
+        normalized_term_candidates=["river"],
+    )
+    mountain_required_groups = RetrievalService._build_hard_required_groups(["mountain"])
+    mountain_group_accepts_mountain = RetrievalService._satisfies_hard_required_groups(
+        hard_required_groups=mountain_required_groups,
+        normalized_tag_terms=["landscape"],
+        normalized_candidate_terms=["distant mountain", "forest"],
+    )
+    mountain_group_rejects_food = RetrievalService._satisfies_hard_required_groups(
+        hard_required_groups=mountain_required_groups,
+        normalized_tag_terms=["restaurant"],
+        normalized_candidate_terms=["plate", "coffee"],
+    )
+    landscape_intent_active = RetrievalService._has_landscape_intent(["mountain", "landscape"])
+    landscape_scene_score = RetrievalService._scene_composition_score(
+        "wide shot mountain landscape sky"
+    )
+    close_scene_score = RetrievalService._scene_composition_score(
+        "close up tree trunk mountain road"
+    )
+    disfavored_landscape_context = RetrievalService._is_disfavored_landscape_context(
+        normalized_blob="classical landscape painting displayed in a frame with mountains",
+        query_terms=["mountain", "landscape"],
+    )
+    allowed_landscape_context = RetrievalService._is_disfavored_landscape_context(
+        normalized_blob="classical landscape painting displayed in a frame with mountains",
+        query_terms=["mountain", "landscape", "painting"],
+    )
+    high_quality_metadata_score = RetrievalService._metadata_quality_score(
+        "wide shot panoramic scenic mountain landscape clear sky natural light"
+    )
+    low_quality_metadata_score = RetrievalService._metadata_quality_score(
+        "blurry dark close up obstructed tree trunk"
+    )
+    repeated_scene_similarity = RetrievalService._candidate_similarity(
+        {
+            "similarity_terms": ["meadow", "fence", "waterfall", "valley"],
+            "embedding": None,
+            "embedding_backend": "test",
+        },
+        {
+            "similarity_terms": ["meadow", "fence", "waterfall", "valley"],
+            "embedding": None,
+            "embedding_backend": "test",
+        },
+    )
+    distinct_scene_similarity = RetrievalService._candidate_similarity(
+        {
+            "similarity_terms": ["meadow", "fence", "waterfall", "valley"],
+            "embedding": None,
+            "embedding_backend": "test",
+        },
+        {
+            "similarity_terms": ["coffee", "table", "restaurant", "plate"],
+            "embedding": None,
+            "embedding_backend": "test",
+        },
+    )
+    high_quality_selection_score = RetrievalService._selection_score(
+        relevance_score=0.7,
+        quality_score=0.9,
+    )
+    low_quality_selection_score = RetrievalService._selection_score(
+        relevance_score=0.7,
+        quality_score=0.2,
+    )
+    deduped_quality_candidates = RetrievalService._dedupe_near_duplicate_candidates(
+        [
+            {
+                "id": "lower_quality",
+                "selection_score": low_quality_selection_score,
+                "quality_score": 0.2,
+                "normalized_score": 0.7,
+                "similarity_terms": ["meadow", "fence", "waterfall", "valley"],
+                "embedding": None,
+                "embedding_backend": "test",
+            },
+            {
+                "id": "higher_quality",
+                "selection_score": high_quality_selection_score,
+                "quality_score": 0.9,
+                "normalized_score": 0.7,
+                "similarity_terms": ["meadow", "fence", "waterfall", "valley"],
+                "embedding": None,
+                "embedding_backend": "test",
+            },
+        ]
+    )
 
     result = {
         "settings_status": settings_response.status_code,
@@ -171,7 +302,13 @@ def main() -> int:
         "indexed_count": index_response.json["meta"]["indexed_count"],
         "index_has_records": "records" in (index_response.json or {}),
         "relocated_skip_message": ((relocated_index_response.json or {}).get("skipped") or [{}])[0].get("message"),
-        "stored_relative_path": stored_candidates[0]["relative_path"] if stored_candidates else None,
+        "stored_relative_path": stored_candidate["relative_path"] if stored_candidate else None,
+        "stored_aesthetic_score": (
+            stored_candidate["aesthetic_score"] if stored_candidate else None
+        ),
+        "stored_aesthetic_model": (
+            stored_candidate["aesthetic_model"] if stored_candidate else None
+        ),
         "query_status": query_response.status_code,
         "query_result_status": query_response.json["status"],
         "query_candidate_count": len(query_response.json["data"]),
@@ -185,6 +322,10 @@ def main() -> int:
         or copy_response.json.get("title") is None,
         "copy_caption_present": isinstance(copy_response.json.get("caption"), str),
         "image_file_status": image_file_response.status_code,
+        "image_preview_status": image_preview_response.status_code,
+        "image_preview_content_type": image_preview_response.headers.get("Content-Type"),
+        "image_preview_format": preview_format,
+        "image_preview_width": preview_size[0] if preview_size else None,
         "note_file_status": note_file_response.status_code,
         "generated_copy_model": (copy_response.json.get("generated_copy") or {}).get("model"),
         "cors_methods": cors_options_response.headers.get("Access-Control-Allow-Methods"),
@@ -193,6 +334,40 @@ def main() -> int:
         "local_remote_addr_check": _is_local_remote_addr("127.0.0.1"),
         "remote_remote_addr_check": _is_local_remote_addr("203.0.113.5"),
         "excluded_filter_active": excluded_filter_active,
+        "child_filter_active": child_filter_active,
+        "exclusion_only_can_fulfill": exclusion_only_plan.can_fulfill,
+        "exclusion_only_required_terms": (
+            exclusion_only_query.required_terms if exclusion_only_query else []
+        ),
+        "exclusion_only_excluded_terms": (
+            exclusion_only_query.excluded_terms if exclusion_only_query else []
+        ),
+        "mountain_no_people_can_fulfill": mountain_no_people_plan.can_fulfill,
+        "mountain_no_people_required_terms": (
+            mountain_no_people_query.required_terms if mountain_no_people_query else []
+        ),
+        "mountain_no_people_excluded_terms": (
+            mountain_no_people_query.excluded_terms if mountain_no_people_query else []
+        ),
+        "no_people_terms": no_people_terms,
+        "no_person_similarity": no_person_similarity,
+        "strict_driver_river_match": strict_driver_river_match,
+        "mountain_group_accepts_mountain": mountain_group_accepts_mountain,
+        "mountain_group_rejects_food": mountain_group_rejects_food,
+        "landscape_intent_active": landscape_intent_active,
+        "landscape_scene_score": landscape_scene_score,
+        "close_scene_score": close_scene_score,
+        "disfavored_landscape_context": disfavored_landscape_context,
+        "allowed_landscape_context": allowed_landscape_context,
+        "high_quality_metadata_score": high_quality_metadata_score,
+        "low_quality_metadata_score": low_quality_metadata_score,
+        "repeated_scene_similarity": repeated_scene_similarity,
+        "distinct_scene_similarity": distinct_scene_similarity,
+        "high_quality_selection_score": high_quality_selection_score,
+        "low_quality_selection_score": low_quality_selection_score,
+        "deduped_quality_candidate_ids": [
+            item.get("id") for item in deduped_quality_candidates
+        ],
     }
 
     print(json.dumps(result, indent=2))
@@ -213,6 +388,10 @@ def main() -> int:
         return 1
     if result["stored_relative_path"] != "renamed/quiet_beach_sunset_renamed.jpg":
         return 1
+    if result["stored_aesthetic_score"] is None:
+        return 1
+    if result["stored_aesthetic_model"] != "local_technical_aesthetic_v1":
+        return 1
     if result["query_status"] != 200 or result["query_candidate_count"] < 1:
         return 1
     if result["query_has_generated_copy"] is not False:
@@ -225,6 +404,12 @@ def main() -> int:
         return 1
     if result["image_file_status"] != 200 or result["note_file_status"] != 404:
         return 1
+    if (
+        result["image_preview_status"] != 200
+        or result["image_preview_format"] != "JPEG"
+        or result["image_preview_width"] != 128
+    ):
+        return 1
     if result["cors_origin"] != "http://127.0.0.1:5173":
         return 1
     if "PUT" not in str(result["cors_methods"] or ""):
@@ -236,6 +421,50 @@ def main() -> int:
     if result["remote_remote_addr_check"] is not False:
         return 1
     if result["excluded_filter_active"] is not True:
+        return 1
+    if result["child_filter_active"] is not True:
+        return 1
+    if result["exclusion_only_can_fulfill"] is not True:
+        return 1
+    if "no people" not in result["exclusion_only_required_terms"]:
+        return 1
+    if "child" not in result["exclusion_only_excluded_terms"]:
+        return 1
+    if result["mountain_no_people_can_fulfill"] is not True:
+        return 1
+    if "mountain" not in result["mountain_no_people_required_terms"]:
+        return 1
+    if "landscape" not in result["mountain_no_people_required_terms"]:
+        return 1
+    if "person" not in result["mountain_no_people_excluded_terms"]:
+        return 1
+    if "person" in result["no_people_terms"] or "human" in result["no_people_terms"]:
+        return 1
+    if result["no_person_similarity"] != 0.0:
+        return 1
+    if result["strict_driver_river_match"] != 0.0:
+        return 1
+    if result["mountain_group_accepts_mountain"] is not True:
+        return 1
+    if result["mountain_group_rejects_food"] is not False:
+        return 1
+    if result["landscape_intent_active"] is not True:
+        return 1
+    if result["landscape_scene_score"] <= result["close_scene_score"]:
+        return 1
+    if result["disfavored_landscape_context"] is not True:
+        return 1
+    if result["allowed_landscape_context"] is not False:
+        return 1
+    if result["high_quality_metadata_score"] <= result["low_quality_metadata_score"]:
+        return 1
+    if result["repeated_scene_similarity"] < 0.99:
+        return 1
+    if result["distinct_scene_similarity"] != 0.0:
+        return 1
+    if result["high_quality_selection_score"] <= result["low_quality_selection_score"]:
+        return 1
+    if result["deduped_quality_candidate_ids"] != ["higher_quality"]:
         return 1
     return 0
 

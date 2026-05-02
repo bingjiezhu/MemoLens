@@ -29,12 +29,15 @@ import type {
   DesktopIndexingResult,
   DesktopSettings,
   DraftResult,
+  LocalModelRuntimeSummary,
   PipelineStep,
   ToneVariant,
+  VlmProfileCatalogEntry,
 } from "./query/types";
 
 const PIPELINE_LENGTH = 4;
 const GENERATION_STEP_TARGETS = [14, 38, 66, 86];
+const LOCAL_BACKEND_URL = "http://127.0.0.1:5519";
 
 type DraftGenerationPhase = "idle" | "running" | "completed";
 
@@ -107,6 +110,35 @@ function hasVisibleText(value: string): boolean {
 
 function formatPercent(value: number): string {
   return `${Math.round(value * 100)}%`;
+}
+
+function findProfileEntry(
+  backendSettings: BackendSettingsResponse | null,
+  profileName: string | null | undefined,
+): VlmProfileCatalogEntry | null {
+  if (!backendSettings || !profileName) {
+    return null;
+  }
+  return (
+    backendSettings.vlm_profile_catalog.find((entry) => entry.name === profileName) ?? null
+  );
+}
+
+function formatProfileOptionLabel(entry: VlmProfileCatalogEntry): string {
+  const execution = entry.execution === "local" ? "Local" : "API";
+  return `${entry.label} · ${execution}`;
+}
+
+function formatRecommendedMachine(localRuntime: LocalModelRuntimeSummary | null | undefined): string {
+  if (!localRuntime) {
+    return "Machine profile unavailable";
+  }
+  const parts = [
+    localRuntime.machine.model_name,
+    localRuntime.machine.chip,
+    localRuntime.machine.memory_gb ? `${localRuntime.machine.memory_gb} GB` : null,
+  ].filter((value): value is string => Boolean(value));
+  return parts.join(" · ") || `${localRuntime.machine.platform} · ${localRuntime.machine.architecture}`;
 }
 
 function buildParsedQueryChips(
@@ -187,11 +219,8 @@ function downloadDraft(draft: DraftResult): void {
 function App() {
   const desktopRuntime = isDesktopRuntime();
   const electronShell = isElectronShell();
-  const initialApiBase =
-    import.meta.env.VITE_BACKEND_BASE_URL ??
-    (electronShell ? "http://127.0.0.1:5519" : "");
   const [prompt, setPrompt] = useState(INITIAL_PROMPT);
-  const [apiBase, setApiBase] = useState(initialApiBase);
+  const apiBase = import.meta.env.VITE_BACKEND_BASE_URL ?? LOCAL_BACKEND_URL;
   const [draft, setDraft] = useState<DraftResult>(() => createDraft(INITIAL_PROMPT));
   const [pipeline, setPipeline] = useState<PipelineStep[]>(() =>
     createPipelineSteps(null, 0),
@@ -202,7 +231,7 @@ function App() {
   const [activePhotoId, setActivePhotoId] = useState<string | null>(draft.selected[0]?.id ?? null);
   const [health, setHealth] = useState<BackendHealth>({
     state: "checking",
-    message: "Checking local backend",
+    message: "Checking local service",
   });
   const [selectedFolderPath, setSelectedFolderPath] = useState<string | null>(null);
   const [selectedDbPath, setSelectedDbPath] = useState<string | null>(null);
@@ -212,7 +241,6 @@ function App() {
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [isSavingBackendSettings, setIsSavingBackendSettings] = useState(false);
-  const [isEnsuringBackend, setIsEnsuringBackend] = useState(false);
   const [healthRefreshKey, setHealthRefreshKey] = useState(0);
   const [isIndexing, setIsIndexing] = useState(false);
   const [indexingProgress, setIndexingProgress] = useState<DesktopIndexingProgress | null>(null);
@@ -249,6 +277,23 @@ function App() {
   const parsedQueryChips = buildParsedQueryChips(activeResultDraft?.parsedQuery ?? null);
   const indexStats = health.indexStats ?? null;
   const hasStaleIndex = Boolean(indexStats?.needsReindex);
+  const localModelRuntime = backendSettings?.local_model_runtime ?? null;
+  const recommendedQueryProfile = findProfileEntry(
+    backendSettings,
+    localModelRuntime?.recommended_query_profile_name,
+  );
+  const recommendedVisionProfile = findProfileEntry(
+    backendSettings,
+    localModelRuntime?.recommended_vision_profile_name,
+  );
+  const selectedVisionProfile = findProfileEntry(
+    backendSettings,
+    backendSettings?.effective.vision_profile_name,
+  );
+  const selectedQueryProfile = findProfileEntry(
+    backendSettings,
+    backendSettings?.effective.query_profile_name,
+  );
   const indexStatusLabel = indexStats
     ? indexStats.totalRecords > 0
       ? hasStaleIndex
@@ -306,25 +351,17 @@ function App() {
       }
 
       setDesktopSettings(settings);
-      setApiBase(settings.backendUrl);
-      setSelectedFolderPath(settings.defaultLibraryDir);
-      setSelectedDbPath(settings.defaultDbPath);
 
       if (settings.autoStartBackend) {
-        setIsEnsuringBackend(true);
         setHealth({
           state: "checking",
-          message: "Starting local backend",
+          message: "Starting local service",
           imageLibraryDir: settings.defaultLibraryDir ?? undefined,
           dbPath: settings.defaultDbPath ?? undefined,
         });
         const status = await ensureDesktopBackend();
         if (!disposed && status !== null) {
           setBackendStatus(status);
-          setApiBase(status.url);
-        }
-        if (!disposed) {
-          setIsEnsuringBackend(false);
         }
       }
 
@@ -343,14 +380,6 @@ function App() {
     const controller = new AbortController();
 
     async function loadHealth(): Promise<void> {
-      if (!apiBase) {
-        setHealth({
-          state: "mock",
-          message: "Mock library mode",
-        });
-        return;
-      }
-
       try {
         const response = await fetch(`${apiBase}/healthz`, {
           signal: controller.signal,
@@ -375,7 +404,7 @@ function App() {
 
         setHealth({
           state: "connected",
-          message: apiBase ? `Backend online · ${apiBase}` : "Local library online",
+          message: `Local service online · ${apiBase}`,
           imageLibraryDir: payload.image_library_dir,
           dbPath: payload.db_path,
           visionProfile: payload.vision_profile,
@@ -393,8 +422,13 @@ function App() {
         try {
           const nextBackendSettings = await fetchBackendSettings(apiBase);
           setBackendSettings(nextBackendSettings);
-          setSelectedFolderPath((current) => current ?? nextBackendSettings.effective.image_library_dir);
-          setSelectedDbPath((current) => current ?? nextBackendSettings.effective.db_path);
+          if (desktopRuntime) {
+            setSelectedFolderPath((current) => current ?? nextBackendSettings.effective.image_library_dir);
+            setSelectedDbPath((current) => current ?? nextBackendSettings.effective.db_path);
+          } else {
+            setSelectedFolderPath(nextBackendSettings.effective.image_library_dir);
+            setSelectedDbPath(nextBackendSettings.effective.db_path);
+          }
         } catch {
           setBackendSettings(null);
         }
@@ -402,10 +436,10 @@ function App() {
         const reason =
           error instanceof Error && error.message.trim().length > 0
             ? error.message
-            : "backend unreachable";
+            : "service unreachable";
         setHealth({
-          state: apiBase ? "offline" : "mock",
-          message: apiBase ? `Backend unavailable · ${reason}` : "Mock library mode",
+          state: "offline",
+          message: `Local service unavailable · ${reason}`,
           imageLibraryDir: desktopSettings?.defaultLibraryDir ?? undefined,
           dbPath: desktopSettings?.defaultDbPath ?? undefined,
         });
@@ -478,41 +512,106 @@ function App() {
     seedRef.current += 1;
     startGenerationProgressDrift(runId);
     let nextDraft: DraftResult | null = null;
-    if (health.state === "connected") {
+
+    // If backend is offline, try to restart it before querying.
+    let effectiveHealthState = health.state;
+    if (effectiveHealthState !== "connected" && desktopRuntime) {
+      setGenerationProgress((current) => ({
+        ...current,
+        title: "Reconnecting to backend",
+        detail: "The local service was offline. Attempting to restart it now.",
+      }));
+      const status = await ensureDesktopBackend();
+      if (status !== null) {
+        setBackendStatus(status);
+        if (status.state === "connected" || status.state === "started") {
+          effectiveHealthState = "connected";
+          setHealth((currentHealth) => ({
+            ...currentHealth,
+            state: "connected",
+            message: status.message,
+          }));
+          setHealthRefreshKey((current) => current + 1);
+        }
+      }
+    }
+
+    if (effectiveHealthState === "connected") {
+      const makeDraftFetchOptions = () => ({
+        apiBase,
+        imageLibraryDir: selectedFolderPath ?? health.imageLibraryDir ?? null,
+        dbPath: selectedDbPath ?? health.dbPath ?? null,
+        onCopyUpdate: (copyUpdate: { title?: string | null; caption?: string | null; notes?: string[] | null }) => {
+          if (runIdRef.current !== runId) {
+            return;
+          }
+          setDraft((currentDraft) => ({
+            ...currentDraft,
+            title:
+              typeof copyUpdate.title === "string" && hasVisibleText(copyUpdate.title)
+                ? copyUpdate.title
+                : currentDraft.title,
+            caption:
+              typeof copyUpdate.caption === "string" && hasVisibleText(copyUpdate.caption)
+                ? copyUpdate.caption
+                : currentDraft.caption,
+            notes:
+              Array.isArray(copyUpdate.notes) && copyUpdate.notes.length > 0
+                ? copyUpdate.notes
+                : currentDraft.notes,
+          }));
+        },
+      });
+
       try {
-        nextDraft = await fetchDraftFromBackend(normalizedPrompt, variant, {
-          apiBase,
-          imageLibraryDir: selectedFolderPath ?? health.imageLibraryDir ?? null,
-          dbPath: selectedDbPath ?? health.dbPath ?? null,
-          onCopyUpdate: (copyUpdate) => {
-            if (runIdRef.current !== runId) {
-              return;
-            }
-            setDraft((currentDraft) => ({
-              ...currentDraft,
-              title:
-                typeof copyUpdate.title === "string" && hasVisibleText(copyUpdate.title)
-                  ? copyUpdate.title
-                  : currentDraft.title,
-              caption:
-                typeof copyUpdate.caption === "string" && hasVisibleText(copyUpdate.caption)
-                  ? copyUpdate.caption
-                  : currentDraft.caption,
-              notes:
-                Array.isArray(copyUpdate.notes) && copyUpdate.notes.length > 0
-                  ? copyUpdate.notes
-                  : currentDraft.notes,
-            }));
-          },
-        });
+        nextDraft = await fetchDraftFromBackend(normalizedPrompt, variant, makeDraftFetchOptions());
         if (nextDraft === null) {
           setGenerationError("No visible retrieval result came back from the local library. Make sure indexing has finished.");
         }
       } catch (error) {
-        setGenerationError(
-          error instanceof Error ? error.message : "Draft generation failed and no result could be loaded from the local library.",
-        );
-        nextDraft = null;
+        const isNetworkError =
+          error instanceof TypeError && /fetch/i.test(error.message);
+
+        // If it's a network error, try to restart the backend and retry once.
+        if (isNetworkError && desktopRuntime) {
+          setGenerationProgress((current) => ({
+            ...current,
+            title: "Reconnecting to backend",
+            detail: "Network error detected. Attempting to restart the local service.",
+          }));
+          const retryStatus = await ensureDesktopBackend();
+          if (retryStatus !== null && (retryStatus.state === "connected" || retryStatus.state === "started")) {
+            setBackendStatus(retryStatus);
+            setHealth((currentHealth) => ({
+              ...currentHealth,
+              state: "connected",
+              message: retryStatus.message,
+            }));
+            setHealthRefreshKey((current) => current + 1);
+
+            try {
+              nextDraft = await fetchDraftFromBackend(normalizedPrompt, variant, makeDraftFetchOptions());
+              if (nextDraft === null) {
+                setGenerationError("No visible retrieval result came back from the local library. Make sure indexing has finished.");
+              }
+            } catch (retryError) {
+              setGenerationError(
+                retryError instanceof Error ? retryError.message : "Draft generation failed after retry.",
+              );
+              nextDraft = null;
+            }
+          } else {
+            setGenerationError(
+              "Failed to fetch: the local backend is offline and could not be restarted. Check Python environment in settings.",
+            );
+            nextDraft = null;
+          }
+        } else {
+          setGenerationError(
+            error instanceof Error ? error.message : "Draft generation failed and no result could be loaded from the local library.",
+          );
+          nextDraft = null;
+        }
       }
     }
 
@@ -583,19 +682,27 @@ function App() {
 
   async function handleEnsureBackend(): Promise<void> {
     setSettingsMessage(null);
-    setIsEnsuringBackend(true);
+    if (!desktopRuntime) {
+      setHealth({
+        state: "checking",
+        message: `Checking local service · ${apiBase}`,
+        imageLibraryDir: selectedFolderPath ?? health.imageLibraryDir,
+        dbPath: selectedDbPath ?? health.dbPath,
+      });
+      setHealthRefreshKey((current) => current + 1);
+      setSettingsMessage("Refreshing local service status.");
+      return;
+    }
+
     const status = await ensureDesktopBackend();
     if (status === null) {
       setSettingsMessage("Desktop backend supervision is only available in the Electron app.");
-      setIsEnsuringBackend(false);
       return;
     }
 
     setBackendStatus(status);
-    setApiBase(status.url);
     setSettingsMessage(status.message);
     setHealthRefreshKey((current) => current + 1);
-    setIsEnsuringBackend(false);
   }
 
   async function handleSaveSettings(): Promise<void> {
@@ -614,7 +721,6 @@ function App() {
     }
 
     setDesktopSettings(savedSettings);
-    setApiBase(savedSettings.backendUrl);
     setSelectedFolderPath(savedSettings.defaultLibraryDir);
     setSelectedDbPath(savedSettings.defaultDbPath);
     setSettingsMessage("Desktop settings saved.");
@@ -666,7 +772,7 @@ function App() {
 
   async function handleSaveBackendSettings(): Promise<void> {
     if (!backendSettings) {
-      setSettingsMessage("Backend settings are unavailable until the local backend is online.");
+      setSettingsMessage("Local settings are unavailable until the local service is online.");
       return;
     }
 
@@ -691,10 +797,10 @@ function App() {
         visionProfile: saved.effective.vision_profile_name,
         queryProfile: saved.effective.query_profile_name,
       }));
-      setSettingsMessage("Backend settings saved and reloaded.");
+      setSettingsMessage("Local settings saved and reloaded.");
       setHealthRefreshKey((current) => current + 1);
     } catch (error) {
-      setSettingsMessage(error instanceof Error ? error.message : "Saving backend settings failed.");
+      setSettingsMessage(error instanceof Error ? error.message : "Saving local settings failed.");
     } finally {
       setIsSavingBackendSettings(false);
     }
@@ -702,7 +808,7 @@ function App() {
 
   function handleUseCurrentLibraryInBackendSettings(): void {
     if (!backendSettings || !selectedFolderPath || !selectedDbPath) {
-      setSettingsMessage("Pick a current library first, then copy it into backend settings.");
+      setSettingsMessage("Pick a current library first, then copy it into local settings.");
       return;
     }
 
@@ -719,12 +825,69 @@ function App() {
         db_path: selectedDbPath,
       },
     });
-    setSettingsMessage("Current library copied into backend settings. Save to persist it.");
+    setSettingsMessage("Current library copied into local settings. Save to persist it.");
+  }
+
+  function handleApplyRecommendedLocalQuery(): void {
+    if (!backendSettings || !localModelRuntime?.recommended_query_profile_name) {
+      setSettingsMessage("No recommended local query profile is available on this machine.");
+      return;
+    }
+
+    setBackendSettings({
+      ...backendSettings,
+      effective: {
+        ...backendSettings.effective,
+        query_profile_name: localModelRuntime.recommended_query_profile_name,
+      },
+    });
+    setSettingsMessage(
+      `Query profile switched to ${localModelRuntime.recommended_query_profile_name}. Save local settings to apply it.`,
+    );
+  }
+
+  function handleApplyRecommendedLocalSetup(): void {
+    if (
+      !backendSettings
+      || !localModelRuntime?.recommended_query_profile_name
+      || !localModelRuntime.recommended_vision_profile_name
+    ) {
+      setSettingsMessage("No recommended all-local setup is available on this machine.");
+      return;
+    }
+
+    setBackendSettings({
+      ...backendSettings,
+      effective: {
+        ...backendSettings.effective,
+        query_profile_name: localModelRuntime.recommended_query_profile_name,
+        vision_profile_name: localModelRuntime.recommended_vision_profile_name,
+      },
+    });
+    setSettingsMessage(
+      "Recommended local query and vision profiles staged. Save local settings to apply them.",
+    );
   }
 
   async function handlePickFolder(): Promise<void> {
     if (!desktopRuntime) {
-      setSettingsMessage("Electron is unavailable here. Set the backend photo library path in Control and save it.");
+      if (!backendSettings) {
+        setSettingsMessage("Local settings are unavailable until the local service is online.");
+        return;
+      }
+
+      setSelectedFolderPath(backendSettings.effective.image_library_dir);
+      setSelectedDbPath(backendSettings.effective.db_path);
+      setHealth((currentHealth) => ({
+        ...currentHealth,
+        imageLibraryDir: backendSettings.effective.image_library_dir,
+        dbPath: backendSettings.effective.db_path,
+      }));
+      setSettingsMessage("Using the local library path.");
+      setIndexingResult(null);
+      setIndexingProgress(null);
+      setGenerationError(null);
+      setHasCompletedGeneration(false);
       return;
     }
 
@@ -752,7 +915,7 @@ function App() {
       setIndexingError(
         desktopRuntime
           ? "Pick a local image folder first."
-          : "Set the backend photo library path in Control, save settings, then start indexing.",
+          : "Set the local photo library path in Control, save settings, then start indexing.",
       );
       return;
     }
@@ -770,11 +933,10 @@ function App() {
         ? await startLocalIndexing({
             folderPath: selectedFolderPath,
             dbPath: selectedDbPath ?? undefined,
-            apiBase: apiBase || "http://127.0.0.1:5519",
             reindex: hasStaleIndex,
           })
         : await startBackendIndexing({
-            apiBase: apiBase || "http://127.0.0.1:5519",
+            apiBase,
             imageLibraryDir: selectedFolderPath,
             dbPath: selectedDbPath ?? undefined,
             reindex: hasStaleIndex,
@@ -846,6 +1008,8 @@ function App() {
   const canStartIndexing =
     Boolean(selectedFolderPath) && !isIndexing && (desktopRuntime || health.state === "connected");
   const indexingActionLabel = hasStaleIndex ? "Rebuild index" : "Start indexing";
+  const showControlGrid = Boolean(desktopSettings) || Boolean(backendSettings);
+  const runtimeHeading = desktopRuntime ? "Desktop runtime" : "Local runtime";
 
   return (
     <div className="app-shell">
@@ -930,7 +1094,7 @@ function App() {
         <section className="section-block control-section" id="control">
           <div className="section-heading compact-heading">
             <p className="eyebrow">Control</p>
-            <h2>Desktop runtime</h2>
+            <h2>{runtimeHeading}</h2>
           </div>
 
           <div className="meta-pills">
@@ -948,7 +1112,7 @@ function App() {
               {indexStatusLabel}
             </span>
             <span className="meta-pill">
-              {backendStatus?.startedByApp ? "Desktop managed" : "External or pending"}
+              {backendStatus?.startedByApp ? "Desktop managed" : "Local service"}
             </span>
           </div>
 
@@ -960,89 +1124,76 @@ function App() {
             </p>
           ) : null}
 
-          {desktopSettings ? (
+          {showControlGrid ? (
             <div className="control-grid">
-              <article className="control-card">
-                <label className="settings-field">
-                  <span>Backend URL</span>
-                  <input
-                    className="settings-input"
-                    type="text"
-                    value={desktopSettings.backendUrl}
-                    onChange={(event) =>
-                      setDesktopSettings({
-                        ...desktopSettings,
-                        backendUrl: event.target.value,
-                      })
-                    }
-                  />
-                </label>
+              {desktopSettings ? (
+                <article className="control-card">
+                  <label className="settings-field">
+                    <span>Python command</span>
+                    <input
+                      className="settings-input"
+                      type="text"
+                      value={desktopSettings.pythonCommand}
+                      onChange={(event) =>
+                        setDesktopSettings({
+                          ...desktopSettings,
+                          pythonCommand: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
 
-                <label className="settings-field">
-                  <span>Python command</span>
-                  <input
-                    className="settings-input"
-                    type="text"
-                    value={desktopSettings.pythonCommand}
-                    onChange={(event) =>
-                      setDesktopSettings({
-                        ...desktopSettings,
-                        pythonCommand: event.target.value,
-                      })
-                    }
-                  />
-                </label>
+                  <label className="toggle-field">
+                    <input
+                      type="checkbox"
+                      checked={desktopSettings.autoStartBackend}
+                      onChange={(event) =>
+                        setDesktopSettings({
+                          ...desktopSettings,
+                          autoStartBackend: event.target.checked,
+                        })
+                      }
+                    />
+                    <span>Auto-start the local service when the desktop app opens</span>
+                  </label>
 
-                <label className="toggle-field">
-                  <input
-                    type="checkbox"
-                    checked={desktopSettings.autoStartBackend}
-                    onChange={(event) =>
-                      setDesktopSettings({
-                        ...desktopSettings,
-                        autoStartBackend: event.target.checked,
-                      })
-                    }
-                  />
-                  <span>Auto-start the local backend when the desktop app opens</span>
-                </label>
+                  <label className="settings-field">
+                    <span>Desktop default library</span>
+                    <input
+                      className="settings-input"
+                      type="text"
+                      value={desktopSettings.defaultLibraryDir ?? ""}
+                      onChange={(event) =>
+                        setDesktopSettings({
+                          ...desktopSettings,
+                          defaultLibraryDir: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
 
-                <label className="settings-field">
-                  <span>Desktop default library</span>
-                  <input
-                    className="settings-input"
-                    type="text"
-                    value={desktopSettings.defaultLibraryDir ?? ""}
-                    onChange={(event) =>
-                      setDesktopSettings({
-                        ...desktopSettings,
-                        defaultLibraryDir: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-
-                <label className="settings-field">
-                  <span>Desktop default SQLite</span>
-                  <input
-                    className="settings-input"
-                    type="text"
-                    value={desktopSettings.defaultDbPath ?? ""}
-                    onChange={(event) =>
-                      setDesktopSettings({
-                        ...desktopSettings,
-                        defaultDbPath: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-              </article>
+                  <label className="settings-field">
+                    <span>Desktop default SQLite</span>
+                    <input
+                      className="settings-input"
+                      type="text"
+                      value={desktopSettings.defaultDbPath ?? ""}
+                      onChange={(event) =>
+                        setDesktopSettings({
+                          ...desktopSettings,
+                          defaultDbPath: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                </article>
+              ) : null}
 
               <article className="control-card">
                 {backendSettings ? (
                   <>
                     <label className="settings-field">
-                      <span>Backend photo library</span>
+                      <span>Photo library</span>
                       <input
                         className="settings-input"
                         type="text"
@@ -1060,7 +1211,7 @@ function App() {
                     </label>
 
                     <label className="settings-field">
-                      <span>Backend SQLite path</span>
+                      <span>SQLite path</span>
                       <input
                         className="settings-input"
                         type="text"
@@ -1112,9 +1263,9 @@ function App() {
                           })
                         }
                       >
-                        {backendSettings.available_vlm_profiles.map((profileName) => (
-                          <option key={profileName} value={profileName}>
-                            {profileName}
+                        {backendSettings.vlm_profile_catalog.map((profileEntry) => (
+                          <option key={profileEntry.name} value={profileEntry.name}>
+                            {formatProfileOptionLabel(profileEntry)}
                           </option>
                         ))}
                       </select>
@@ -1135,29 +1286,96 @@ function App() {
                           })
                         }
                       >
-                        {backendSettings.available_vlm_profiles.map((profileName) => (
-                          <option key={profileName} value={profileName}>
-                            {profileName}
+                        {backendSettings.vlm_profile_catalog.map((profileEntry) => (
+                          <option key={profileEntry.name} value={profileEntry.name}>
+                            {formatProfileOptionLabel(profileEntry)}
                           </option>
                         ))}
                       </select>
                     </label>
 
+                    {selectedVisionProfile || selectedQueryProfile ? (
+                      <div className="inline-note">
+                        <strong>Current model routing</strong>
+                        <br />
+                        Vision: {selectedVisionProfile?.label ?? backendSettings.effective.vision_profile_name}
+                        {selectedVisionProfile?.summary ? ` — ${selectedVisionProfile.summary}` : ""}
+                        <br />
+                        Query: {selectedQueryProfile?.label ?? backendSettings.effective.query_profile_name}
+                        {selectedQueryProfile?.summary ? ` — ${selectedQueryProfile.summary}` : ""}
+                      </div>
+                    ) : null}
+
+                    {localModelRuntime ? (
+                      <div className="inline-note">
+                        <strong>Local model recommendation</strong>
+                        <br />
+                        {formatRecommendedMachine(localModelRuntime)}
+                        <br />
+                        {localModelRuntime.summary}
+                        <br />
+                        {localModelRuntime.recommendation_basis}
+                        <br />
+                        Ollama: {localModelRuntime.ollama_installed ? "installed" : "not found"}
+                        {localModelRuntime.ollama_reachable ? " and running" : " but not reachable on localhost:11434"}
+                        {recommendedQueryProfile ? (
+                          <>
+                            <br />
+                            Recommended local query: {recommendedQueryProfile.label}
+                          </>
+                        ) : null}
+                        {recommendedVisionProfile ? (
+                          <>
+                            <br />
+                            Recommended local vision: {recommendedVisionProfile.label}
+                          </>
+                        ) : null}
+                        <br />
+                        Hybrid mode is supported: you can keep an API vision profile for indexing and switch only the query profile to local Gemma 4.
+                        {localModelRuntime.commands.length > 0 ? (
+                          <>
+                            <br />
+                            Suggested commands: {localModelRuntime.commands.join("  |  ")}
+                          </>
+                        ) : null}
+                      </div>
+                    ) : null}
+
+                    <div className="toolbar-row">
+                      <button
+                        className="secondary-button"
+                        onClick={() => handleApplyRecommendedLocalQuery()}
+                        disabled={!localModelRuntime?.recommended_query_profile_name}
+                      >
+                        Use recommended local query
+                      </button>
+                      <button
+                        className="secondary-button"
+                        onClick={() => handleApplyRecommendedLocalSetup()}
+                        disabled={
+                          !localModelRuntime?.recommended_query_profile_name
+                          || !localModelRuntime.recommended_vision_profile_name
+                        }
+                      >
+                        Use recommended all-local setup
+                      </button>
+                    </div>
+
                     <p className="settings-help">
-                      Backend app state lives in {backendSettings.effective.app_state_dir}. The
+                      Local app state lives in {backendSettings.effective.app_state_dir}. The
                       persisted settings file is {backendSettings.effective.settings_path}.
                     </p>
                   </>
                 ) : (
                   <p className="settings-help">
-                    Backend settings load after the local backend becomes reachable.
+                    Local settings load after the local service becomes reachable.
                   </p>
                 )}
               </article>
             </div>
           ) : (
             <div className="inline-note">
-              Run the Electron desktop shell to get persisted settings and backend supervision.
+              Local settings will appear as soon as the local service is online.
             </div>
           )}
 
@@ -1176,15 +1394,7 @@ function App() {
               onClick={() => void handleSaveBackendSettings()}
               disabled={!backendSettings || isSavingBackendSettings}
             >
-              {isSavingBackendSettings ? "Applying..." : "Save backend settings"}
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
-              onClick={() => void handleEnsureBackend()}
-              disabled={!desktopRuntime || isEnsuringBackend}
-            >
-              {isEnsuringBackend ? "Connecting..." : "Reconnect backend"}
+              {isSavingBackendSettings ? "Applying..." : "Save local settings"}
             </button>
             <button
               className="secondary-button"
@@ -1208,7 +1418,7 @@ function App() {
               onClick={() => handleUseCurrentLibraryInBackendSettings()}
               disabled={!backendSettings || !selectedFolderPath || !selectedDbPath}
             >
-              Use current in backend
+              Use current locally
             </button>
           </div>
 
@@ -1222,9 +1432,11 @@ function App() {
           </div>
 
           <div className="toolbar-row">
-            <button className="primary-button" type="button" onClick={() => void handlePickFolder()}>
-              {desktopRuntime ? "Choose folder" : "Use backend path"}
-            </button>
+            {desktopRuntime ? (
+              <button className="primary-button" type="button" onClick={() => void handlePickFolder()}>
+                Choose folder
+              </button>
+            ) : null}
             <button
               className="secondary-button"
               type="button"
@@ -1361,7 +1573,7 @@ function App() {
 
           {health.state === "offline" ? (
             <p className="inline-error">
-              Reconnect the backend in Control before generating a draft from your local library.
+              Start the local service before generating a draft from your local library.
             </p>
           ) : null}
           {generationError ? <p className="inline-error">{generationError}</p> : null}

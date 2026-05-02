@@ -53,6 +53,11 @@ Rules:
 - Keep terms short, lowercase, and retrieval-friendly.
 - If a phrase is important, keep it as one term if possible.
 - Use location_text for place constraints like "San Diego Zoo".
+- Treat negative constraints such as "不要", "不包含", "没有", "无人", "no people",
+  and "without people" as excluded_terms, not required_terms.
+- For no-person requests, include broad human-presence exclusions such as
+  people, person, human, portrait, face, selfie, man, woman, child, children,
+  boy, girl, and adult.
 - Never include markdown or extra explanation.
 """
 
@@ -170,15 +175,114 @@ LOCAL_COMPLEX_QUERY_MARKERS = [
     "同时",
     "然后",
 ]
+LOCAL_HUMAN_PRESENCE_TERMS = [
+    "person",
+    "people",
+    "human",
+    "portrait",
+    "face",
+    "selfie",
+    "man",
+    "men",
+    "woman",
+    "women",
+    "child",
+    "children",
+    "kid",
+    "kids",
+    "baby",
+    "babies",
+    "toddler",
+    "adult",
+    "boy",
+    "girl",
+    "couple",
+    "crowd",
+    "barista",
+    "server",
+    "waiter",
+    "waitress",
+    "customer",
+    "worker",
+    "staff",
+    "tourist",
+    "passenger",
+    "driver",
+    "chef",
+    "cook",
+    "student",
+    "visitor",
+]
+LOCAL_HUMAN_PRESENCE_TERM_SET = set(LOCAL_HUMAN_PRESENCE_TERMS)
 LOCAL_EXCLUSION_TERM_MAP: list[tuple[list[str], list[str]]] = [
-    (["不包含人像", "不要人像", "别要人像", "不带人像"], ["person", "people", "portrait", "human"]),
-    (["不包含人物", "不要人物", "别有人物"], ["person", "people", "human"]),
-    (["不包含人", "不要人", "没有人", "无人", "没人"], ["person", "people", "human"]),
-    (["不包含脸", "不要脸部", "不要脸"], ["face", "portrait"]),
+    (
+        ["不包含人像", "不要人像", "别要人像", "不带人像", "不要有人像"],
+        LOCAL_HUMAN_PRESENCE_TERMS,
+    ),
+    (
+        ["不包含人物", "不要人物", "别有人物", "不要有人物", "不带人物"],
+        LOCAL_HUMAN_PRESENCE_TERMS,
+    ),
+    (
+        [
+            "不包含人",
+            "不要人",
+            "不要有人",
+            "不带人",
+            "别带人",
+            "没有人",
+            "不能有人",
+            "不出现人",
+            "无人",
+            "没人",
+            "避开人",
+            "排除人",
+            "no people",
+            "no person",
+            "without people",
+            "without person",
+        ],
+        LOCAL_HUMAN_PRESENCE_TERMS,
+    ),
+    (["不包含脸", "不要脸部", "不要脸"], ["face", "portrait", "selfie"]),
 ]
 LOCAL_SEMANTIC_TERM_MAP: list[tuple[str, list[str]]] = [
+    (
+        "mountain",
+        [
+            "山景",
+            "山景照",
+            "山",
+            "山脉",
+            "山峰",
+            "雪山",
+            "岩山",
+            "群山",
+            "mountain",
+            "mountains",
+            "mountain view",
+            "mountain landscape",
+            "mountain range",
+            "peak",
+            "summit",
+        ],
+    ),
     ("beach", ["海边", "海", "beach", "coast", "ocean"]),
-    ("landscape", ["自然风光", "风景", "风景照", "景色", "landscape", "scenery"]),
+    (
+        "landscape",
+        [
+            "山景",
+            "山景照",
+            "mountain view",
+            "mountain landscape",
+            "自然风光",
+            "风景",
+            "风景照",
+            "景色",
+            "landscape",
+            "scenery",
+        ],
+    ),
     ("nature", ["自然风光", "大自然", "自然景色", "nature"]),
     ("scenery", ["自然风光", "风景", "scenery"]),
     ("quiet", ["安静", "安静一点", "quiet", "calm"]),
@@ -265,6 +369,19 @@ class OpenAICompatibleQueryPlanner:
             required_terms = self._normalize_terms(raw_query.get("required_terms"))
             optional_terms = self._normalize_terms(raw_query.get("optional_terms"))
             excluded_terms = self._normalize_terms(raw_query.get("excluded_terms"))
+            if fallback_plan.query is not None:
+                required_terms = self._merge_unique_terms(
+                    required_terms,
+                    fallback_plan.query.required_terms,
+                )
+                optional_terms = self._merge_unique_terms(
+                    optional_terms,
+                    fallback_plan.query.optional_terms,
+                )
+                excluded_terms = self._merge_unique_terms(
+                    excluded_terms,
+                    fallback_plan.query.excluded_terms,
+                )
             if descriptive_query is None:
                 descriptive_query = self._build_fallback_descriptive_query(
                     original_text=text,
@@ -440,8 +557,10 @@ class OpenAICompatibleQueryPlanner:
             text=term_source,
             excluded_terms=excluded_terms,
         )
+        if self._has_human_presence_exclusion(excluded_terms) and "no people" not in required_terms:
+            required_terms.append("no people")
 
-        if not required_terms and date_from is None and date_to is None:
+        if not required_terms and not excluded_terms and date_from is None and date_to is None:
             return RetrievalPlan(
                 can_fulfill=False,
                 reason="Cannot fulfill your request.",
@@ -449,9 +568,12 @@ class OpenAICompatibleQueryPlanner:
             )
 
         top_k = top_k_override if isinstance(top_k_override, int) and top_k_override > 0 else 9
-        descriptive_query = (
-            f"photo of {' '.join(required_terms[:8])}" if required_terms else normalized_text
-        )
+        if required_terms:
+            descriptive_query = f"photo of {' '.join(required_terms[:8])}"
+        elif excluded_terms:
+            descriptive_query = f"photo without {' '.join(excluded_terms[:8])}"
+        else:
+            descriptive_query = normalized_text
 
         return RetrievalPlan(
             can_fulfill=True,
@@ -486,6 +608,15 @@ class OpenAICompatibleQueryPlanner:
             if normalized and normalized not in seen:
                 seen.append(normalized)
         return seen
+
+    @staticmethod
+    def _merge_unique_terms(primary: list[str], secondary: list[str]) -> list[str]:
+        merged: list[str] = []
+        for term in primary + secondary:
+            normalized = re.sub(r"\s+", " ", str(term).strip().lower())
+            if normalized and normalized not in merged:
+                merged.append(normalized)
+        return merged
 
     @staticmethod
     def _build_fallback_descriptive_query(
@@ -642,6 +773,9 @@ class OpenAICompatibleQueryPlanner:
     @staticmethod
     def _strip_excluded_phrases(text: str) -> str:
         stripped = LOCAL_EXCLUSION_PATTERN.sub(" ", text)
+        for phrases, _mapped_terms in LOCAL_EXCLUSION_TERM_MAP:
+            for phrase in sorted(phrases, key=len, reverse=True):
+                stripped = re.sub(re.escape(phrase), " ", stripped, flags=re.IGNORECASE)
         return re.sub(r"\s+", " ", stripped).strip()
 
     @staticmethod
@@ -672,6 +806,15 @@ class OpenAICompatibleQueryPlanner:
                 if canonical_term not in excluded_tokens and canonical_term not in required_terms:
                     required_terms.append(canonical_term)
         return required_terms
+
+    @staticmethod
+    def _has_human_presence_exclusion(excluded_terms: list[str]) -> bool:
+        normalized_terms = {
+            re.sub(r"\s+", " ", str(term).strip().lower())
+            for term in excluded_terms
+            if str(term).strip()
+        }
+        return bool(normalized_terms.intersection(LOCAL_HUMAN_PRESENCE_TERM_SET))
 
     @staticmethod
     def _extract_location_text(text: str) -> str | None:
