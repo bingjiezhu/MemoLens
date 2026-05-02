@@ -19,6 +19,7 @@ from indexing.vision import OpenAICompatibleVisionClient
 
 
 LOCAL_CORS_HOSTS = {"127.0.0.1", "localhost"}
+DESKTOP_CORS_SCHEMES = {"memolens"}
 
 
 def _resolve_allowed_origin(origin: str | None) -> str | None:
@@ -32,6 +33,10 @@ def _resolve_allowed_origin(origin: str | None) -> str | None:
         return "null"
 
     parsed = urlparse(normalized)
+    if parsed.scheme in DESKTOP_CORS_SCHEMES:
+        return normalized
+    if parsed.scheme == "file":
+        return normalized
     if parsed.scheme not in {"http", "https"}:
         return None
     if parsed.hostname not in LOCAL_CORS_HOSTS:

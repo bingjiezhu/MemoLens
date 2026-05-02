@@ -36,20 +36,6 @@ function normalizeOptionalPath(value: unknown): string | null {
   return resolve(trimmed);
 }
 
-function normalizeUrl(value: unknown, fallback: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return fallback;
-  }
-  const normalized = value.trim().replace(/\/+$/, "");
-  if (
-    normalized === "http://127.0.0.1:5000" ||
-    normalized === "http://localhost:5000"
-  ) {
-    return fallback;
-  }
-  return normalized;
-}
-
 function normalizePythonCommand(value: unknown, fallback: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     return fallback;
@@ -69,7 +55,6 @@ function normalizeSettings(
   const defaultDbPath = normalizeOptionalPath(raw.defaultDbPath) ?? defaults.defaultDbPath;
 
   return {
-    backendUrl: normalizeUrl(raw.backendUrl, defaults.backendUrl),
     pythonCommand: normalizePythonCommand(raw.pythonCommand, defaults.pythonCommand),
     autoStartBackend:
       typeof raw.autoStartBackend === "boolean"
@@ -84,7 +69,6 @@ export async function loadDesktopSettings(projectRoot: string): Promise<DesktopS
   const defaultLibraryDir = resolve(projectRoot, "local-photo-library");
   const appStateDir = getCanonicalAppStateDir();
   const defaults: DesktopSettings = {
-    backendUrl: DEFAULT_BACKEND_URL,
     pythonCommand: await getDefaultPythonCommand(projectRoot),
     autoStartBackend: true,
     defaultLibraryDir,

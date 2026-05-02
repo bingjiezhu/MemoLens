@@ -42,62 +42,142 @@ vlm:
   query_active: minimax_m27
   profiles:
     openai_gpt41_mini:
+      label: GPT-4.1 mini (API / OpenAI)
       provider: openai
       base_url: https://api.openai.com/v1
       api_key_env: OPENAI_API_KEY
       model: gpt-4.1-mini
+      execution: api
+      capabilities: [text, image]
+      summary: Flexible API fallback for text planning and multimodal tasks.
       temperature: 0.1
       max_tokens: 400
       response_format:
         type: json_object
     ollama_qwen35_27b:
+      label: Qwen 3.5 27B (Local / Ollama)
       provider: ollama
       base_url: http://localhost:11434/v1
       model: qwen3.5:27b
+      execution: local
+      capabilities: [text]
+      summary: Existing local text profile for offline query planning and copy generation.
       temperature: 0.1
       max_tokens: 400
       response_format:
         type: json_object
+    ollama_gemma4_e2b:
+      label: Gemma 4 E2B (Local / Ollama)
+      provider: ollama
+      base_url: http://localhost:11434/v1
+      model: gemma4:e2b
+      execution: local
+      family: gemma4
+      capabilities: [text, image]
+      summary: Smallest Gemma 4 option for lightweight local use and fallback laptops.
+      temperature: 0.1
+      max_tokens: 500
+      response_format:
+        type: json_object
+    ollama_gemma4_e4b:
+      label: Gemma 4 E4B (Local / Ollama)
+      provider: ollama
+      base_url: http://localhost:11434/v1
+      model: gemma4:e4b
+      execution: local
+      family: gemma4
+      capabilities: [text, image]
+      summary: Best lightweight Gemma 4 profile for local multimodal work on laptops.
+      temperature: 0.1
+      max_tokens: 500
+      response_format:
+        type: json_object
+    ollama_gemma4_26b:
+      label: Gemma 4 26B A4B (Local / Ollama)
+      provider: ollama
+      base_url: http://localhost:11434/v1
+      model: gemma4:26b
+      execution: local
+      family: gemma4
+      capabilities: [text, image]
+      summary: Balanced high-quality local Gemma 4 profile for desktop-class machines.
+      temperature: 0.1
+      max_tokens: 700
+      response_format:
+        type: json_object
+    ollama_gemma4_31b:
+      label: Gemma 4 31B (Local / Ollama)
+      provider: ollama
+      base_url: http://localhost:11434/v1
+      model: gemma4:31b
+      execution: local
+      family: gemma4
+      capabilities: [text, image]
+      summary: Highest-quality local Gemma 4 option for high-memory workstations.
+      temperature: 0.1
+      max_tokens: 700
+      response_format:
+        type: json_object
     dashscope_qwen_vl_plus:
+      label: Qwen VL Plus (API / DashScope)
       provider: dashscope
       base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
       api_key_env: DASHSCOPE_API_KEY
       model: qwen-vl-plus
+      execution: api
+      capabilities: [text, image]
+      summary: API vision option with stronger Chinese-language bias.
       temperature: 0.1
       max_tokens: 400
       response_format:
         type: json_object
     minimax_text01:
+      label: MiniMax Text 01 (API / MiniMax)
       provider: minimax
       base_url: https://api.minimax.io/v1
       api_key_env: MINIMAX_KEY
       model: MiniMax-Text-01
+      execution: api
+      capabilities: [text]
+      summary: API text profile for query planning and copywriting.
       temperature: 0.1
       max_tokens: 400
       response_format:
         type: json_object
     minimax_m27:
+      label: MiniMax M2.7 (API / MiniMax)
       provider: minimax
       base_url: https://api.minimax.io/v1
       api_key_env: MINIMAX_KEY
       model: MiniMax-M2.7
+      execution: api
+      capabilities: [text]
+      summary: Current default API query profile.
       temperature: 0.1
       max_tokens: 400
       response_format:
         type: json_object
     minimax_vl01:
+      label: MiniMax VL 01 (API / MiniMax)
       provider: minimax
       base_url: https://api.minimax.io/v1
       api_key_env: MINIMAX_KEY
       model: MiniMax-VL-01
+      execution: api
+      capabilities: [text, image]
+      summary: Current default API vision profile for indexing and copy grounding.
       temperature: 0.1
       max_tokens: 400
       response_format:
         type: json_object
     vertex_gemini25_flash:
+      label: Gemini 2.5 Flash (API / Vertex)
       provider: vertex
       base_url: https://us-central1-aiplatform.googleapis.com/v1
       model: gemini-2.5-flash
+      execution: api
+      capabilities: [text, image]
+      summary: Strong API fallback when you want Gemini quality without local inference.
       temperature: 0.1
       max_tokens: 500
       response_format:

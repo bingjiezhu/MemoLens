@@ -20,8 +20,23 @@ import type {
 } from "../src/query/types.js";
 
 const require = createRequire(import.meta.url);
-const { app, BrowserWindow, dialog, ipcMain } =
+const { app, BrowserWindow, dialog, ipcMain, protocol, net } =
   require("electron") as typeof Electron.CrossProcessExports;
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "memolens-local",
+    privileges: {
+      standard: true,
+      secure: true,
+      bypassCSP: true,
+      allowServiceWorkers: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+]);
 
 // Linux dev setups often lack a correctly configured chrome-sandbox helper.
 // MemoLens runs as a local desktop tool, so we disable the setuid sandbox here
@@ -59,6 +74,29 @@ interface ActiveIndexingJob {
 
 let activeIndexingJob: ActiveIndexingJob | null = null;
 
+/**
+ * Allow the renderer (loaded from file://) to make requests to the local
+ * backend at 127.0.0.1:5519.  We intercept every response from that origin
+ * and ensure the CORS headers the browser needs are present, regardless of
+ * what the backend itself returns.  This is safe because MemoLens only ever
+ * connects to a trusted, user-started localhost service.
+ */
+function configureLocalBackendAccess(): void {
+  const { session } = require("electron") as typeof Electron.CrossProcessExports;
+  const backendPattern = "http://127.0.0.1:5519/*";
+
+  session.defaultSession.webRequest.onHeadersReceived(
+    { urls: [backendPattern] },
+    (details, callback) => {
+      const headers = { ...details.responseHeaders };
+      headers["Access-Control-Allow-Origin"] = ["*"];
+      headers["Access-Control-Allow-Methods"] = ["GET, POST, PUT, OPTIONS"];
+      headers["Access-Control-Allow-Headers"] = ["Content-Type, Authorization"];
+      callback({ responseHeaders: headers });
+    },
+  );
+}
+
 function createWindow(): Electron.BrowserWindow {
   const window = new BrowserWindow({
     width: 1560,
@@ -70,6 +108,10 @@ function createWindow(): Electron.BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // Allow the file:// renderer to load images/resources from http://127.0.0.1.
+      // This is safe because MemoLens is a local-only desktop app that only
+      // communicates with its own managed backend on localhost.
+      webSecurity: false,
       preload: join(CURRENT_DIR, "preload.js"),
     },
   });
@@ -328,7 +370,7 @@ ipcMain.handle(
     const folderPath = resolve(options.folderPath);
     const settings = await loadDesktopSettings(PROJECT_ROOT);
     const dbPath = resolve(options.dbPath ?? resolveSelectedDbPath(settings, folderPath));
-    const apiBase = options.apiBase?.trim() || settings.backendUrl || DEFAULT_BACKEND_URL;
+    const apiBase = DEFAULT_BACKEND_URL;
     const imageFiles = await collectImageFiles(folderPath);
 
     const errors: string[] = [];
@@ -477,6 +519,20 @@ ipcMain.handle("memolens:resume-indexing", async (): Promise<boolean> => {
 });
 
 app.whenReady().then(() => {
+  configureLocalBackendAccess();
+
+  protocol.handle("memolens-local", (request) => {
+    try {
+      const parsed = new URL(request.url);
+      const decodedPath = decodeURIComponent(parsed.pathname);
+      console.log(`[memolens-local] Serving: ${decodedPath}`);
+      return net.fetch(pathToFileURL(decodedPath).toString());
+    } catch (error) {
+      console.error("[memolens-local] Failed to parse URL:", request.url, error);
+      return new Response("Not found", { status: 404 });
+    }
+  });
+
   void loadDesktopSettings(PROJECT_ROOT)
     .then((settings) => ensureBackendReady(PROJECT_ROOT, settings))
     .then((status) => {
@@ -495,6 +551,12 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
+  });
+
+  app.on("browser-window-created", (_, win) => {
+    win.webContents.on("console-message", (_event, _level, message, line, sourceId) => {
+      console.log(`[Renderer] ${message} (${sourceId}:${line})`);
+    });
   });
 });
 

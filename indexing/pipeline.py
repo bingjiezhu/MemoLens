@@ -5,6 +5,7 @@ from pathlib import Path
 
 from core.config import Settings
 from core.db import ImageIndexRepository
+from core.image_quality import score_image_bytes, score_image_file
 from core.schemas import (
     IndexedImageSummary,
     IndexingJobResult,
@@ -133,6 +134,7 @@ class IndexingService:
                     source_name=prepared_image.source_name,
                 )
                 combined_text_embedding_blob = self._encode_combined_text(combined_text)
+                quality_scores = score_image_file(image_path, text=combined_text)
 
                 now_iso = utc_now_iso()
                 record = StoredImageRecord(
@@ -163,6 +165,10 @@ class IndexingService:
                     embedding_blob=embedding.astype("float32").tobytes(),
                     created_at=now_iso,
                     updated_at=now_iso,
+                    aesthetic_score=quality_scores.aesthetic_score,
+                    aesthetic_model=quality_scores.model,
+                    technical_quality_score=quality_scores.technical_quality_score,
+                    aesthetic_updated_at=now_iso,
                 )
                 if indexing_request.persist_to_server:
                     self.repository.upsert(record)
@@ -290,6 +296,7 @@ class IndexingService:
                     source_name=prepared_image.source_name,
                 )
                 combined_text_embedding_blob = self._encode_combined_text(combined_text)
+                quality_scores = score_image_bytes(raw_bytes, text=combined_text)
 
                 now_iso = utc_now_iso()
                 record = StoredImageRecord(
@@ -320,6 +327,10 @@ class IndexingService:
                     embedding_blob=embedding.astype("float32").tobytes(),
                     created_at=now_iso,
                     updated_at=now_iso,
+                    aesthetic_score=quality_scores.aesthetic_score,
+                    aesthetic_model=quality_scores.model,
+                    technical_quality_score=quality_scores.technical_quality_score,
+                    aesthetic_updated_at=now_iso,
                 )
                 if indexing_request.persist_to_server:
                     self.repository.upsert(record)

@@ -1,12 +1,12 @@
 # MemoLens
 
-MemoLens is a local photo agent for personal image libraries. It combines natural-language search, MiniMax-powered image understanding, lightweight semantic indexing, SQLite storage, and result copy generation into one workflow, so you can search your own photos with plain language, filter and curate candidate sets, and produce results that are easier to review or share.
+MemoLens is a local photo agent for personal image libraries. It combines natural-language search, model-pluggable image understanding, lightweight semantic indexing, SQLite storage, and result copy generation into one workflow, so you can search your own photos with plain language, filter and curate candidate sets, and produce results that are easier to review or share.
 
 This repository is not just an image browser. It is an experimental workspace built around the idea of local memory retrieval:
 
 - Electron + React provide the desktop interface
 - Flask exposes indexing and retrieval APIs
-- The Python model layer handles MiniMax-first image understanding, semantic indexing, geo enrichment, and ranking
+- The Python model layer handles pluggable vision and text profiles, semantic indexing, geo enrichment, and ranking
 - `photon-bot/` reuses the same backend capabilities through Discord / iMessage entry points
 
 ![MemoLens architecture](docs/assets/memolens-architecture.png)
@@ -28,15 +28,17 @@ Typical use cases include:
 ## Current Capabilities
 
 - Local photo indexing: scan image folders and extract file metadata, dimensions, EXIF timestamps, and GPS data
-- Image understanding: call MiniMax-first vision workflows to generate `description`, `tags`, and a conservative `location_hint`
+- Image understanding: call the configured vision profile to generate `description`, `tags`, and a conservative `location_hint`
 - Geo enrichment: reverse geocode coordinates into `place_name` and `country`
 - Semantic indexing: generate lightweight semantic vectors and store them in SQLite without requiring local `torch/transformers` installs
 - Natural-language retrieval: rewrite user prompts into structured queries, then rank with time, location, tag, and text similarity signals
-- Diversity reranking: suppress near-duplicates and improve variety inside the top candidate pool
+- Quality-aware diversity reranking: suppress near-duplicates, prefer stronger images inside similar groups, and keep result sets visually varied
+- Browser-safe previews: serve local images through JPEG preview endpoints so Electron can display camera formats more reliably
 - Copy generation: send retrieved images into a follow-up copywriting stage to produce title, body text, and highlights
+- Local model guidance: detect local Ollama/Gemma options and suggest task-specific model profiles from the desktop control panel
 - Multi-entry support: the same backend currently powers both the desktop app and `photon-bot`
 
-When a public MiniMax image-understanding model is unavailable for the configured account, MemoLens automatically falls back to local metadata-derived descriptions and still keeps MiniMax text models in the loop for query planning and copy generation.
+When an external vision profile is unavailable, MemoLens can fall back to local metadata-derived descriptions and keep the rest of the query and copy workflow available through the configured text profile.
 
 ## Architecture Overview
 
@@ -45,17 +47,20 @@ The main workflow in this repository looks like this:
 1. A local photo folder enters the indexing pipeline, which extracts EXIF data, optional geo metadata, visual descriptions, and lightweight semantic vectors.
 2. Processed records are written into the SQLite `image_index` table, which acts as the retrieval foundation.
 3. A natural-language user prompt is sent to the query planner and rewritten into a structured query.
-4. The retrieval service ranks candidates using time, location, text similarity, and tag matching, then applies diversity reranking.
+4. The retrieval service ranks candidates using time, location, text similarity, tag matching, aesthetic score, and near-duplicate penalties.
 5. Final results can be returned to the Electron desktop UI or adapted into chat responses through `photon-bot`.
 6. Retrieved images can then go through the copywriter step to generate titles, captions, and notes.
 
-By default, the current `config.yaml` is set up to use:
+The current `config.yaml` keeps separate profiles for vision and query/copy work. The default profile can be changed through environment variables or the desktop control panel.
 
-- `MiniMax-VL-01` as the active vision profile
-- `MiniMax-M2.7` as the active query profile
+Included profile families include:
+
+- MiniMax API profiles
+- Vertex AI / Gemini profiles
+- OpenAI-compatible API profiles
+- DashScope profiles
+- Ollama local profiles, including Gemma 4 options
 - `semantic_hash` as the default local semantic vector backend
-
-These can all be changed through `config.yaml` or environment variables.
 
 ## Repository Structure
 
@@ -100,10 +105,16 @@ export IMAGE_LIBRARY_DIR="/absolute/path/to/your/photos"
 export SQLITE_DB_PATH="$IMAGE_LIBRARY_DIR/photo_index.db"
 ```
 
-The default model path is MiniMax-first, so you will usually want:
+If you use the current MiniMax API profiles, set:
+
+```dotenv
+MINIMAX_KEY=
+```
+
+For a local model route through Ollama, select one of the `ollama_gemma4_*` profiles in the desktop control panel or set:
 
 ```bash
-export MINIMAX_KEY="your-key"
+export QUERY_VLM_PROFILE=ollama_gemma4_e4b
 ```
 
 If you want to use Vertex AI on a Mac that already has `gcloud` authorization, MemoLens now supports Vertex provider profiles as well. The practical setup is:
@@ -201,6 +212,7 @@ The backend listens on `http://127.0.0.1:5519` by default and exposes these core
 - `POST /v1/indexing/jobs`
 - `POST /v1/retrieval/query`
 - `GET /v1/library/files/<relative_path>`
+- `GET /v1/library/previews/<relative_path>` for browser-safe JPEG previews of local photos
 
 The default bind host is loopback-only. If you intentionally need another bind address for a controlled environment, set:
 
@@ -209,6 +221,43 @@ export MEMOLENS_BACKEND_HOST="0.0.0.0"
 ```
 
 Settings writes, local indexing, and direct library file serving are designed for trusted local use. The browser fallback is meant to come from `localhost` or the Electron shell, not from arbitrary remote origins.
+
+## Privacy and Local Data
+
+MemoLens is designed to keep personal photo data out of the Git repository:
+
+- Source code, configuration templates, and helper scripts are safe to commit.
+- API keys should live in `.env` or provider-specific environment variables; `.env` files are ignored.
+- Local photo folders, generated SQLite databases, runtime logs, Electron caches, build output, and exported PDFs are ignored.
+- The default `config.yaml` uses `./local-photo-library` only as a placeholder. Point it at your real library through the app settings or environment variables.
+
+Before publishing changes, run:
+
+```bash
+git status --short
+npm run verify:local
+```
+
+The verification command exercises local settings, indexing, retrieval, preview rendering, CORS restrictions, and TypeScript checks.
+
+## Quality Scoring and Backfill
+
+Retrieval can use an offline `aesthetic_score` stored in SQLite. New indexing runs write this score automatically. Existing indexes can be upgraded without re-running vision models:
+
+```bash
+npm run quality:backfill -- --force
+```
+
+The default scorer is a local, dependency-light estimator that combines composition cues, sharpness, exposure, contrast, and resolution. If you generate LAION/NIMA-style scores outside MemoLens, import them with:
+
+```bash
+npm run quality:backfill -- \
+  --scorer external-json \
+  --scores-json scores.json \
+  --model-label laion-aesthetic
+```
+
+Accepted JSON keys include `id`, `relative_path`, or `filename`, plus `score` or `aesthetic_score`.
 
 If you want to work on the renderer separately:
 
@@ -264,7 +313,7 @@ This repository already has a runnable local-first prototype path, but it still 
 
 - `src/query/` already defines the intended frontend query boundary
 - The active Python query stack still lives under `frontend/querying/` and should move into a backend-owned package in a later cleanup
-- The default stack now assumes MiniMax for planning, image understanding, and copy generation, while semantic vectors are generated locally from MiniMax-produced descriptions and tags
+- The model stack is configurable by task: vision can stay on an API profile while query planning and copy generation move to a local Ollama profile
 - When the backend is unavailable, the UI can fall back to a local mock curation flow so interface work can continue
 - The desktop shell now includes a visible control center for runtime settings and can auto-start the local Python backend
 - The root README now documents the whole system rather than only the frontend submodule

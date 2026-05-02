@@ -65,6 +65,30 @@ class VLMProfile:
     response_format: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class VLMProfileCatalogEntry:
+    name: str
+    label: str
+    provider: str
+    model: str
+    execution: str
+    capabilities: tuple[str, ...]
+    family: str | None
+    summary: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "label": self.label,
+            "provider": self.provider,
+            "model": self.model,
+            "execution": self.execution,
+            "capabilities": list(self.capabilities),
+            "family": self.family,
+            "summary": self.summary,
+        }
+
+
 @dataclass
 class Settings:
     project_root: Path
@@ -106,6 +130,7 @@ class Settings:
     semantic_vector_dimensions: int
     process_image_width: int
     available_vlm_profiles: tuple[str, ...]
+    vlm_profile_catalog: tuple[VLMProfileCatalogEntry, ...]
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -209,6 +234,7 @@ class Settings:
             base_url_override_env="QUERY_BASE_URL",
             legacy_base_url_override_env=None,
         )
+        vlm_profile_catalog = _build_vlm_profile_catalog(raw_profiles)
 
         return cls(
             project_root=project_root,
@@ -291,7 +317,8 @@ class Settings:
                     or app_config.get("process_image_width", 512)
                 )
             ),
-            available_vlm_profiles=tuple(sorted(raw_profiles)),
+            available_vlm_profiles=tuple(entry.name for entry in vlm_profile_catalog),
+            vlm_profile_catalog=vlm_profile_catalog,
         )
 
     def ensure_directories(self) -> None:
@@ -394,6 +421,8 @@ def _resolve_profile_api_key(
 
     if not api_key and profile_name.startswith("ollama"):
         api_key = os.getenv("OLLAMA_API_KEY")
+    if not api_key and provider == "ollama":
+        api_key = os.getenv("OLLAMA_API_KEY") or "ollama"
     if not api_key and provider == "openai":
         api_key = os.getenv("OPENAI_API_KEY")
     if not api_key and provider == "dashscope":
@@ -411,3 +440,101 @@ def _default_image_library_dir(project_root: Path) -> Path:
     if pictures_dir.exists() and pictures_dir.is_dir():
         return pictures_dir / "MemoLens Library"
     return project_root / "local-photo-library"
+
+
+def _build_vlm_profile_catalog(
+    raw_profiles: dict[str, Any],
+) -> tuple[VLMProfileCatalogEntry, ...]:
+    entries: list[VLMProfileCatalogEntry] = []
+
+    for profile_name, raw_profile in raw_profiles.items():
+        if not isinstance(raw_profile, dict):
+            continue
+
+        provider = str(raw_profile.get("provider", "openai")).strip().lower()
+        model = str(raw_profile.get("model", "")).strip()
+        label = str(raw_profile.get("label") or _humanize_profile_name(profile_name)).strip()
+        execution = str(raw_profile.get("execution") or _infer_execution(provider)).strip().lower()
+        raw_capabilities = raw_profile.get("capabilities")
+        capabilities = _normalize_capabilities(raw_capabilities, provider=provider, model=model)
+        family = _normalize_optional_text(raw_profile.get("family"))
+        summary = _normalize_optional_text(raw_profile.get("summary"))
+
+        entries.append(
+            VLMProfileCatalogEntry(
+                name=profile_name,
+                label=label,
+                provider=provider,
+                model=model,
+                execution=execution or "api",
+                capabilities=capabilities,
+                family=family,
+                summary=summary,
+            )
+        )
+
+    return tuple(entries)
+
+
+def _infer_execution(provider: str) -> str:
+    if provider == "ollama":
+        return "local"
+    return "api"
+
+
+def _normalize_capabilities(
+    raw_capabilities: object,
+    *,
+    provider: str,
+    model: str,
+) -> tuple[str, ...]:
+    if isinstance(raw_capabilities, list):
+        normalized = [
+            str(item).strip().lower()
+            for item in raw_capabilities
+            if str(item).strip()
+        ]
+        return tuple(dict.fromkeys(normalized))
+
+    inferred = ["text"]
+    model_lower = model.lower()
+    if provider in {"vertex", "minimax"} or "gemini" in model_lower or "vl" in model_lower or "gemma4" in model_lower:
+        inferred.append("image")
+    return tuple(dict.fromkeys(inferred))
+
+
+def _normalize_optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _humanize_profile_name(profile_name: str) -> str:
+    parts = [segment for segment in profile_name.replace("-", "_").split("_") if segment]
+    humanized: list[str] = []
+    for part in parts:
+        upper = part.upper()
+        if upper in {"AI", "API", "VLM", "GPT"}:
+            humanized.append(upper)
+            continue
+        if part.lower() == "ollama":
+            humanized.append("Ollama")
+            continue
+        if part.lower() == "openai":
+            humanized.append("OpenAI")
+            continue
+        if part.lower() == "vertex":
+            humanized.append("Vertex")
+            continue
+        if part.lower() == "minimax":
+            humanized.append("MiniMax")
+            continue
+        if part.lower() == "dashscope":
+            humanized.append("DashScope")
+            continue
+        if part.lower().startswith("gemma"):
+            humanized.append(part.replace("gemma", "Gemma "))
+            continue
+        humanized.append(part.capitalize())
+    return " ".join(humanized) if humanized else profile_name

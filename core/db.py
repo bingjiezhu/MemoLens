@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS image_index (
     combined_text_embedding BLOB,
     embedding_backend TEXT NOT NULL,
     embedding BLOB NOT NULL,
+    aesthetic_score REAL,
+    aesthetic_model TEXT,
+    technical_quality_score REAL,
+    aesthetic_updated_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -66,6 +70,7 @@ class ImageIndexRepository:
                 columns = self._column_names(connection, "image_index")
 
             self._ensure_text_columns(connection, columns)
+            self._ensure_quality_columns(connection, columns)
             self._ensure_indexes(connection)
 
     def upsert(self, record: StoredImageRecord) -> None:
@@ -96,10 +101,14 @@ class ImageIndexRepository:
                     combined_text_embedding,
                     embedding_backend,
                     embedding,
+                    aesthetic_score,
+                    aesthetic_model,
+                    technical_quality_score,
+                    aesthetic_updated_at,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     filename = excluded.filename,
                     relative_path = excluded.relative_path,
@@ -120,6 +129,10 @@ class ImageIndexRepository:
                     combined_text_embedding = excluded.combined_text_embedding,
                     embedding_backend = excluded.embedding_backend,
                     embedding = excluded.embedding,
+                    aesthetic_score = excluded.aesthetic_score,
+                    aesthetic_model = excluded.aesthetic_model,
+                    technical_quality_score = excluded.technical_quality_score,
+                    aesthetic_updated_at = excluded.aesthetic_updated_at,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -144,6 +157,10 @@ class ImageIndexRepository:
                     record.combined_text_embedding_blob,
                     record.embedding_backend,
                     record.embedding_blob,
+                    record.aesthetic_score,
+                    record.aesthetic_model,
+                    record.technical_quality_score,
+                    record.aesthetic_updated_at,
                     record.created_at,
                     record.updated_at,
                 ),
@@ -242,13 +259,23 @@ class ImageIndexRepository:
                 "SELECT COUNT(*) AS count FROM image_index WHERE description LIKE ?",
                 (f"{FALLBACK_DESCRIPTION_PREFIX}%",),
             ).fetchone()
+            columns = self._column_names(connection, "image_index")
+            if "aesthetic_score" in columns:
+                aesthetic_row = connection.execute(
+                    "SELECT COUNT(*) AS count FROM image_index WHERE aesthetic_score IS NOT NULL"
+                ).fetchone()
+            else:
+                aesthetic_row = None
 
         total_records = int(total_row["count"]) if total_row is not None else 0
         fallback_records = int(fallback_row["count"]) if fallback_row is not None else 0
+        aesthetic_records = int(aesthetic_row["count"]) if aesthetic_row is not None else 0
         fallback_ratio = (fallback_records / total_records) if total_records > 0 else 0.0
         summary["total_records"] = total_records
         summary["fallback_records"] = fallback_records
         summary["fallback_ratio"] = fallback_ratio
+        summary["aesthetic_records"] = aesthetic_records
+        summary["aesthetic_missing"] = max(0, total_records - aesthetic_records)
         summary["needs_reindex"] = total_records > 0 and fallback_ratio >= 0.25
         return summary
 
@@ -273,6 +300,9 @@ class ImageIndexRepository:
                 id,
                 filename,
                 relative_path,
+                file_size,
+                width,
+                height,
                 taken_at,
                 place_name,
                 country,
@@ -282,7 +312,11 @@ class ImageIndexRepository:
                 text_embedding_model,
                 combined_text_embedding,
                 embedding_backend,
-                embedding
+                embedding,
+                aesthetic_score,
+                aesthetic_model,
+                technical_quality_score,
+                aesthetic_updated_at
             FROM image_index
         """
         base_where_sql = ""
@@ -319,6 +353,37 @@ class ImageIndexRepository:
                 if filtered_rows:
                     return filtered_rows
             return connection.execute(sql, params).fetchall()
+
+    def update_image_quality(
+        self,
+        *,
+        image_id: str,
+        aesthetic_score: float,
+        aesthetic_model: str,
+        technical_quality_score: float | None,
+        aesthetic_updated_at: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE image_index
+                SET
+                    aesthetic_score = ?,
+                    aesthetic_model = ?,
+                    technical_quality_score = ?,
+                    aesthetic_updated_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    aesthetic_score,
+                    aesthetic_model,
+                    technical_quality_score,
+                    aesthetic_updated_at,
+                    aesthetic_updated_at,
+                    image_id,
+                ),
+            )
 
     def delete_by_relative_path(self, relative_path: str, keep_id: str | None = None) -> None:
         sql = "DELETE FROM image_index WHERE relative_path = ?"
@@ -369,6 +434,17 @@ class ImageIndexRepository:
         if "combined_text_embedding" not in columns:
             connection.execute("ALTER TABLE image_index ADD COLUMN combined_text_embedding BLOB")
 
+    @staticmethod
+    def _ensure_quality_columns(connection: sqlite3.Connection, columns: set[str]) -> None:
+        if "aesthetic_score" not in columns:
+            connection.execute("ALTER TABLE image_index ADD COLUMN aesthetic_score REAL")
+        if "aesthetic_model" not in columns:
+            connection.execute("ALTER TABLE image_index ADD COLUMN aesthetic_model TEXT")
+        if "technical_quality_score" not in columns:
+            connection.execute("ALTER TABLE image_index ADD COLUMN technical_quality_score REAL")
+        if "aesthetic_updated_at" not in columns:
+            connection.execute("ALTER TABLE image_index ADD COLUMN aesthetic_updated_at TEXT")
+
     def _migrate_legacy_schema(self, connection: sqlite3.Connection) -> None:
         connection.execute("DROP TABLE IF EXISTS image_index_new")
         connection.execute(CREATE_TABLE_SQL.replace("image_index", "image_index_new"))
@@ -397,6 +473,10 @@ class ImageIndexRepository:
                 combined_text_embedding,
                 embedding_backend,
                 embedding,
+                aesthetic_score,
+                aesthetic_model,
+                technical_quality_score,
+                aesthetic_updated_at,
                 created_at,
                 updated_at
             )
@@ -429,6 +509,10 @@ class ImageIndexRepository:
                     WHEN dino_embedding IS NOT NULL AND length(dino_embedding) > 0 THEN dino_embedding
                     ELSE clip_embedding
                 END,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
                 created_at,
                 updated_at
             FROM image_index

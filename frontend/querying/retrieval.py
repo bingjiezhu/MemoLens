@@ -8,11 +8,17 @@ import time
 from collections import Counter
 from datetime import datetime
 from difflib import SequenceMatcher
+from pathlib import Path
 
 import numpy as np
 
 from core.config import Settings
 from core.db import ImageIndexRepository
+from core.image_quality import (
+    metadata_quality_score as score_metadata_quality,
+    scene_composition_score as score_scene_composition,
+    score_image_file,
+)
 from core.schemas import RetrievedImageSummary, RetrievalPlan, RetrievalRequest, RetrievalResponse
 from core.semantic_hints import expand_text_with_hints
 from core.text_embeddings import TextEmbeddingService, build_combined_text
@@ -20,17 +26,198 @@ from core.text_embeddings import TextEmbeddingService, build_combined_text
 from .planner import OpenAICompatibleQueryPlanner
 
 
-MMR_LAMBDA = 0.6
-CANDIDATE_POOL_FACTOR = 6
-MIN_CANDIDATE_POOL = 36
-NEAR_DUPLICATE_SIMILARITY = 0.6
+MMR_LAMBDA = 0.45
+CANDIDATE_POOL_FACTOR = 12
+MIN_CANDIDATE_POOL = 80
+NEAR_DUPLICATE_SIMILARITY = 0.58
+NEAR_DUPLICATE_KEEPER_SIMILARITY = 0.78
+HIGH_RELEVANCE_DIVERSITY_FLOOR = 0.70
+SOFT_RELEVANCE_DIVERSITY_FLOOR = 0.35
 DESCRIPTION_SIMILARITY_WEIGHT = 4.0
 TEXT_EMBEDDING_WEIGHT = 6.0
 TERM_SIMILARITY_WEIGHT = 0.45
 EXCLUDED_TERM_WEIGHT = 1.1
+SCENE_COMPOSITION_WEIGHT = 0.55
+QUALITY_SELECTION_WEIGHT = 0.25
 EXCLUDED_TERM_HARD_FILTER_THRESHOLD = 0.94
 TERM_SIMILARITY_MIN_MATCH = 0.82
 TERM_SIMILARITY_SUBSTRING_MATCH = 0.94
+HUMAN_PRESENCE_EXCLUSION_TERMS = [
+    "person",
+    "people",
+    "human",
+    "portrait",
+    "face",
+    "selfie",
+    "man",
+    "men",
+    "woman",
+    "women",
+    "child",
+    "children",
+    "kid",
+    "kids",
+    "baby",
+    "babies",
+    "toddler",
+    "adult",
+    "boy",
+    "girl",
+    "couple",
+    "crowd",
+    "barista",
+    "server",
+    "waiter",
+    "waitress",
+    "customer",
+    "worker",
+    "staff",
+    "tourist",
+    "passenger",
+    "driver",
+    "chef",
+    "cook",
+    "student",
+    "visitor",
+]
+HARD_REQUIRED_TERM_GROUPS = {
+    "mountain": [
+        "mountain",
+        "mountains",
+        "peak",
+        "summit",
+        "cliff",
+        "valley",
+    ],
+}
+ABSENCE_TERM_TOKEN_FILTERS = {
+    "no person": {"person", "human"},
+    "without person": {"person", "human"},
+    "no human": {"person", "human"},
+    "without human": {"person", "human"},
+    "no face": {"face"},
+    "without face": {"face"},
+}
+LANDSCAPE_INTENT_TERMS = {"landscape", "scenery", "mountain landscape", "mountain view"}
+WIDE_SCENE_TERMS = [
+    "wide shot",
+    "panoramic",
+    "panorama",
+    "vista",
+    "landscape",
+    "vast",
+    "range",
+    "valley",
+    "meadow",
+    "sky",
+]
+PRIMARY_WIDE_SCENE_TERMS = [
+    "wide shot",
+    "panoramic",
+    "panorama",
+    "vista",
+    "vast",
+]
+CLOSE_FOCUS_TERMS = [
+    "close up",
+    "closeup",
+    "macro",
+    "detail",
+    "tree trunk",
+    "path",
+    "road",
+]
+DIVERSITY_GENERIC_TERMS = {
+    "and",
+    "with",
+    "under",
+    "scene",
+    "tag",
+    "tags",
+    "photo",
+    "image",
+    "picture",
+    "nature",
+    "natural",
+    "outdoor",
+    "daylight",
+    "people",
+    "person",
+    "human",
+    "none",
+    "mountain",
+    "mountains",
+    "landscape",
+    "forest",
+    "trees",
+    "tree",
+    "rocky",
+    "green",
+    "blue",
+    "show",
+    "view",
+    "capture",
+    "possible",
+    "location",
+    "landmark",
+    "hint",
+    "keyword",
+    "yosemite",
+    "national",
+    "park",
+    "california",
+}
+DISFAVORED_LANDSCAPE_CONTEXT_TERMS = [
+    "airplane",
+    "airport",
+    "runway",
+    "aerial view",
+    "airplane window",
+    "monorail",
+    "highway",
+    "parking lot",
+    "hotel building",
+    "painting",
+    "artwork",
+    "framed",
+    "displayed",
+    "wall next",
+    "tree trunk",
+    "close up",
+    "closeup",
+]
+QUALITY_POSITIVE_TERMS = [
+    "wide shot",
+    "panoramic",
+    "panorama",
+    "vista",
+    "scenic",
+    "majestic",
+    "clear sky",
+    "natural light",
+    "golden light",
+    "soft light",
+    "dramatic",
+    "foreground",
+    "background",
+    "symmetry",
+    "reflection",
+    "waterfall",
+]
+QUALITY_NEGATIVE_TERMS = [
+    "blurry",
+    "blurred",
+    "motion blur",
+    "dark",
+    "low light",
+    "overexposed",
+    "underexposed",
+    "obstructed",
+    "cluttered",
+    "close up",
+    "closeup",
+    "tree trunk",
+]
 
 
 class RetrievalService:
@@ -109,7 +296,11 @@ class RetrievalService:
         scored_candidates: list[dict[str, object]] = []
         query_terms = self._merge_unique(plan.query.required_terms, plan.query.optional_terms)
         prepared_query_terms = self._prepare_query_terms(query_terms)
-        prepared_excluded_terms = self._prepare_query_terms(plan.query.excluded_terms)
+        prepared_excluded_terms = self._prepare_query_terms(
+            self._expand_excluded_terms(plan.query.excluded_terms)
+        )
+        hard_required_groups = self._build_hard_required_groups(plan.query.required_terms)
+        has_landscape_intent = self._has_landscape_intent(query_terms)
         descriptive_query = expand_text_with_hints(
             plan.query.descriptive_query or "",
             self.settings.semantic_hints,
@@ -145,14 +336,34 @@ class RetrievalService:
             ).lower()
             normalized_blob = self._normalize_text(searchable_blob)
             normalized_tag_terms = self._normalize_candidate_terms(augmented_tags)
+            normalized_tag_terms = self._filter_absence_terms(
+                normalized_candidate_terms=normalized_tag_terms,
+                normalized_blob=normalized_blob,
+            )
             normalized_candidate_terms = self._merge_unique(
                 normalized_tag_terms,
                 [token for token in normalized_blob.split() if len(token) >= 3],
             )
+            normalized_candidate_terms = self._filter_absence_terms(
+                normalized_candidate_terms=normalized_candidate_terms,
+                normalized_blob=normalized_blob,
+            )
+            similarity_terms = self._build_diversity_terms(normalized_blob)
             if self._should_exclude_candidate(
                 excluded_terms=[normalized for _, normalized in prepared_excluded_terms],
                 normalized_tag_terms=normalized_tag_terms,
                 normalized_candidate_terms=normalized_candidate_terms,
+            ):
+                continue
+            if not self._satisfies_hard_required_groups(
+                hard_required_groups=hard_required_groups,
+                normalized_tag_terms=normalized_tag_terms,
+                normalized_candidate_terms=normalized_candidate_terms,
+            ):
+                continue
+            if has_landscape_intent and self._is_disfavored_landscape_context(
+                normalized_blob=normalized_blob,
+                query_terms=query_terms,
             ):
                 continue
 
@@ -169,6 +380,8 @@ class RetrievalService:
                 document_text=combined_text,
             )
             score += DESCRIPTION_SIMILARITY_WEIGHT * description_similarity
+            if has_landscape_intent:
+                score += SCENE_COMPOSITION_WEIGHT * self._scene_composition_score(normalized_blob)
 
             for term, normalized_term in prepared_query_terms:
                 tag_similarity = self._term_similarity_normalized(
@@ -227,6 +440,15 @@ class RetrievalService:
                     "embedding_backend": row["embedding_backend"],
                     "raw_embedding": row["embedding"],
                     "embedding": None,
+                    "similarity_terms": similarity_terms,
+                    "normalized_text": normalized_blob,
+                    "file_size": row["file_size"],
+                    "width": row["width"],
+                    "height": row["height"],
+                    "aesthetic_score": row["aesthetic_score"],
+                    "aesthetic_model": row["aesthetic_model"],
+                    "technical_quality_score": row["technical_quality_score"],
+                    "quality_score": 0.5,
                 }
             )
 
@@ -248,6 +470,7 @@ class RetrievalService:
         )
         diversity_pool = scored_candidates[:pool_size]
         self._hydrate_candidate_embeddings(diversity_pool)
+        self._attach_quality_scores(diversity_pool)
         reranked = self._apply_diversity_rerank(
             candidates=diversity_pool,
             target_k=plan.query.top_k,
@@ -325,6 +548,99 @@ class RetrievalService:
                 merged.append(normalized)
         return merged
 
+    @staticmethod
+    def _build_diversity_terms(normalized_blob: str) -> list[str]:
+        terms: list[str] = []
+        for token in normalized_blob.split():
+            if len(token) < 4 or any(char.isdigit() for char in token) or token in DIVERSITY_GENERIC_TERMS:
+                continue
+            if token not in terms:
+                terms.append(token)
+        return terms
+
+    def _attach_quality_scores(self, candidates: list[dict[str, object]]) -> None:
+        for candidate in candidates:
+            stored_quality = self._coerce_optional_score(candidate.get("aesthetic_score"))
+            if stored_quality is not None:
+                candidate["quality_score"] = stored_quality
+                continue
+
+            lazy_quality = self._estimate_candidate_aesthetic_quality(candidate)
+            if lazy_quality is not None:
+                candidate["quality_score"] = lazy_quality
+                continue
+
+            normalized_text = str(candidate.get("normalized_text") or "")
+            candidate["quality_score"] = self._metadata_quality_score(normalized_text)
+
+    @staticmethod
+    def _coerce_optional_score(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(score):
+            return None
+        return max(0.0, min(1.0, score))
+
+    @staticmethod
+    def _metadata_quality_score(normalized_blob: str) -> float:
+        return score_metadata_quality(normalized_blob)
+
+    def _estimate_candidate_technical_quality(
+        self,
+        candidate: dict[str, object],
+    ) -> float | None:
+        stored_technical = self._coerce_optional_score(candidate.get("technical_quality_score"))
+        if stored_technical is not None:
+            return stored_technical
+
+        quality_scores = self._estimate_candidate_quality_scores(candidate)
+        if quality_scores is None:
+            return None
+        return quality_scores.technical_quality_score
+
+    def _estimate_candidate_aesthetic_quality(
+        self,
+        candidate: dict[str, object],
+    ) -> float | None:
+        quality_scores = self._estimate_candidate_quality_scores(candidate)
+        if quality_scores is None:
+            return None
+        return quality_scores.aesthetic_score
+
+    def _estimate_candidate_quality_scores(
+        self,
+        candidate: dict[str, object],
+    ):
+        summary = candidate.get("summary")
+        relative_path = getattr(summary, "relative_path", None)
+        if not isinstance(relative_path, str) or not relative_path.strip():
+            return None
+
+        library_root = self.settings.image_library_dir.resolve()
+        image_path = (library_root / relative_path).resolve()
+        try:
+            image_path.relative_to(library_root)
+        except ValueError:
+            return None
+        if not image_path.exists() or not image_path.is_file():
+            return None
+
+        return score_image_file(image_path, text=str(candidate.get("normalized_text") or ""))
+
+    @staticmethod
+    @lru_cache(maxsize=4096)
+    def _estimate_image_quality_cached(
+        path: str,
+        mtime_ns: int,
+        file_size: int,
+    ) -> float | None:
+        del mtime_ns, file_size
+        return score_image_file(Path(path), text="").technical_quality_score
+
     def _apply_diversity_rerank(
         self,
         *,
@@ -341,26 +657,46 @@ class RetrievalService:
             {
                 **item,
                 "normalized_score": normalized_scores[index],
+                "selection_score": self._selection_score(
+                    relevance_score=normalized_scores[index],
+                    quality_score=float(item.get("quality_score") or 0.5),
+                ),
             }
             for index, item in enumerate(candidates)
         ]
+        pending = self._dedupe_near_duplicate_candidates(pending)
         selected: list[dict[str, object]] = []
         reranked: list[RetrievedImageSummary] = []
 
-        # Inspired by greedy k-medoids subset selection: keep relevance high,
-        # but subtract similarity to the nearest already-selected DINO neighbor.
+        # Greedy MMR: keep relevance and image quality high while preventing
+        # one burst of near-identical photos from dominating the result set.
         while pending and len(reranked) < target_k:
             candidate_scores = [
                 (index, self._max_similarity(candidate, selected))
                 for index, candidate in enumerate(pending)
             ]
             similarity_by_index = dict(candidate_scores)
+            floor_indices = self._candidate_indices_above_adaptive_floor(
+                pending=pending,
+                remaining_needed=target_k - len(reranked),
+            )
             eligible_indices = [
                 index
                 for index, max_similarity in candidate_scores
-                if max_similarity < NEAR_DUPLICATE_SIMILARITY
+                if index in floor_indices and max_similarity < NEAR_DUPLICATE_SIMILARITY
             ]
-            search_indices = eligible_indices or [index for index, _ in candidate_scores]
+            if not eligible_indices:
+                soft_floor_indices = self._candidate_indices_above_floor(
+                    pending=pending,
+                    relevance_floor=SOFT_RELEVANCE_DIVERSITY_FLOOR,
+                )
+                if len(soft_floor_indices) >= target_k - len(reranked):
+                    eligible_indices = [
+                        index
+                        for index, max_similarity in candidate_scores
+                        if index in soft_floor_indices and max_similarity < NEAR_DUPLICATE_SIMILARITY
+                    ]
+            search_indices = eligible_indices or floor_indices or [index for index, _ in candidate_scores]
 
             best_index = search_indices[0]
             best_score = float("-inf")
@@ -369,7 +705,7 @@ class RetrievalService:
                 candidate = pending[index]
                 diversity_penalty = similarity_by_index[index]
                 mmr_score = (
-                    MMR_LAMBDA * float(candidate["normalized_score"])
+                    MMR_LAMBDA * float(candidate["selection_score"])
                     - (1.0 - MMR_LAMBDA) * diversity_penalty
                 )
                 if mmr_score > best_score:
@@ -397,6 +733,86 @@ class RetrievalService:
         return reranked
 
     @staticmethod
+    def _candidate_indices_above_adaptive_floor(
+        *,
+        pending: list[dict[str, object]],
+        remaining_needed: int,
+    ) -> list[int]:
+        high_relevance_indices = RetrievalService._candidate_indices_above_floor(
+            pending=pending,
+            relevance_floor=HIGH_RELEVANCE_DIVERSITY_FLOOR,
+        )
+        if len(high_relevance_indices) >= remaining_needed:
+            return high_relevance_indices
+
+        soft_relevance_indices = RetrievalService._candidate_indices_above_floor(
+            pending=pending,
+            relevance_floor=SOFT_RELEVANCE_DIVERSITY_FLOOR,
+        )
+        if len(soft_relevance_indices) >= remaining_needed:
+            return soft_relevance_indices
+
+        return [index for index, _candidate in enumerate(pending)]
+
+    @staticmethod
+    def _candidate_indices_above_floor(
+        *,
+        pending: list[dict[str, object]],
+        relevance_floor: float,
+    ) -> list[int]:
+        return [
+            index
+            for index, candidate in enumerate(pending)
+            if float(candidate.get("normalized_score") or 0.0) >= relevance_floor
+        ]
+
+    @staticmethod
+    def _selection_score(*, relevance_score: float, quality_score: float) -> float:
+        bounded_relevance = max(0.0, min(1.0, relevance_score))
+        bounded_quality = max(0.0, min(1.0, quality_score))
+        return (
+            (1.0 - QUALITY_SELECTION_WEIGHT) * bounded_relevance
+            + QUALITY_SELECTION_WEIGHT * bounded_quality
+        )
+
+    @staticmethod
+    def _dedupe_near_duplicate_candidates(
+        candidates: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        if len(candidates) < 2:
+            return candidates
+
+        sorted_candidates = sorted(
+            candidates,
+            key=lambda item: (
+                float(item.get("selection_score") or 0.0),
+                float(item.get("quality_score") or 0.0),
+                float(item.get("normalized_score") or 0.0),
+            ),
+            reverse=True,
+        )
+        kept: list[dict[str, object]] = []
+        for candidate in sorted_candidates:
+            duplicate_similarity = max(
+                (
+                    RetrievalService._candidate_similarity(candidate, kept_candidate)
+                    for kept_candidate in kept
+                ),
+                default=0.0,
+            )
+            if duplicate_similarity >= NEAR_DUPLICATE_KEEPER_SIMILARITY:
+                continue
+            kept.append(candidate)
+        return sorted(
+            kept,
+            key=lambda item: (
+                float(item.get("normalized_score") or 0.0),
+                float(item.get("quality_score") or 0.0),
+            ),
+            reverse=True,
+        )
+
+    @staticmethod
     def _max_similarity(
         candidate: dict[str, object],
         selected: list[dict[str, object]],
@@ -405,10 +821,26 @@ class RetrievalService:
             return 0.0
 
         similarities = [
-            RetrievalService._embedding_similarity(candidate, other)
+            RetrievalService._candidate_similarity(candidate, other)
             for other in selected
         ]
         return max(similarities, default=0.0)
+
+    @staticmethod
+    def _candidate_similarity(
+        left: dict[str, object],
+        right: dict[str, object],
+    ) -> float:
+        embedding_similarity = RetrievalService._embedding_similarity(left, right)
+        left_terms = left.get("similarity_terms")
+        right_terms = right.get("similarity_terms")
+        text_similarity = 0.0
+        if isinstance(left_terms, list) and isinstance(right_terms, list):
+            text_similarity = RetrievalService._token_cosine_similarity(
+                query_tokens=[str(term) for term in left_terms],
+                document_tokens=[str(term) for term in right_terms],
+            )
+        return max(embedding_similarity, text_similarity)
 
     @staticmethod
     def _embedding_similarity(
@@ -456,17 +888,174 @@ class RetrievalService:
         normalized_candidate_terms: list[str],
     ) -> bool:
         for term in excluded_terms:
-            tag_similarity = RetrievalService._term_similarity_normalized(
+            tag_similarity = RetrievalService._strict_term_presence_normalized(
                 normalized_term=term,
                 normalized_term_candidates=normalized_tag_terms,
             )
-            candidate_similarity = RetrievalService._term_similarity_normalized(
+            candidate_similarity = RetrievalService._strict_term_presence_normalized(
                 normalized_term=term,
                 normalized_term_candidates=normalized_candidate_terms,
             )
             if max(tag_similarity, candidate_similarity) >= EXCLUDED_TERM_HARD_FILTER_THRESHOLD:
                 return True
         return False
+
+    @staticmethod
+    def _filter_absence_terms(
+        *,
+        normalized_candidate_terms: list[str],
+        normalized_blob: str,
+    ) -> list[str]:
+        tokens_to_remove: set[str] = set()
+        for absence_phrase, filtered_tokens in ABSENCE_TERM_TOKEN_FILTERS.items():
+            if absence_phrase in normalized_blob:
+                tokens_to_remove.update(filtered_tokens)
+        if not tokens_to_remove:
+            return normalized_candidate_terms
+        return [
+            term
+            for term in normalized_candidate_terms
+            if term not in tokens_to_remove
+        ]
+
+    @staticmethod
+    def _strict_term_presence_normalized(
+        *,
+        normalized_term: str,
+        normalized_term_candidates: list[str],
+    ) -> float:
+        if not normalized_term:
+            return 0.0
+
+        for candidate in normalized_term_candidates:
+            if candidate == normalized_term:
+                return 1.0
+            if candidate.startswith(("no ", "without ")) and candidate.endswith(f" {normalized_term}"):
+                continue
+            if normalized_term in candidate:
+                if min(len(normalized_term), len(candidate)) >= 4:
+                    return TERM_SIMILARITY_SUBSTRING_MATCH
+        return 0.0
+
+    @staticmethod
+    def _expand_excluded_terms(terms: list[str]) -> list[str]:
+        expanded = RetrievalService._merge_unique([], terms)
+        normalized_terms = {
+            RetrievalService._normalize_text(term)
+            for term in terms
+            if RetrievalService._normalize_text(term)
+        }
+        normalized_term_tokens = {
+            token
+            for term in normalized_terms
+            for token in term.split()
+            if token
+        }
+        normalized_human_terms = {
+            RetrievalService._normalize_text(term)
+            for term in HUMAN_PRESENCE_EXCLUSION_TERMS
+            if RetrievalService._normalize_text(term)
+        }
+
+        if normalized_terms.intersection(normalized_human_terms) or normalized_term_tokens.intersection(
+            normalized_human_terms
+        ):
+            expanded = RetrievalService._merge_unique(expanded, HUMAN_PRESENCE_EXCLUSION_TERMS)
+
+        return expanded
+
+    @staticmethod
+    def _build_hard_required_groups(terms: list[str]) -> list[list[str]]:
+        groups: list[list[str]] = []
+        normalized_terms = {
+            RetrievalService._normalize_text(term)
+            for term in terms
+            if RetrievalService._normalize_text(term)
+        }
+        normalized_tokens = {
+            token
+            for term in normalized_terms
+            for token in term.split()
+            if token
+        }
+
+        for trigger, raw_group_terms in HARD_REQUIRED_TERM_GROUPS.items():
+            normalized_trigger = RetrievalService._normalize_text(trigger)
+            if normalized_trigger not in normalized_terms and normalized_trigger not in normalized_tokens:
+                continue
+            normalized_group = [
+                normalized
+                for normalized in (
+                    RetrievalService._normalize_text(group_term)
+                    for group_term in raw_group_terms
+                )
+                if normalized
+            ]
+            if normalized_group:
+                groups.append(normalized_group)
+
+        return groups
+
+    @staticmethod
+    def _has_landscape_intent(terms: list[str]) -> bool:
+        normalized_terms = {
+            RetrievalService._normalize_text(term)
+            for term in terms
+            if RetrievalService._normalize_text(term)
+        }
+        return bool(normalized_terms.intersection(LANDSCAPE_INTENT_TERMS))
+
+    @staticmethod
+    def _is_disfavored_landscape_context(
+        *,
+        normalized_blob: str,
+        query_terms: list[str],
+    ) -> bool:
+        normalized_query = " ".join(
+            RetrievalService._normalize_text(term)
+            for term in query_terms
+            if RetrievalService._normalize_text(term)
+        )
+        normalized_disfavored_terms = [
+            RetrievalService._normalize_text(term)
+            for term in DISFAVORED_LANDSCAPE_CONTEXT_TERMS
+            if RetrievalService._normalize_text(term)
+        ]
+        if any(term in normalized_query for term in normalized_disfavored_terms):
+            return False
+        for normalized_term in normalized_disfavored_terms:
+            if normalized_term and normalized_term in normalized_blob and normalized_term not in normalized_query:
+                return True
+        return False
+
+    @staticmethod
+    def _scene_composition_score(normalized_blob: str) -> float:
+        return score_scene_composition(normalized_blob)
+
+    @staticmethod
+    def _satisfies_hard_required_groups(
+        *,
+        hard_required_groups: list[list[str]],
+        normalized_tag_terms: list[str],
+        normalized_candidate_terms: list[str],
+    ) -> bool:
+        for group in hard_required_groups:
+            matched = False
+            for normalized_term in group:
+                tag_similarity = RetrievalService._term_similarity_normalized(
+                    normalized_term=normalized_term,
+                    normalized_term_candidates=normalized_tag_terms,
+                )
+                text_similarity = RetrievalService._term_similarity_normalized(
+                    normalized_term=normalized_term,
+                    normalized_term_candidates=normalized_candidate_terms,
+                )
+                if max(tag_similarity, text_similarity) >= TERM_SIMILARITY_MIN_MATCH:
+                    matched = True
+                    break
+            if not matched:
+                return False
+        return True
 
     @staticmethod
     def _prepare_query_terms(terms: list[str]) -> list[tuple[str, str]]:
@@ -512,6 +1101,16 @@ class RetrievalService:
 
     @staticmethod
     def _singularize_token(token: str) -> str:
+        irregular = {
+            "people": "person",
+            "men": "man",
+            "women": "woman",
+            "children": "child",
+            "kids": "kid",
+            "babies": "baby",
+        }
+        if token in irregular:
+            return irregular[token]
         if len(token) <= 3:
             return token
         if token.endswith("ies") and len(token) > 4:
@@ -563,7 +1162,11 @@ class RetrievalService:
             return 0.0
         if candidate == normalized_term:
             return 1.0
+        if candidate.startswith(("no ", "without ")) and candidate.endswith(f" {normalized_term}"):
+            return 0.0
         if normalized_term in candidate or candidate in normalized_term:
+            if min(len(normalized_term), len(candidate)) < 4:
+                return 0.0
             return TERM_SIMILARITY_SUBSTRING_MATCH
         if not RetrievalService._maybe_fuzzy_match(normalized_term, candidate):
             return 0.0
