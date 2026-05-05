@@ -61,6 +61,27 @@ Rules:
 - Never include markdown or extra explanation.
 """
 
+SEARCH_INSPIRATION_PROMPT = """You are an AI search buddy for a private local photo library.
+
+You receive only sanitized library facts: common themes, rough time range, place labels,
+and memory summaries. You never receive original photos, file paths, database paths, API
+configuration, or full-library raw text.
+
+Return ONLY one JSON object with this schema:
+{
+  "suggestions": ["query", "query", "query"]
+}
+
+Rules:
+- Generate creative natural-language photo search queries the user could paste into a photo retrieval box.
+- Each query should ask for a useful set, not a single asset.
+- Prefer concrete visual constraints: theme, mood, people/no-people, diversity, posting/story use.
+- Match the user's likely bilingual context: Chinese is welcome, with short English visual keywords only when useful.
+- Keep each query concise, ideally 8-24 Chinese characters or 5-14 English words.
+- Do not mention metadata, embeddings, indexes, databases, or model behavior.
+- Do not include markdown or extra explanation.
+"""
+
 LOCAL_QUERY_STOPWORDS = {
     "a",
     "all",
@@ -409,6 +430,175 @@ class OpenAICompatibleQueryPlanner:
         except Exception:
             self._store_plan_cache(cache_key, fallback_plan)
             return fallback_plan
+
+    def generate_search_suggestions(
+        self,
+        *,
+        library_summary: dict[str, object],
+        memories: list[dict[str, object]],
+        count: int = 5,
+    ) -> list[str]:
+        desired_count = max(3, min(int(count or 5), 8))
+        fallback_suggestions = self._fallback_search_suggestions(
+            library_summary=library_summary,
+            memories=memories,
+            count=desired_count,
+        )
+        if self.settings.query_provider != "vertex" and not self.settings.query_api_key:
+            return fallback_suggestions
+
+        safe_summary = {
+            "top_concepts": list(library_summary.get("top_concepts") or [])[:12],
+            "places": list(library_summary.get("places") or [])[:8],
+            "time_range": library_summary.get("time_range") or {},
+            "asset_count": library_summary.get("asset_count"),
+            "memory_count": library_summary.get("memory_count"),
+            "quality_avg": library_summary.get("quality_avg"),
+            "people_risk_count": library_summary.get("people_risk_count"),
+        }
+        safe_memories = [
+            {
+                "label": memory.get("label"),
+                "asset_count": memory.get("asset_count"),
+                "time_label": memory.get("time_label"),
+                "place_label": memory.get("place_label"),
+                "top_concepts": list(memory.get("top_concepts") or [])[:5],
+                "people_risk": memory.get("people_risk"),
+            }
+            for memory in memories[:10]
+        ]
+        user_content = (
+            f"Generate {desired_count} search suggestions from this private local photo library summary.\n"
+            f"Library summary:\n{safe_summary}\n\n"
+            f"Representative memories:\n{safe_memories}"
+        )
+
+        try:
+            content = self._request_inspiration_content(
+                user_content=user_content,
+                count=desired_count,
+            )
+            parsed = coerce_json_object(content)
+            raw_suggestions = parsed.get("suggestions")
+            if not isinstance(raw_suggestions, list):
+                return fallback_suggestions
+            suggestions = []
+            for item in raw_suggestions:
+                suggestion = re.sub(r"\s+", " ", str(item or "").strip())
+                if 4 <= len(suggestion) <= 120:
+                    suggestions.append(suggestion)
+            merged = self._merge_unique_terms(suggestions, fallback_suggestions)
+            return merged[:desired_count]
+        except Exception:
+            return fallback_suggestions
+
+    def _request_inspiration_content(
+        self,
+        *,
+        user_content: str,
+        count: int,
+    ) -> str:
+        if self.settings.query_provider == "minimax":
+            response = request_minimax_chat_completion(
+                api_key=self.settings.query_api_key,
+                base_url=self.settings.query_base_url,
+                model=self.settings.query_model,
+                temperature=max(0.35, min(0.9, self.settings.query_temperature or 0.7)),
+                max_tokens=self.settings.query_max_tokens,
+                response_format=self.settings.query_response_format,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SEARCH_INSPIRATION_PROMPT,
+                    },
+                    {
+                        "role": "user",
+                        "content": user_content,
+                    },
+                ],
+            )
+            choices = response.get("choices")
+            if not isinstance(choices, list) or not choices:
+                raise RuntimeError("MiniMax response did not contain choices.")
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            content = message.get("content") if isinstance(message, dict) else None
+            return str(content or "")
+        if self.settings.query_provider == "vertex":
+            response = request_vertex_generate_content(
+                base_url=self.settings.query_base_url,
+                model=self.settings.query_model,
+                temperature=0.65,
+                max_tokens=self.settings.query_max_tokens,
+                response_format=self.settings.query_response_format,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": SEARCH_INSPIRATION_PROMPT,
+                    },
+                    {
+                        "role": "user",
+                        "content": user_content,
+                    },
+                ],
+            )
+            return extract_vertex_response_text(response)
+
+        response = self._get_client().chat.completions.create(
+            model=self.settings.query_model,
+            temperature=0.65,
+            response_format=self.settings.query_response_format,
+            max_tokens=self.settings.query_max_tokens,
+            messages=[
+                {
+                    "role": "system",
+                    "content": SEARCH_INSPIRATION_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": user_content,
+                },
+            ],
+        )
+        return str(response.choices[0].message.content or "")
+
+    def _fallback_search_suggestions(
+        self,
+        *,
+        library_summary: dict[str, object],
+        memories: list[dict[str, object]],
+        count: int,
+    ) -> list[str]:
+        concepts = [
+            str(term).strip()
+            for term in list(library_summary.get("top_concepts") or [])
+            if str(term).strip()
+        ]
+        places = [
+            str(place).strip()
+            for place in list(library_summary.get("places") or [])
+            if str(place).strip()
+        ]
+        suggestions: list[str] = []
+        if concepts:
+            suggestions.append(f"找 9 张{concepts[0]}主题照片，相似度低，适合发朋友圈")
+        if len(concepts) >= 2:
+            suggestions.append(f"挑一组{concepts[0]}和{concepts[1]}有关的安静故事线")
+        for memory in memories[:4]:
+            memory_concepts = [
+                str(term).strip()
+                for term in list(memory.get("top_concepts") or [])[:3]
+                if str(term).strip()
+            ]
+            label = str(memory.get("label") or "").strip()
+            if label and memory_concepts:
+                suggestions.append(
+                    f"从 {label} 里挑 9 张照片，突出 {', '.join(memory_concepts)}，相似度低"
+                )
+        if places:
+            suggestions.append(f"找一组关于 {places[0]} 的旅行片段，不要重复构图")
+        suggestions.append("根据最近照片给我 3 个可以发布的故事主题")
+        suggestions.append("找 9 张山景照片，不要人，相似度低")
+        return list(dict.fromkeys(suggestions))[:count]
 
     def _request_planning_content(
         self,

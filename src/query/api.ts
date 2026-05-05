@@ -1,5 +1,13 @@
 import { analyzePrompt } from "./studio";
 import type {
+  AtlasBasket,
+  AtlasLens,
+  AtlasMemoryDetail,
+  AtlasMode,
+  AtlasOverview,
+  AtlasQueryPreview,
+  AtlasStatus,
+  AtlasWorkbench,
   BackendSettingsResponse,
   DesktopIndexingResult,
   DraftResult,
@@ -75,6 +83,7 @@ interface FetchDraftOptions {
   imageLibraryDir?: string | null;
   dbPath?: string | null;
   onCopyUpdate?: (update: DraftCopyUpdate) => void;
+  shouldApplyCopyUpdate?: () => boolean;
 }
 
 interface SaveBackendSettingsInput {
@@ -97,6 +106,31 @@ interface IndexingApiResponse {
     error_count?: number;
   };
   errors?: Array<{ message?: string | null }>;
+}
+
+interface AtlasRequestOptions {
+  apiBase?: string;
+  dbPath?: string | null;
+  imageLibraryDir?: string | null;
+  mode?: AtlasMode;
+  lens?: AtlasLens;
+  text?: string;
+  noPeople?: boolean;
+  minQuality?: number | null;
+  showDuplicates?: boolean;
+  limit?: number;
+  clusterId?: string | null;
+  assetIds?: string[];
+  selectedMemoryIds?: string[];
+  inspirationId?: string | null;
+  previewWidth?: number;
+}
+
+interface InspirationApiResponse {
+  object?: string;
+  status?: string;
+  suggestions?: string[];
+  message?: string | null;
 }
 
 const SURFACE_TINTS = [
@@ -127,20 +161,75 @@ function encodeRelativePath(relativePath: string): string {
     .join("/");
 }
 
-function buildPreviewImageUrl(
+export function buildPreviewImageUrl(
   apiBase: string,
   relativePath: string,
   imageLibraryDir: string | null | undefined,
+  width = 900,
 ): string {
   const encodedRelativePath = encodeRelativePath(relativePath);
   const params = new URLSearchParams({
-    width: "1800",
+    width: String(Math.max(120, Math.min(1800, Math.round(width)))),
   });
   if (imageLibraryDir && imageLibraryDir.trim().length > 0) {
     params.set("root_path", imageLibraryDir);
   }
 
   return `${apiBase.replace(/\/$/, "")}/v1/library/previews/${encodedRelativePath}?${params.toString()}`;
+}
+
+function appendAtlasSearchParams(params: URLSearchParams, options: AtlasRequestOptions): void {
+  if (options.dbPath && options.dbPath.trim().length > 0) {
+    params.set("db_path", options.dbPath);
+  }
+  if (options.mode) {
+    params.set("mode", options.mode);
+  }
+  if (options.lens) {
+    params.set("lens", options.lens);
+  }
+  if (options.text && options.text.trim().length > 0) {
+    params.set("query", options.text.trim());
+  }
+  if (typeof options.noPeople === "boolean") {
+    params.set("no_people", String(options.noPeople));
+  }
+  if (typeof options.minQuality === "number") {
+    params.set("min_quality", String(options.minQuality));
+  }
+  if (typeof options.showDuplicates === "boolean") {
+    params.set("show_duplicates", String(options.showDuplicates));
+  }
+  if (typeof options.limit === "number") {
+    params.set("limit", String(options.limit));
+  }
+  if (options.clusterId) {
+    params.set("cluster_id", options.clusterId);
+  }
+}
+
+function buildAtlasPayload(options: AtlasRequestOptions): Record<string, unknown> {
+  return {
+    db_path: options.dbPath && options.dbPath.trim().length > 0 ? options.dbPath : undefined,
+    image_library_dir:
+      options.imageLibraryDir && options.imageLibraryDir.trim().length > 0
+        ? options.imageLibraryDir
+        : undefined,
+    mode: options.mode,
+    lens: options.lens,
+    text: options.text,
+    no_people: options.noPeople,
+    min_quality: options.minQuality ?? undefined,
+    show_duplicates: options.showDuplicates,
+    limit: options.limit,
+    cluster_id: options.clusterId ?? undefined,
+    asset_ids: options.assetIds && options.assetIds.length > 0 ? options.assetIds : undefined,
+    selected_memory_ids:
+      options.selectedMemoryIds && options.selectedMemoryIds.length > 0
+        ? options.selectedMemoryIds
+        : undefined,
+    inspiration_id: options.inspirationId ?? undefined,
+  };
 }
 
 function inferSlot(image: RetrievalApiImage, index: number): string {
@@ -163,7 +252,7 @@ function toPhotoAsset(
   imageLibraryDir: string | null | undefined,
 ): PhotoAsset {
   const location = [image.place_name, image.country].filter(Boolean).join(" · ") || "Local library";
-  const imageUrl = buildPreviewImageUrl(apiBase, image.relative_path, imageLibraryDir);
+  const imageUrl = buildPreviewImageUrl(apiBase, image.relative_path, imageLibraryDir, 1100);
 
   return {
     id: image.id,
@@ -331,13 +420,297 @@ export async function fetchDraftFromBackend(
       images: payload.data,
     })
       .then((copyUpdate) => {
-        if (copyUpdate) {
+        if (copyUpdate && (!options.shouldApplyCopyUpdate || options.shouldApplyCopyUpdate())) {
           options.onCopyUpdate?.(copyUpdate);
         }
       })
       .catch(() => {});
   }
 
+  return buildDraftResult({
+    payload,
+    prompt,
+    variant,
+    apiBase,
+    imageLibraryDir: options.imageLibraryDir,
+  });
+}
+
+export async function fetchAtlasStatus(options: AtlasRequestOptions = {}): Promise<AtlasStatus> {
+  const apiBase = options.apiBase ?? "";
+  const params = new URLSearchParams();
+  if (options.dbPath && options.dbPath.trim().length > 0) {
+    params.set("db_path", options.dbPath);
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${apiBase}/v1/atlas/status${suffix}`);
+  const payload = (await response.json().catch(() => ({}))) as AtlasStatus & { message?: string };
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas status failed with status ${response.status}`);
+  }
+  return payload;
+}
+
+export async function fetchAiInspirations(
+  apiBase: string,
+  dbPath?: string | null,
+): Promise<string[]> {
+  const response = await fetch(`${apiBase.replace(/\/$/, "")}/v1/inspiration/generate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      db_path: dbPath && dbPath.trim().length > 0 ? dbPath : undefined,
+      count: 5,
+    }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as InspirationApiResponse;
+  if (!response.ok) {
+    throw new Error(payload.message ?? `inspiration request failed with status ${response.status}`);
+  }
+  return Array.isArray(payload.suggestions)
+    ? payload.suggestions
+        .map((suggestion) => String(suggestion || "").trim())
+        .filter((suggestion) => suggestion.length > 0)
+    : [];
+}
+
+export async function rebuildAtlas(options: AtlasRequestOptions = {}): Promise<AtlasStatus> {
+  const apiBase = options.apiBase ?? "";
+  const response = await fetch(`${apiBase}/v1/atlas/rebuild`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(buildAtlasPayload(options)),
+  });
+  const payload = (await response.json().catch(() => ({}))) as AtlasStatus & { message?: string };
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas rebuild failed with status ${response.status}`);
+  }
+  return payload;
+}
+
+export async function fetchAtlasOverview(
+  options: AtlasRequestOptions = {},
+): Promise<AtlasOverview> {
+  const apiBase = options.apiBase ?? "";
+  const params = new URLSearchParams();
+  appendAtlasSearchParams(params, options);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${apiBase}/v1/atlas/overview${suffix}`);
+  const payload = (await response.json().catch(() => ({}))) as AtlasOverview & { message?: string };
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas overview failed with status ${response.status}`);
+  }
+  return payload;
+}
+
+export async function fetchAtlasWorkbench(
+  options: AtlasRequestOptions = {},
+): Promise<AtlasWorkbench> {
+  const apiBase = options.apiBase ?? "";
+  const params = new URLSearchParams();
+  appendAtlasSearchParams(params, options);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${apiBase}/v1/atlas/workbench${suffix}`);
+  const payload = (await response.json().catch(() => ({}))) as AtlasWorkbench & { message?: string };
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas workbench failed with status ${response.status}`);
+  }
+  return payload;
+}
+
+export async function fetchAtlasMemoryDetail(
+  memoryId: string,
+  options: AtlasRequestOptions = {},
+): Promise<AtlasMemoryDetail> {
+  const apiBase = options.apiBase ?? "";
+  const params = new URLSearchParams();
+  if (options.dbPath && options.dbPath.trim().length > 0) {
+    params.set("db_path", options.dbPath);
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${apiBase}/v1/atlas/memory/${encodeURIComponent(memoryId)}${suffix}`);
+  const payload = (await response.json().catch(() => ({}))) as AtlasMemoryDetail & { message?: string };
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas memory failed with status ${response.status}`);
+  }
+  return payload;
+}
+
+export async function fetchAtlasCleanup(
+  options: AtlasRequestOptions = {},
+): Promise<AtlasWorkbench["cleanup"]> {
+  const apiBase = options.apiBase ?? "";
+  const params = new URLSearchParams();
+  if (options.dbPath && options.dbPath.trim().length > 0) {
+    params.set("db_path", options.dbPath);
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${apiBase}/v1/atlas/cleanup${suffix}`);
+  const payload = (await response.json().catch(() => ({}))) as AtlasWorkbench["cleanup"] & { message?: string };
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas cleanup failed with status ${response.status}`);
+  }
+  return payload;
+}
+
+export async function searchAtlas(options: AtlasRequestOptions = {}): Promise<AtlasOverview> {
+  const apiBase = options.apiBase ?? "";
+  const response = await fetch(`${apiBase}/v1/atlas/search`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(buildAtlasPayload(options)),
+  });
+  const payload = (await response.json().catch(() => ({}))) as AtlasOverview & { message?: string };
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas search failed with status ${response.status}`);
+  }
+  return payload;
+}
+
+export async function selectAtlas(options: AtlasRequestOptions = {}): Promise<AtlasOverview> {
+  const apiBase = options.apiBase ?? "";
+  const response = await fetch(`${apiBase}/v1/atlas/select`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(buildAtlasPayload(options)),
+  });
+  const payload = (await response.json().catch(() => ({}))) as AtlasOverview & { message?: string };
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas select failed with status ${response.status}`);
+  }
+  return payload;
+}
+
+export async function fetchAtlasQueryPreview(
+  text: string,
+  options: AtlasRequestOptions = {},
+): Promise<AtlasQueryPreview> {
+  const apiBase = options.apiBase ?? "";
+  const response = await fetch(`${apiBase}/v1/atlas/query-preview`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      ...buildAtlasPayload(options),
+      text,
+    }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as AtlasQueryPreview & { message?: string };
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas query preview failed with status ${response.status}`);
+  }
+  return payload;
+}
+
+export async function sendAtlasFeedback(input: AtlasRequestOptions & {
+  targetKind: "asset" | "cluster";
+  targetId: string;
+  action: "more_like" | "less_like" | "hide" | "hide_similar" | "never_show_people";
+  weight?: number;
+  note?: string | null;
+}): Promise<void> {
+  const apiBase = input.apiBase ?? "";
+  const response = await fetch(`${apiBase}/v1/atlas/feedback`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      db_path: input.dbPath ?? undefined,
+      target_kind: input.targetKind,
+      target_id: input.targetId,
+      action: input.action,
+      weight: input.weight ?? 1,
+      note: input.note ?? undefined,
+    }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as { message?: string };
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas feedback failed with status ${response.status}`);
+  }
+}
+
+export async function saveAtlasBasket(input: AtlasRequestOptions & {
+  assetIds: string[];
+  name?: string | null;
+}): Promise<AtlasBasket> {
+  const apiBase = input.apiBase ?? "";
+  const response = await fetch(`${apiBase}/v1/atlas/basket`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      db_path: input.dbPath ?? undefined,
+      asset_ids: input.assetIds,
+      name: input.name ?? undefined,
+    }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as { message?: string; basket?: AtlasBasket };
+  if (!response.ok || !payload.basket) {
+    throw new Error(payload.message ?? `atlas basket failed with status ${response.status}`);
+  }
+  return payload.basket;
+}
+
+export async function sendAtlasStackAction(input: AtlasRequestOptions & {
+  stackId: string;
+  action: "keep_best" | "hide_similar" | "unstack";
+  keepAssetId?: string | null;
+}): Promise<void> {
+  const apiBase = input.apiBase ?? "";
+  const response = await fetch(`${apiBase}/v1/atlas/stack/action`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      db_path: input.dbPath ?? undefined,
+      stack_id: input.stackId,
+      action: input.action,
+      keep_asset_id: input.keepAssetId ?? undefined,
+    }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as { message?: string };
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas stack action failed with status ${response.status}`);
+  }
+}
+
+export async function fetchAtlasDraftFromBackend(
+  prompt: string,
+  variant: ToneVariant,
+  options: AtlasRequestOptions = {},
+): Promise<DraftResult | null> {
+  const apiBase = options.apiBase ?? "";
+  const response = await fetch(`${apiBase}/v1/atlas/generate`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      ...buildAtlasPayload(options),
+      text: prompt,
+      top_k: 9,
+      include_copy: true,
+    }),
+  });
+  const payload = (await response.json().catch(() => ({}))) as RetrievalApiResponse;
+  if (!response.ok) {
+    throw new Error(payload.message ?? `atlas generate failed with status ${response.status}`);
+  }
+  if (payload.status !== "completed" || !Array.isArray(payload.data) || payload.data.length === 0) {
+    return null;
+  }
   return buildDraftResult({
     payload,
     prompt,
@@ -373,13 +746,15 @@ export async function saveBackendSettings(
       query_profile_name: input.queryProfileName,
     }),
   });
+  const payload = (await response.json().catch(() => ({}))) as BackendSettingsResponse & {
+    message?: string;
+  };
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { message?: string };
     throw new Error(payload.message ?? `settings update failed with status ${response.status}`);
   }
 
-  return (await response.json()) as BackendSettingsResponse;
+  return payload;
 }
 
 export async function startBackendIndexing(input: {

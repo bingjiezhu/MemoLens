@@ -33,6 +33,9 @@ Typical use cases include:
 - Semantic indexing: generate lightweight semantic vectors and store them in SQLite without requiring local `torch/transformers` installs
 - Natural-language retrieval: rewrite user prompts into structured queries, then rank with time, location, tag, and text similarity signals
 - Quality-aware diversity reranking: suppress near-duplicates, prefer stronger images inside similar groups, and keep result sets visually varied
+- Memory Workbench: build a local SQLite-backed semantic photo layer with memories, lenses, cleanup queues, duplicate stacks, curated baskets, feedback, and Atlas-driven generation
+- Keyword Galaxy: show the local library as a photo-first semantic map, linking recurring concepts to representative memories and thumbnails
+- AI Inspire: generate fresh search prompts from sanitized library summaries, then feed those prompts back into Compose and Workbench preview
 - Browser-safe previews: serve local images through JPEG preview endpoints so Electron can display camera formats more reliably
 - Copy generation: send retrieved images into a follow-up copywriting stage to produce title, body text, and highlights
 - Local model guidance: detect local Ollama/Gemma options and suggest task-specific model profiles from the desktop control panel
@@ -48,8 +51,10 @@ The main workflow in this repository looks like this:
 2. Processed records are written into the SQLite `image_index` table, which acts as the retrieval foundation.
 3. A natural-language user prompt is sent to the query planner and rewritten into a structured query.
 4. The retrieval service ranks candidates using time, location, text similarity, tag matching, aesthetic score, and near-duplicate penalties.
-5. Final results can be returned to the Electron desktop UI or adapted into chat responses through `photon-bot`.
-6. Retrieved images can then go through the copywriter step to generate titles, captions, and notes.
+5. The Photo Atlas service can materialize a local Memory Workbench from the same SQLite records, including PCA layout coordinates, semantic clusters, memory groups, duplicate stacks, people-risk hints, cleanup queues, curated baskets, and local feedback.
+6. The renderer turns those memories into a Keyword Galaxy, so users can understand what the library contains before writing a precise query.
+7. Compose can preview the same local evidence, use AI-generated query ideas, and generate a final set with explanations and copy.
+8. Final results can be returned to the Electron desktop UI or adapted into chat responses through `photon-bot`.
 
 The current `config.yaml` keeps separate profiles for vision and query/copy work. The default profile can be changed through environment variables or the desktop control panel.
 
@@ -211,6 +216,21 @@ The backend listens on `http://127.0.0.1:5519` by default and exposes these core
 - `GET /healthz`
 - `POST /v1/indexing/jobs`
 - `POST /v1/retrieval/query`
+- `POST /v1/retrieval/copy`
+- `POST /v1/inspiration/generate`
+- `GET /v1/atlas/status`
+- `POST /v1/atlas/rebuild`
+- `GET /v1/atlas/workbench`
+- `GET /v1/atlas/memory/<memory_id>`
+- `GET /v1/atlas/cleanup`
+- `GET /v1/atlas/overview`
+- `POST /v1/atlas/search`
+- `POST /v1/atlas/select`
+- `POST /v1/atlas/query-preview`
+- `POST /v1/atlas/feedback`
+- `POST /v1/atlas/basket`
+- `POST /v1/atlas/stack/action`
+- `POST /v1/atlas/generate`
 - `GET /v1/library/files/<relative_path>`
 - `GET /v1/library/previews/<relative_path>` for browser-safe JPEG previews of local photos
 
@@ -230,6 +250,7 @@ MemoLens is designed to keep personal photo data out of the Git repository:
 - API keys should live in `.env` or provider-specific environment variables; `.env` files are ignored.
 - Local photo folders, generated SQLite databases, runtime logs, Electron caches, build output, and exported PDFs are ignored.
 - The default `config.yaml` uses `./local-photo-library` only as a placeholder. Point it at your real library through the app settings or environment variables.
+- AI Inspire and copy generation are designed to send structured summaries and selected candidate facts, not raw photo files, local absolute paths, SQLite paths, or full-library text.
 
 Before publishing changes, run:
 
@@ -238,7 +259,7 @@ git status --short
 npm run verify:local
 ```
 
-The verification command exercises local settings, indexing, retrieval, preview rendering, CORS restrictions, and TypeScript checks.
+The verification command exercises local settings, indexing, retrieval, Atlas rebuild/search/generation, preview rendering, CORS restrictions, and TypeScript checks.
 
 ## Quality Scoring and Backfill
 
@@ -274,7 +295,8 @@ After the Electron window opens, the shortest path to a usable local workflow is
 2. Click `Choose folder` and select the local photo library you want to index.
 3. If you want this folder to remain the default, copy the active library into the desktop or backend settings and save.
 4. Click `Start indexing` and wait for the SQLite library to finish building. If MemoLens detects an older low-quality fallback index, this action will switch to `Rebuild index` automatically so the library can be refreshed with the active vision provider.
-5. Go to `Compose`, describe the set you want, and MemoLens will return filtered photos plus a generated title and caption.
+5. Open `Atlas` to build or refresh the Memory Workbench and use Keyword Galaxy to understand the main concepts, memory groups, cleanup queues, people risk, and storylines in the library.
+6. Go to `Compose`, click `AI Inspire` when you want query ideas, or type a request like "9 mountain photos, no people, low repetition." MemoLens will preview local evidence, rerank for relevance/diversity/quality, and return filtered photos plus a generated title and caption.
 
 The folder picker is Electron-only. In plain browser mode, MemoLens can still render the UI, but it cannot scan a local directory or write the SQLite index for you.
 

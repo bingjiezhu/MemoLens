@@ -121,6 +121,97 @@ def main() -> int:
             "db_path": str(state_dir / "storage" / "missing.db"),
         },
     )
+    atlas_status_response = client.get(
+        "/v1/atlas/status",
+        query_string={"db_path": str(state_dir / "storage" / "photo_index.db")},
+    )
+    atlas_rebuild_response = client.post(
+        "/v1/atlas/rebuild",
+        json={"db_path": str(state_dir / "storage" / "photo_index.db")},
+    )
+    atlas_overview_response = client.get(
+        "/v1/atlas/overview",
+        query_string={
+            "db_path": str(state_dir / "storage" / "photo_index.db"),
+            "mode": "semantic",
+            "query": "quiet beach no people",
+            "no_people": "true",
+            "limit": "20",
+        },
+    )
+    atlas_search_response = client.post(
+        "/v1/atlas/search",
+        json={
+            "db_path": str(state_dir / "storage" / "photo_index.db"),
+            "text": "quiet beach no people",
+            "mode": "semantic",
+            "no_people": True,
+            "limit": 20,
+        },
+    )
+    atlas_asset_id = (
+        ((atlas_overview_response.json or {}).get("assets") or [{}])[0].get("id")
+        if atlas_overview_response.status_code == 200
+        else None
+    )
+    atlas_feedback_response = client.post(
+        "/v1/atlas/feedback",
+        json={
+            "db_path": str(state_dir / "storage" / "photo_index.db"),
+            "target_kind": "asset",
+            "target_id": atlas_asset_id,
+            "action": "more_like",
+        },
+    )
+    atlas_generate_response = client.post(
+        "/v1/atlas/generate",
+        json={
+            "db_path": str(state_dir / "storage" / "photo_index.db"),
+            "image_library_dir": str(photos_dir),
+            "text": "quiet beach no people",
+            "top_k": 3,
+            "no_people": True,
+            "include_copy": False,
+        },
+    )
+    atlas_workbench_response = client.get(
+        "/v1/atlas/workbench",
+        query_string={
+            "db_path": str(state_dir / "storage" / "photo_index.db"),
+            "lens": "explore",
+            "query": "quiet beach no people",
+            "no_people": "true",
+            "limit": "20",
+        },
+    )
+    atlas_memory_id = (
+        ((atlas_workbench_response.json or {}).get("memories") or [{}])[0].get("id")
+        if atlas_workbench_response.status_code == 200
+        else None
+    )
+    atlas_memory_response = client.get(
+        f"/v1/atlas/memory/{atlas_memory_id}",
+        query_string={"db_path": str(state_dir / "storage" / "photo_index.db")},
+    ) if atlas_memory_id else None
+    atlas_cleanup_response = client.get(
+        "/v1/atlas/cleanup",
+        query_string={"db_path": str(state_dir / "storage" / "photo_index.db")},
+    )
+    atlas_basket_response = client.post(
+        "/v1/atlas/basket",
+        json={
+            "db_path": str(state_dir / "storage" / "photo_index.db"),
+            "asset_ids": [atlas_asset_id] if atlas_asset_id else [],
+            "name": "Verification basket",
+        },
+    )
+    inspiration_response = client.post(
+        "/v1/inspiration/generate",
+        json={
+            "db_path": str(state_dir / "storage" / "photo_index.db"),
+            "count": 3,
+        },
+    )
     copy_response = client.post(
         "/v1/retrieval/copy",
         json={
@@ -317,6 +408,61 @@ def main() -> int:
         "chinese_query_result_status": chinese_query_response.json["status"],
         "chinese_query_candidate_count": len(chinese_query_response.json["data"]),
         "missing_db_query_status": missing_db_query_response.status_code,
+        "atlas_status_status": atlas_status_response.status_code,
+        "atlas_status_needs_rebuild": (
+            atlas_status_response.json or {}
+        ).get("needs_rebuild"),
+        "atlas_rebuild_status": atlas_rebuild_response.status_code,
+        "atlas_rebuild_image_count": (
+            atlas_rebuild_response.json or {}
+        ).get("image_count"),
+        "atlas_overview_status": atlas_overview_response.status_code,
+        "atlas_overview_visible_count": (
+            atlas_overview_response.json or {}
+        ).get("visible_count"),
+        "atlas_overview_cluster_count": len(
+            (atlas_overview_response.json or {}).get("clusters") or []
+        ),
+        "atlas_search_status": atlas_search_response.status_code,
+        "atlas_search_visible_count": (
+            atlas_search_response.json or {}
+        ).get("visible_count"),
+        "atlas_feedback_status": atlas_feedback_response.status_code,
+        "atlas_generate_status": atlas_generate_response.status_code,
+        "atlas_generate_result_status": (
+            atlas_generate_response.json or {}
+        ).get("status"),
+        "atlas_generate_count": len(
+            (atlas_generate_response.json or {}).get("data") or []
+        ),
+        "atlas_workbench_status": atlas_workbench_response.status_code,
+        "atlas_workbench_memory_count": len(
+            (atlas_workbench_response.json or {}).get("memories") or []
+        ),
+        "atlas_workbench_lens_count": len(
+            (atlas_workbench_response.json or {}).get("lenses") or []
+        ),
+        "atlas_memory_status": (
+            atlas_memory_response.status_code if atlas_memory_response else None
+        ),
+        "atlas_memory_asset_count": (
+            len((atlas_memory_response.json or {}).get("assets") or [])
+            if atlas_memory_response
+            else 0
+        ),
+        "atlas_cleanup_status": atlas_cleanup_response.status_code,
+        "atlas_cleanup_has_stacks": isinstance(
+            (atlas_cleanup_response.json or {}).get("stacks"),
+            list,
+        ),
+        "atlas_basket_status": atlas_basket_response.status_code,
+        "atlas_basket_count": len(
+            ((atlas_basket_response.json or {}).get("basket") or {}).get("asset_ids") or []
+        ),
+        "inspiration_status": inspiration_response.status_code,
+        "inspiration_count": len(
+            (inspiration_response.json or {}).get("suggestions") or []
+        ),
         "copy_status": copy_response.status_code,
         "copy_title_present": isinstance(copy_response.json.get("title"), str)
         or copy_response.json.get("title") is None,
@@ -399,6 +545,42 @@ def main() -> int:
     if result["chinese_query_status"] != 200 or result["chinese_query_candidate_count"] < 1:
         return 1
     if result["missing_db_query_status"] != 400:
+        return 1
+    if result["atlas_status_status"] != 200:
+        return 1
+    if result["atlas_status_needs_rebuild"] is not True:
+        return 1
+    if result["atlas_rebuild_status"] != 200 or result["atlas_rebuild_image_count"] < 1:
+        return 1
+    if (
+        result["atlas_overview_status"] != 200
+        or result["atlas_overview_visible_count"] < 1
+        or result["atlas_overview_cluster_count"] < 1
+    ):
+        return 1
+    if result["atlas_search_status"] != 200 or result["atlas_search_visible_count"] < 1:
+        return 1
+    if result["atlas_feedback_status"] != 200:
+        return 1
+    if (
+        result["atlas_generate_status"] != 200
+        or result["atlas_generate_result_status"] != "completed"
+        or result["atlas_generate_count"] < 1
+    ):
+        return 1
+    if (
+        result["atlas_workbench_status"] != 200
+        or result["atlas_workbench_memory_count"] < 1
+        or result["atlas_workbench_lens_count"] < 6
+    ):
+        return 1
+    if result["atlas_memory_status"] != 200 or result["atlas_memory_asset_count"] < 1:
+        return 1
+    if result["atlas_cleanup_status"] != 200 or result["atlas_cleanup_has_stacks"] is not True:
+        return 1
+    if result["atlas_basket_status"] != 200 or result["atlas_basket_count"] < 1:
+        return 1
+    if result["inspiration_status"] != 200 or result["inspiration_count"] < 1:
         return 1
     if result["copy_status"] != 200 or result["copy_caption_present"] is not True:
         return 1

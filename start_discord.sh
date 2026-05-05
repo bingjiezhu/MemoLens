@@ -1,3 +1,8 @@
-cd /Users/andrewyang/Desktop/image_retrieval/photon-bot
-source ~/.zshrc && npm run dev
+#!/usr/bin/env bash
 
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+cd "${PROJECT_ROOT}/photon-bot"
+npm run dev
