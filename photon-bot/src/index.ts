@@ -4,6 +4,7 @@ import { loadConfig } from "./config.js";
 import { DiscordAdapter } from "./discord.js";
 import { SessionStore } from "./sessionStore.js";
 import type { BotReply, IncomingMessage } from "./types.js";
+import { pathToFileURL } from "node:url";
 
 export async function startBot(): Promise<void> {
   const config = loadConfig();
@@ -118,7 +119,15 @@ function log(
   console.log(prefix, message);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+function isMainModule(): boolean {
+  const entryPath = process.argv[1];
+  if (!entryPath) {
+    return false;
+  }
+  return import.meta.url === pathToFileURL(entryPath).href;
+}
+
+if (isMainModule()) {
   startBot().catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes("Used disallowed intents")) {

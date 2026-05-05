@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
@@ -63,7 +64,27 @@ const LOCAL_INDEX_BATCH_SIZE = 6;
 
 const CURRENT_FILE = fileURLToPath(import.meta.url);
 const CURRENT_DIR = dirname(CURRENT_FILE);
-const PROJECT_ROOT = resolve(CURRENT_DIR, "..", "..");
+const SOURCE_PROJECT_ROOT = resolve(CURRENT_DIR, "..", "..");
+
+function resolveProjectRoot(): string {
+  const candidates = [
+    process.env.MEMOLENS_PROJECT_ROOT,
+    app.getAppPath(),
+    SOURCE_PROJECT_ROOT,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) {
+      continue;
+    }
+    const resolved = resolve(candidate);
+    if (existsSync(join(resolved, "package.json")) && existsSync(join(resolved, "backend"))) {
+      return resolved;
+    }
+  }
+  return SOURCE_PROJECT_ROOT;
+}
+
+const PROJECT_ROOT = resolveProjectRoot();
 
 interface ActiveIndexingJob {
   sender: Electron.WebContents;
@@ -73,6 +94,7 @@ interface ActiveIndexingJob {
 }
 
 let activeIndexingJob: ActiveIndexingJob | null = null;
+let indexingStartInProgress = false;
 
 /**
  * Allow the renderer (loaded from file://) to make requests to the local
@@ -108,10 +130,6 @@ function createWindow(): Electron.BrowserWindow {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      // Allow the file:// renderer to load images/resources from http://127.0.0.1.
-      // This is safe because MemoLens is a local-only desktop app that only
-      // communicates with its own managed backend on localhost.
-      webSecurity: false,
       preload: join(CURRENT_DIR, "preload.js"),
     },
   });
@@ -366,21 +384,46 @@ ipcMain.handle(
     if (activeIndexingJob !== null) {
       throw new Error("An indexing job is already running. Pause or wait for the current run to finish.");
     }
+    if (indexingStartInProgress) {
+      throw new Error("An indexing job is already starting. Wait for the current run to initialize.");
+    }
 
-    const folderPath = resolve(options.folderPath);
-    const settings = await loadDesktopSettings(PROJECT_ROOT);
-    const dbPath = resolve(options.dbPath ?? resolveSelectedDbPath(settings, folderPath));
-    const apiBase = DEFAULT_BACKEND_URL;
-    const imageFiles = await collectImageFiles(folderPath);
+    indexingStartInProgress = true;
+    let job: ActiveIndexingJob | null = null;
 
-    const errors: string[] = [];
-    let completed = 0;
-    let indexed = 0;
-    let skipped = 0;
-    let failed = 0;
-    const job: ActiveIndexingJob = {
-      sender: event.sender,
-      progress: {
+    try {
+      const folderPath = resolve(options.folderPath);
+      const settings = await loadDesktopSettings(PROJECT_ROOT);
+      const dbPath = resolve(options.dbPath ?? resolveSelectedDbPath(settings, folderPath));
+      const apiBase = DEFAULT_BACKEND_URL;
+      const imageFiles = await collectImageFiles(folderPath);
+
+      const errors: string[] = [];
+      let completed = 0;
+      let indexed = 0;
+      let skipped = 0;
+      let failed = 0;
+      job = {
+        sender: event.sender,
+        progress: {
+          phase: "running",
+          total: imageFiles.length,
+          completed,
+          indexed,
+          skipped,
+          failed,
+          currentFile: null,
+          folderPath,
+          dbPath,
+          percent: imageFiles.length === 0 ? 100 : 0,
+        },
+        pauseRequested: false,
+        resumeResolvers: [],
+      };
+      activeIndexingJob = job;
+      indexingStartInProgress = false;
+
+      publishJobProgress(job, {
         phase: "running",
         total: imageFiles.length,
         completed,
@@ -391,26 +434,8 @@ ipcMain.handle(
         folderPath,
         dbPath,
         percent: imageFiles.length === 0 ? 100 : 0,
-      },
-      pauseRequested: false,
-      resumeResolvers: [],
-    };
-    activeIndexingJob = job;
+      });
 
-    publishJobProgress(job, {
-      phase: "running",
-      total: imageFiles.length,
-      completed,
-      indexed,
-      skipped,
-      failed,
-      currentFile: null,
-      folderPath,
-      dbPath,
-      percent: imageFiles.length === 0 ? 100 : 0,
-    });
-
-    try {
       const imageBatches = chunkPaths(imageFiles, LOCAL_INDEX_BATCH_SIZE);
 
       for (const fileBatch of imageBatches) {
@@ -479,8 +504,11 @@ ipcMain.handle(
       });
       return result;
     } finally {
-      releaseResumeResolvers(job);
-      if (activeIndexingJob === job) {
+      indexingStartInProgress = false;
+      if (job) {
+        releaseResumeResolvers(job);
+      }
+      if (job && activeIndexingJob === job) {
         activeIndexingJob = null;
       }
     }

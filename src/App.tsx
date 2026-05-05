@@ -1,6 +1,8 @@
-import { useDeferredValue, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
+import type { MouseEvent } from "react";
 
 import {
+  fetchAiInspirations,
   fetchBackendSettings,
   fetchDraftFromBackend,
   saveBackendSettings,
@@ -29,11 +31,15 @@ import type {
   DesktopIndexingResult,
   DesktopSettings,
   DraftResult,
+  AtlasInspirationCard,
+  AtlasStoryline,
   LocalModelRuntimeSummary,
   PipelineStep,
   ToneVariant,
   VlmProfileCatalogEntry,
 } from "./query/types";
+
+const AtlasView = lazy(() => import("./AtlasView"));
 
 const PIPELINE_LENGTH = 4;
 const GENERATION_STEP_TARGETS = [14, 38, 66, 86];
@@ -220,6 +226,12 @@ function App() {
   const desktopRuntime = isDesktopRuntime();
   const electronShell = isElectronShell();
   const [prompt, setPrompt] = useState(INITIAL_PROMPT);
+  const [atlasInspirationCards, setAtlasInspirationCards] = useState<AtlasInspirationCard[]>([]);
+  const [atlasStorylines, setAtlasStorylines] = useState<AtlasStoryline[]>([]);
+  const [atlasSuggestedQueries, setAtlasSuggestedQueries] = useState<string[]>([]);
+  const [aiSuggestions, setAiSuggestions] = useState<string[]>([]);
+  const [isGeneratingInspirations, setIsGeneratingInspirations] = useState(false);
+  const [aiInspirationError, setAiInspirationError] = useState<string | null>(null);
   const apiBase = import.meta.env.VITE_BACKEND_BASE_URL ?? LOCAL_BACKEND_URL;
   const [draft, setDraft] = useState<DraftResult>(() => createDraft(INITIAL_PROMPT));
   const [pipeline, setPipeline] = useState<PipelineStep[]>(() =>
@@ -255,6 +267,7 @@ function App() {
   const runIdRef = useRef(0);
   const seedRef = useRef(1);
   const generationProgressTimerRef = useRef<number | null>(null);
+  const hasUserNavigatedRef = useRef(false);
   const deferredPrompt = useDeferredValue(prompt);
   const previewAnalysis = analyzePrompt(deferredPrompt || INITIAL_PROMPT);
   const canUseMockMode = health.state === "mock";
@@ -301,6 +314,41 @@ function App() {
         : `Index ready · ${indexStats.totalRecords} photos`
       : "Index empty"
     : "Index pending";
+
+  useEffect(() => {
+    if ("scrollRestoration" in window.history) {
+      window.history.scrollRestoration = "manual";
+    }
+    const resetScroll = () => {
+      if (hasUserNavigatedRef.current) {
+        return;
+      }
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    };
+    const markUserNavigated = () => {
+      hasUserNavigatedRef.current = true;
+    };
+    window.addEventListener("wheel", markUserNavigated, { passive: true });
+    window.addEventListener("touchstart", markUserNavigated, { passive: true });
+    window.addEventListener("keydown", markUserNavigated);
+    resetScroll();
+    window.requestAnimationFrame(resetScroll);
+    const shortTimer = window.setTimeout(resetScroll, 120);
+    const restoreTimer = window.setTimeout(resetScroll, 520);
+    const lateRestoreTimer = window.setTimeout(resetScroll, 1400);
+    const finalRestoreTimer = window.setTimeout(resetScroll, 2600);
+    return () => {
+      window.clearTimeout(shortTimer);
+      window.clearTimeout(restoreTimer);
+      window.clearTimeout(lateRestoreTimer);
+      window.clearTimeout(finalRestoreTimer);
+      window.removeEventListener("wheel", markUserNavigated);
+      window.removeEventListener("touchstart", markUserNavigated);
+      window.removeEventListener("keydown", markUserNavigated);
+    };
+  }, []);
 
   function clearGenerationProgressTimer(): void {
     if (generationProgressTimerRef.current !== null) {
@@ -541,6 +589,7 @@ function App() {
         apiBase,
         imageLibraryDir: selectedFolderPath ?? health.imageLibraryDir ?? null,
         dbPath: selectedDbPath ?? health.dbPath ?? null,
+        shouldApplyCopyUpdate: () => runIdRef.current === runId,
         onCopyUpdate: (copyUpdate: { title?: string | null; caption?: string | null; notes?: string[] | null }) => {
           if (runIdRef.current !== runId) {
             return;
@@ -1010,11 +1059,61 @@ function App() {
   const indexingActionLabel = hasStaleIndex ? "Rebuild index" : "Start indexing";
   const showControlGrid = Boolean(desktopSettings) || Boolean(backendSettings);
   const runtimeHeading = desktopRuntime ? "Desktop runtime" : "Local runtime";
+  const handleAtlasInspirationChange = useCallback(
+    (cards: AtlasInspirationCard[], storylines: AtlasStoryline[], suggestedQueries: string[]) => {
+      setAtlasInspirationCards(cards);
+      setAtlasStorylines(storylines);
+      setAtlasSuggestedQueries(suggestedQueries);
+    },
+    [],
+  );
+  const visibleAtlasInspiration = atlasInspirationCards.slice(0, 5);
+  const visibleStorylinePrompts = atlasStorylines.slice(0, 3);
+  const visibleSuggestedQueries = atlasSuggestedQueries.slice(0, 4);
+
+  function handleSectionNav(event: MouseEvent<HTMLAnchorElement>, sectionId: string): void {
+    event.preventDefault();
+    hasUserNavigatedRef.current = true;
+    const target = document.getElementById(sectionId);
+    if (!target) {
+      return;
+    }
+    window.history.replaceState(null, "", `#${sectionId}`);
+    const scrollToTarget = () => target.scrollIntoView({ block: "start", behavior: "auto" });
+    scrollToTarget();
+    window.setTimeout(scrollToTarget, 80);
+    window.setTimeout(scrollToTarget, 360);
+  }
+
+  async function handleGenerateInspirations(): Promise<void> {
+    if (health.state !== "connected") {
+      setAiInspirationError("Start the local service before asking AI for search ideas.");
+      return;
+    }
+    setIsGeneratingInspirations(true);
+    setAiInspirationError(null);
+    try {
+      const suggestions = await fetchAiInspirations(apiBase, selectedDbPath ?? health.dbPath ?? null);
+      setAiSuggestions(suggestions);
+      if (suggestions.length === 0) {
+        setAiInspirationError("No AI suggestions came back. Try after the library map finishes loading.");
+      }
+    } catch (error) {
+      setAiInspirationError(error instanceof Error ? error.message : "AI inspiration failed.");
+    } finally {
+      setIsGeneratingInspirations(false);
+    }
+  }
 
   return (
     <div className="app-shell">
       <header className="top-nav">
-        <a className="brand" href="#hero" aria-label="MemoLens home">
+        <a
+          className="brand"
+          href="#hero"
+          aria-label="MemoLens home"
+          onClick={(event) => handleSectionNav(event, "hero")}
+        >
           <span className="brand-mark">M</span>
           <span className="brand-text">
             MemoLens
@@ -1023,11 +1122,24 @@ function App() {
         </a>
 
         <nav className="nav-links" aria-label="Primary">
-          <a href="#control">Control</a>
-          <a href="#library">Library</a>
-          <a href="#compose">Compose</a>
-          <a href="#process">Process</a>
-          <a href="#result">Result</a>
+          <a href="#control" onClick={(event) => handleSectionNav(event, "control")}>
+            Control
+          </a>
+          <a href="#library" onClick={(event) => handleSectionNav(event, "library")}>
+            Library
+          </a>
+          <a href="#atlas" onClick={(event) => handleSectionNav(event, "atlas")}>
+            Workbench
+          </a>
+          <a href="#compose" onClick={(event) => handleSectionNav(event, "compose")}>
+            Compose
+          </a>
+          <a href="#process" onClick={(event) => handleSectionNav(event, "process")}>
+            Process
+          </a>
+          <a href="#result" onClick={(event) => handleSectionNav(event, "result")}>
+            Result
+          </a>
         </nav>
 
         <div className="nav-status">
@@ -1507,10 +1619,81 @@ function App() {
           {indexingError ? <p className="inline-error">{indexingError}</p> : null}
         </section>
 
+        <Suspense
+          fallback={
+            <section className="section-block atlas-section" id="atlas">
+              <p className="eyebrow">Memory Workbench</p>
+              <div className="inline-note">Loading library map.</div>
+            </section>
+          }
+        >
+          <AtlasView
+            apiBase={apiBase}
+            imageLibraryDir={selectedFolderPath ?? health.imageLibraryDir ?? null}
+            dbPath={selectedDbPath ?? health.dbPath ?? null}
+            canUseBackend={health.state === "connected"}
+            onInspirationChange={handleAtlasInspirationChange}
+          />
+        </Suspense>
+
         <section id="compose" className="section-block compose-card">
           <div className="section-heading">
             <p className="eyebrow">Compose</p>
             <h2>Describe the set you want.</h2>
+          </div>
+
+          <div className="compose-inspiration-panel">
+            <div className="compose-inspiration-head">
+              <div>
+                <p className="eyebrow">AI Inspiration</p>
+                <h3>Start from what your library already contains.</h3>
+              </div>
+              <span className="meta-pill">from Memory Workbench</span>
+            </div>
+
+            <div className="compose-inspiration-grid">
+              {visibleAtlasInspiration.map((card) => (
+                <button
+                  key={card.id}
+                  className="inspiration-card-button"
+                  type="button"
+                  onClick={() => setPrompt(card.prompt)}
+                >
+                  <strong>{card.title}</strong>
+                  <span>{card.summary}</span>
+                </button>
+              ))}
+              {visibleStorylinePrompts.map((storyline) => (
+                <button
+                  key={storyline.id}
+                  className="inspiration-card-button"
+                  type="button"
+                  onClick={() => setPrompt(storyline.prompt)}
+                >
+                  <strong>{storyline.title}</strong>
+                  <span>{storyline.summary}</span>
+                </button>
+              ))}
+            </div>
+
+            {visibleAtlasInspiration.length === 0 && visibleStorylinePrompts.length === 0 ? (
+              <p className="inline-note">AI Inspiration will appear after the local library map loads.</p>
+            ) : null}
+
+            {visibleSuggestedQueries.length > 0 ? (
+              <div className="composer-suggestions compact-suggestions">
+                {visibleSuggestedQueries.map((query) => (
+                  <button
+                    key={query}
+                    className="chip-button"
+                    type="button"
+                    onClick={() => setPrompt(query)}
+                  >
+                    {query}
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
 
           <div className="composer-suggestions">
@@ -1526,20 +1709,62 @@ function App() {
             ))}
           </div>
 
-          <label className="composer-field">
-            <span className="sr-only">Prompt input</span>
-            <textarea
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                  event.preventDefault();
-                  void runGeneration(activeVariant);
-                }
-              }}
-              placeholder="For example: pick a gentle, post-ready set from my recent library."
-            />
-          </label>
+          <div className="composer-ai-row">
+            <label className="composer-field">
+              <span className="sr-only">Prompt input</span>
+              <textarea
+                value={prompt}
+                onChange={(event) => setPrompt(event.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                    event.preventDefault();
+                    void runGeneration(activeVariant);
+                  }
+                }}
+                placeholder="For example: pick a gentle, post-ready set from my recent library."
+              />
+            </label>
+            <button
+              className="ai-inspire-button"
+              type="button"
+              onClick={() => void handleGenerateInspirations()}
+              disabled={isGeneratingInspirations || health.state !== "connected"}
+            >
+              {isGeneratingInspirations ? "✨ Thinking..." : "✨ AI Inspire"}
+            </button>
+          </div>
+
+          {aiSuggestions.length > 0 ? (
+            <div className="ai-suggestions-panel">
+              <div className="compose-inspiration-head">
+                <div>
+                  <p className="eyebrow">AI Generated Queries</p>
+                  <h3>Fresh ideas from your current library map.</h3>
+                </div>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => void handleGenerateInspirations()}
+                  disabled={isGeneratingInspirations || health.state !== "connected"}
+                >
+                  ✨ Refresh
+                </button>
+              </div>
+              <div className="composer-suggestions compact-suggestions">
+                {aiSuggestions.map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    className="chip-button ai-chip"
+                    type="button"
+                    onClick={() => setPrompt(suggestion)}
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {aiInspirationError ? <p className="inline-error">{aiInspirationError}</p> : null}
 
           <div className="composer-footer">
             <div className="action-row">

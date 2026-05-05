@@ -6,6 +6,7 @@ from flask import Flask, request
 
 from core.config import Settings
 from core.db import ImageIndexRepository
+from core.photo_atlas import PhotoAtlasService
 from core.text_embeddings import TextEmbeddingService
 from .retrieval import (
     OpenAICompatibleQueryPlanner,
@@ -19,7 +20,7 @@ from indexing.vision import OpenAICompatibleVisionClient
 
 
 LOCAL_CORS_HOSTS = {"127.0.0.1", "localhost"}
-DESKTOP_CORS_SCHEMES = {"memolens"}
+DESKTOP_CORS_SCHEMES = {"memolens", "memolens-local"}
 
 
 def _resolve_allowed_origin(origin: str | None) -> str | None:
@@ -29,9 +30,6 @@ def _resolve_allowed_origin(origin: str | None) -> str | None:
     normalized = origin.strip()
     if not normalized:
         return None
-    if normalized == "null":
-        return "null"
-
     parsed = urlparse(normalized)
     if parsed.scheme in DESKTOP_CORS_SCHEMES:
         return normalized
@@ -53,6 +51,7 @@ def configure_runtime(app: Flask, settings: Settings) -> None:
     repository.ensure_schema()
 
     app.extensions["image_index_repository"] = repository
+    app.extensions["photo_atlas_service"] = PhotoAtlasService(repository)
     app.extensions["vision_client"] = OpenAICompatibleVisionClient(resolved_settings)
     app.extensions["embedding_service"] = EmbeddingService(resolved_settings)
     app.extensions["text_embedding_service"] = TextEmbeddingService(resolved_settings)
