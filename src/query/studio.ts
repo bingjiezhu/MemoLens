@@ -35,21 +35,21 @@ const PIPELINE_BLUEPRINT = [
 ];
 
 const KEYWORD_GROUPS: Record<string, string[]> = {
-  soft: ["温柔", "柔和", "soft", "gentle", "softer"],
-  daily: ["日常", "daily", "生活", "vlog", "普通日子"],
-  memory: ["回忆", "memory", "纪念", "recent", "最近", "近半年"],
-  quiet: ["安静", "quiet", "别太热闹", "不要太热闹", "calm"],
-  city: ["城市", "street", "city", "downtown"],
-  portrait: ["某个人", "人物", "portrait", "一个人", "主角"],
-  friends: ["朋友", "friends", "聚会", "一起"],
-  coast: ["海边", "coast", "ocean", "beach", "海"],
-  coffee: ["咖啡", "coffee", "cafe"],
-  walk: ["散步", "walk", "走路", "路上"],
-  light: ["光", "光线", "window", "sunlight", "亮一点"],
-  sunset: ["日落", "sunset", "傍晚", "golden hour"],
-  travel: ["旅行", "travel", "roadtrip", "假期", "度假"],
-  losangeles: ["洛杉矶", "los angeles", "la"],
-  social: ["朋友圈", "发图", "post", "publish", "社交"],
+  soft: ["soft", "gentle", "softer"],
+  daily: ["daily", "everyday", "vlog"],
+  memory: ["memory", "recent", "nostalgic"],
+  quiet: ["quiet", "calm", "not too busy"],
+  city: ["street", "city", "downtown"],
+  portrait: ["portrait", "person", "subject"],
+  friends: ["friends", "gathering", "together"],
+  coast: ["coast", "ocean", "beach", "seaside"],
+  coffee: ["coffee", "cafe"],
+  walk: ["walk", "walking", "road"],
+  light: ["light", "window", "sunlight", "brighter"],
+  sunset: ["sunset", "evening", "golden hour"],
+  travel: ["travel", "roadtrip", "holiday", "vacation"],
+  losangeles: ["los angeles", "la"],
+  social: ["post", "publish", "social", "instagram"],
 };
 
 function hasKeyword(prompt: string, key: string): boolean {
@@ -135,11 +135,11 @@ export function analyzePrompt(rawPrompt: string): DraftAnalysis {
       : "Curated selection";
 
   const timeHint =
-    prompt.includes("最近半年") || prompt.includes("半年")
+    prompt.includes("last six months")
       ? "Last six months"
-      : prompt.includes("最近")
+      : prompt.includes("recent")
         ? "Recent"
-        : prompt.includes("去年")
+        : prompt.includes("last year")
           ? "Last year"
           : "Any time";
 

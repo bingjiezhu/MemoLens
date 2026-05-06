@@ -1,19 +1,19 @@
 import type { BotReply, RetrievalResponse } from "./types.js";
 
 const followUpPrompt = [
-  "继续收窄可以直接回复：",
-  "再来一组",
-  "只保留风景",
-  "发前两张原图",
+  "You can refine by replying:",
+  "More like this",
+  "Keep only landscapes",
+  "Send first two originals",
 ].join("\n");
 
 export function formatReply(result: RetrievalResponse, imagePaths: string[]): BotReply {
   if (result.status !== "completed") {
     return {
       text: [
-        result.message ? `这次检索没有跑通：${result.message}` : "这次检索没有跑通。",
+        result.message ? `This search did not complete: ${result.message}` : "This search did not complete.",
         "",
-        "你可以换一句更具体的描述再试一次，例如：去年夏天海边日落。",
+        "Try a more specific description, for example: beach sunset last summer.",
       ].join("\n"),
       imagePaths: [],
     };
@@ -22,9 +22,9 @@ export function formatReply(result: RetrievalResponse, imagePaths: string[]): Bo
   if (result.data.length === 0) {
     return {
       text: [
-        "这次没有找到合适的照片。",
+        "No matching photos were found.",
         "",
-        "你可以换个说法再试一次，例如：去年夏天海边日落、夜景城市天际线。",
+        "Try another description, for example: beach sunset last summer or night city skyline.",
       ].join("\n"),
       imagePaths: [],
     };
@@ -33,9 +33,9 @@ export function formatReply(result: RetrievalResponse, imagePaths: string[]): Bo
   if (imagePaths.length === 0) {
     return {
       text: [
-        "结果已经找到了，但本地原图没有解析成功，所以这次没法直接把图片发出来。",
+        "Results were found, but the local original image paths could not be resolved.",
         "",
-        "请先确认 `IMAGE_LIBRARY_DIR` 指向本机真实图片目录，然后再试一次。",
+        "Confirm that `IMAGE_LIBRARY_DIR` points to the real local photo folder, then try again.",
       ].join("\n"),
       imagePaths: [],
     };
@@ -43,7 +43,7 @@ export function formatReply(result: RetrievalResponse, imagePaths: string[]): Bo
 
   return {
     text: [
-      `我先帮你筛出 ${imagePaths.length} 张最接近的照片。`,
+      `I found ${imagePaths.length} close matches.`,
       "",
       buildSummary(result),
       "",
@@ -57,9 +57,9 @@ export function formatNextBatchReply(imagePaths: string[]): BotReply {
   if (imagePaths.length === 0) {
     return {
       text: [
-        "上一轮结果已经发完了。",
+        "The previous result set has already been fully sent.",
         "",
-        "你可以直接换个条件继续找，例如：只保留风景、要夜景。",
+        "You can refine the search, for example: keep only landscapes or add night scenes.",
       ].join("\n"),
       imagePaths: [],
     };
@@ -67,12 +67,12 @@ export function formatNextBatchReply(imagePaths: string[]): BotReply {
 
   return {
     text: [
-      `我再补 ${imagePaths.length} 张给你。`,
+      `Here are ${imagePaths.length} more photos.`,
       "",
-      "如果还想继续收窄，也可以直接回复下面这些：",
-      "再来一组",
-      "只保留风景",
-      "发前两张原图",
+      "You can keep refining with:",
+      "More like this",
+      "Keep only landscapes",
+      "Send first two originals",
     ].join("\n"),
     imagePaths,
   };
@@ -81,9 +81,9 @@ export function formatNextBatchReply(imagePaths: string[]): BotReply {
 export function formatNoSessionReply(): BotReply {
   return {
     text: [
-      "我这里还没有上一轮结果。",
+      "There is no previous result set yet.",
       "",
-      "先发一句你想找的照片描述，例如：去年夏天海边日落。",
+      "Send a photo search description first, for example: beach sunset last summer.",
     ].join("\n"),
     imagePaths: [],
   };
@@ -93,15 +93,15 @@ function buildSummary(result: RetrievalResponse): string {
   const lines: string[] = [];
 
   if (result.title) {
-    lines.push(`这组更接近“${result.title}”这类感觉。`);
+    lines.push(`This set is closest to a ${result.title} direction. `);
   }
 
   if (result.caption) {
     lines.push(result.caption.trim());
   } else if (result.notes.length > 0) {
-    lines.push(`关键词更偏 ${result.notes.slice(0, 3).join("、")}。`);
+    lines.push(`The strongest keywords are ${result.notes.slice(0, 3).join(", ")}. `);
   }
 
-  lines.push("我已经把图发给你。");
+  lines.push("Images sent.");
   return lines.join("");
 }

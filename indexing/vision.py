@@ -20,7 +20,7 @@ from .files import PreparedImage
 VISION_PROMPT = """Analyze this photo for a local image retrieval system.
 Return strict JSON with this shape:
 {
-  "tags": ["english tag", "中文标签", ...],
+  "tags": ["english tag", "visual concept", ...],
   "scene": "2-4 word scene summary",
   "subjects": ["person", "cat", ...] or [],
   "count": "e.g. two people, one dog" or "none",
@@ -32,10 +32,11 @@ Return strict JSON with this shape:
 }
 
 Rules:
-- tags: 15-20 tags, each tag in BOTH English and Chinese. Include objects, actions, colors, textures, weather, clothing, composition.
-- Also include location-related tags: terrain type (beach/海边, mountain/山, river/河), environment (rural/乡村, urban/城市, suburban/郊区), region style cues (e.g. Chinese village/中国乡村, European street/欧洲街道).
-- If no people are visible, include tags "no people" and "无人".
-- If people are visible, include tags like "person", "人物", "portrait"/"人像" as appropriate.
+- tags: 15-20 tags, each tag in English only. Include objects, actions, colors, textures, weather, clothing, and composition.
+- Also include location-related English tags: terrain type (beach, mountain, river), environment (rural, urban, suburban), and region style cues (for example, Chinese village, European street).
+- If no people are visible, include the tag "no people".
+- If people are visible, include English tags like "person", "people", "portrait", or "face" as appropriate.
+- Do not include non-English tags or translated duplicates.
 - scene: ultra-short English summary for semantic matching.
 - subjects: list every distinct subject type visible.
 - count: describe quantity of main subjects.

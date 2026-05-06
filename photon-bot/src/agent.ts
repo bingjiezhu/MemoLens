@@ -30,7 +30,7 @@ export async function handleIncomingMessage(
 
   if (!text) {
     return {
-      text: "发一句你想找的照片描述，例如：去年夏天海边日落。",
+      text: "Send a photo search description, for example: beach sunset last summer.",
       imagePaths: [],
     };
   }
@@ -51,8 +51,8 @@ export async function handleIncomingMessage(
     );
     return {
       text: batch.imagePaths.length
-        ? "我把前两张原图发给你。"
-        : "上一轮结果还在，但对应原图没有解析成功。",
+        ? "I sent the first two original images."
+        : "The previous results are still available, but the original image paths could not be resolved.",
       imagePaths: batch.imagePaths,
     };
   }
@@ -107,7 +107,7 @@ function buildNextBatchReply(
 
 function buildEffectiveQuery(text: string, session?: SessionState): string {
   if (session && isRefinementFollowUp(text)) {
-    return `${session.lastQueryText}；补充要求：${text}`;
+    return `${session.lastQueryText}; additional requirement: ${text}`;
   }
   return text;
 }
@@ -117,18 +117,18 @@ function isSessionDependentFollowUp(text: string): boolean {
 }
 
 function isNextBatchRequest(text: string): boolean {
-  return normalizeText(text) === "再来一组";
+  return normalizeText(text) === "morelikethis" || normalizeText(text) === "anotherbatch";
 }
 
 function isOriginalImageRequest(text: string): boolean {
   const normalized = normalizeText(text);
-  return normalized.includes("发前两张原图") || normalized.includes("发前2张原图");
+  return normalized.includes("sendfirsttwooriginals") || normalized.includes("sendfirst2originals");
 }
 
 function isRefinementFollowUp(text: string): boolean {
-  return /^(只保留|少一点|要|多一点)/.test(text.trim());
+  return /^(keep only|less|more|add|remove|without|with)\b/i.test(text.trim());
 }
 
 function normalizeText(text: string): string {
-  return text.replace(/[\s!！?？。,.，]/g, "");
+  return text.replace(/[\s!?.,]/g, "").toLowerCase();
 }

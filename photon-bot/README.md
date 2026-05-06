@@ -1,36 +1,36 @@
 # MemoLens Photon Bot
 
-这个目录现在是 MemoLens 的 Discord 消息接入层。
+This directory contains the Discord messaging bridge for MemoLens.
 
-它做三件事：
+It does three things:
 
-1. 监听 Discord 消息
-2. 调现有 Flask API 做检索
-3. 把结果作为聊天文本和图片附件回到 Discord
+1. Listens for Discord messages.
+2. Calls the existing Flask API for photo retrieval.
+3. Sends chat text and image attachments back to Discord.
 
-## 目录边界
+## Directory Boundary
 
-所有消息平台相关逻辑都在 `photon-bot/`。
+All messaging-platform logic lives in `photon-bot/`.
 
-它不会改动原有的：
+It does not modify the existing:
 
 - `backend/`
 - `frontend/`
 - `core/`
 - `indexing/`
 
-## 运行前提
+## Prerequisites
 
-### 1. 先把后端跑起来
+### 1. Start the Backend First
 
-后端需要能访问你本地的图片目录和 `photo_index.db`。
+The backend must be able to access your local photo folder and `photo_index.db`.
 
-如果你想让后端和 bot 都指向同一套本地图库，可以让它们共享同一个图片目录和 SQLite 文件，例如：
+To make the backend and bot use the same local library, point both of them to the same image folder and SQLite file, for example:
 
 - `IMAGE_LIBRARY_DIR=/absolute/path/to/your/photo/folder`
 - `SQLITE_DB_PATH=/absolute/path/to/your/photo/folder/photo_index.db`
 
-接口联调示例：
+API smoke-test example:
 
 ```bash
 curl -X POST http://127.0.0.1:5519/v1/retrieval/query \
@@ -38,35 +38,35 @@ curl -X POST http://127.0.0.1:5519/v1/retrieval/query \
   -d '{"text":"beach sunset","top_k":3,"db_path":"/absolute/path/to/your/photo/folder/photo_index.db","image_library_dir":"/absolute/path/to/your/photo/folder"}'
 ```
 
-### 2. 准备 Discord Bot
+### 2. Prepare a Discord Bot
 
-你需要：
+You need:
 
-- 一个 Discord application
-- 一个 bot token
-- 打开 `Message Content Intent`
-- 把 bot 邀请进测试 server
+- A Discord application.
+- A bot token.
+- `Message Content Intent` enabled.
+- The bot invited into a test server.
 
-如果你只想让它在某个频道工作，可以把频道 id 写进 `DISCORD_ALLOWED_CHANNEL_IDS`。
+To limit the bot to specific channels, set `DISCORD_ALLOWED_CHANNEL_IDS`.
 
-## 安装
+## Install
 
-在 `photon-bot/` 目录执行：
+Run this from `photon-bot/`:
 
 ```bash
 npm install
 ```
 
-## 环境变量
+## Environment Variables
 
-在 `photon-bot/.env` 里至少填写：
+Add at least these values to `photon-bot/.env`:
 
 - `BACKEND_BASE_URL`
 - `IMAGE_LIBRARY_DIR`
 - `BACKEND_SEND_PATH_OVERRIDES=true`
 - `DISCORD_BOT_TOKEN`
 
-可选：
+Optional values:
 
 - `SQLITE_DB_PATH`
 - `BACKEND_SEND_PATH_OVERRIDES`
@@ -78,46 +78,46 @@ npm install
 - `SESSION_TTL_MINUTES`
 - `LOG_LEVEL`
 
-示例见 [`.env.example`](.env.example)。
+See [`.env.example`](.env.example) for an example.
 
-## 启动
+## Run
 
-先检查 Discord token 是否能登录：
+First verify that the Discord token can log in:
 
 ```bash
 npm run doctor:discord
 ```
 
-开发模式：
+Development mode:
 
 ```bash
 npm run dev
 ```
 
-编译：
+Build:
 
 ```bash
 npm run build
 ```
 
-编译后启动：
+Start after building:
 
 ```bash
 npm run start
 ```
 
-## 消息触发规则
+## Message Triggers
 
-bot 会响应这些来源：
+The bot responds to:
 
-- 私信 bot
-- 在服务器里 `@mention` bot
-- 或者你把频道 id 加进 `DISCORD_ALLOWED_CHANNEL_IDS`
+- Direct messages.
+- Server messages that mention the bot.
+- Messages in channels listed in `DISCORD_ALLOWED_CHANNEL_IDS`.
 
-## 当前支持的 follow-up
+## Supported Follow-Ups
 
-- `再来一组`
-- `只保留风景`
-- `少一点人像`
-- `要夜景`
-- `发前两张原图`
+- `More like this`
+- `Keep only landscapes`
+- `Less portraits`
+- `Add night scenes`
+- `Send first two originals`
