@@ -597,6 +597,7 @@ def generate_search_inspiration():
     raw_count = payload.get("count", 5)
     count = raw_count if isinstance(raw_count, int) else 5
     count = max(3, min(count, 8))
+    context_asset_ids = _string_list_from_payload(payload, "context_asset_ids")[:24]
 
     try:
         service = _atlas_service_for_db_path(payload.get("db_path"))
@@ -611,10 +612,12 @@ def generate_search_inspiration():
             library_summary = {}
         if not isinstance(memories, list):
             memories = []
+        context_assets = service.assets_by_ids(context_asset_ids) if context_asset_ids else []
         planner = current_app.extensions["query_planner"]
         suggestions = planner.generate_search_suggestions(
             library_summary=library_summary,
             memories=[memory for memory in memories if isinstance(memory, dict)],
+            context_assets=context_assets,
             count=count,
         )
     except (FileNotFoundError, ValueError) as exc:

@@ -1,6 +1,7 @@
 import { analyzePrompt } from "./studio";
 import type {
   AtlasBasket,
+  AtlasAsset,
   AtlasLens,
   AtlasMemoryDetail,
   AtlasMode,
@@ -82,6 +83,7 @@ interface FetchDraftOptions {
   apiBase?: string;
   imageLibraryDir?: string | null;
   dbPath?: string | null;
+  contextAssetIds?: string[];
   onCopyUpdate?: (update: DraftCopyUpdate) => void;
   shouldApplyCopyUpdate?: () => boolean;
 }
@@ -153,6 +155,19 @@ const SLOT_KEYWORDS: Array<{ slot: string; keywords: string[] }> = [
   { slot: "walk", keywords: ["walk", "road", "path", "trail"] },
   { slot: "quiet", keywords: ["quiet", "light", "window", "interior", "plant"] },
 ];
+
+const HAN_TEXT_PATTERN = /[\u3400-\u9fff]/u;
+
+function toEnglishText(value: string | null | undefined, fallback: string): string {
+  let cleaned = String(value ?? "").replace(/\s+/g, " ").trim();
+  return cleaned && !HAN_TEXT_PATTERN.test(cleaned) ? cleaned : fallback;
+}
+
+function toEnglishTags(tags: string[]): string[] {
+  return tags
+    .map((tag) => toEnglishText(tag, ""))
+    .filter((tag, index, list) => tag.length > 0 && list.indexOf(tag) === index);
+}
 
 function encodeRelativePath(relativePath: string): string {
   return relativePath
@@ -251,17 +266,26 @@ function toPhotoAsset(
   apiBase: string,
   imageLibraryDir: string | null | undefined,
 ): PhotoAsset {
-  const location = [image.place_name, image.country].filter(Boolean).join(" · ") || "Local library";
+  const location = toEnglishText(
+    [image.place_name, image.country].filter(Boolean).join(" · "),
+    "Local library",
+  );
   const imageUrl = buildPreviewImageUrl(apiBase, image.relative_path, imageLibraryDir, 1100);
+  const title = toEnglishText(
+    image.filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "),
+    "Photo",
+  );
+  const description = toEnglishText(image.description, "Local library photo");
+  const tags = toEnglishTags(image.tags);
 
   return {
     id: image.id,
-    title: image.filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "),
-    summary: image.description,
+    title,
+    summary: description,
     location,
     takenAt: image.taken_at?.slice(0, 10) ?? "unknown",
     slot: inferSlot(image, index),
-    concepts: image.tags,
+    concepts: tags,
     surfaceTint: SURFACE_TINTS[index % SURFACE_TINTS.length],
     imageUrl,
     score: image.score,
@@ -280,11 +304,11 @@ function toParsedQueryPreview(
     topK: parsedQuery.top_k,
     dateFrom: parsedQuery.date_from,
     dateTo: parsedQuery.date_to,
-    locationText: parsedQuery.location_text,
-    descriptiveQuery: parsedQuery.descriptive_query,
-    requiredTerms: parsedQuery.required_terms,
-    optionalTerms: parsedQuery.optional_terms,
-    excludedTerms: parsedQuery.excluded_terms,
+    locationText: toEnglishText(parsedQuery.location_text, "") || null,
+    descriptiveQuery: toEnglishText(parsedQuery.descriptive_query, "") || null,
+    requiredTerms: toEnglishTags(parsedQuery.required_terms),
+    optionalTerms: toEnglishTags(parsedQuery.optional_terms),
+    excludedTerms: toEnglishTags(parsedQuery.excluded_terms),
   };
 }
 
@@ -294,8 +318,9 @@ function fallbackNotes(images: RetrievalApiImage[]): string[] {
   }
 
   const first = images[0];
+  const title = toEnglishText(first.filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "), "the lead photo");
   return [
-    `The set opens with a stronger lead frame like ${first.filename} to establish the theme quickly.`,
+    `The set opens with a stronger lead frame like ${title} to establish the theme quickly.`,
     "The middle introduces detail and space so the sequence does not stay stuck at one viewing distance.",
     "The ending keeps a quieter frame to make the result feel more like a real post-ready set.",
   ];
@@ -314,28 +339,27 @@ function buildDraftResult(args: {
     toPhotoAsset(image, index, apiBase, imageLibraryDir),
   );
   const generatedCopy = payload.generated_copy ?? null;
-  const resolvedTitle = payload.title ?? generatedCopy?.title ?? null;
-  const resolvedCaption = payload.caption ?? generatedCopy?.body ?? null;
-  const resolvedNotes = payload.notes ?? generatedCopy?.highlights ?? null;
+  const resolvedTitle = toEnglishText(payload.title ?? generatedCopy?.title ?? "", "");
+  const resolvedCaption = toEnglishText(payload.caption ?? generatedCopy?.body ?? "", "");
+  const resolvedNotes = (payload.notes ?? generatedCopy?.highlights ?? [])
+    .map((note) => toEnglishText(note, ""))
+    .filter(Boolean);
 
   return {
     id: payload.id,
     prompt,
     title:
-      resolvedTitle ??
+      resolvedTitle ||
       (variant === "soft" ? "Make the ordinary feel lighter" : "Recent life, arranged with intent"),
     caption:
-      resolvedCaption ??
+      resolvedCaption ||
       "Reordering recent photos into a sequence makes the mood and pacing feel much clearer.",
     candidateCount: payload.candidate_count ?? payload.data.length,
     selectedCount: selected.length,
     selected,
     analysis,
     parsedQuery: toParsedQueryPreview(payload.parsed_query),
-    notes:
-      resolvedNotes && resolvedNotes.length > 0
-        ? resolvedNotes
-        : fallbackNotes(payload.data),
+    notes: resolvedNotes.length > 0 ? resolvedNotes : fallbackNotes(payload.data),
   };
 }
 
@@ -363,17 +387,19 @@ async function fetchGeneratedCopyFromBackend(args: {
   }
 
   const generatedCopy = payload.generated_copy ?? null;
-  const notes = payload.notes ?? generatedCopy?.highlights ?? null;
-  const title = payload.title ?? generatedCopy?.title ?? null;
-  const caption = payload.caption ?? generatedCopy?.body ?? null;
+  const notes = (payload.notes ?? generatedCopy?.highlights ?? [])
+    .map((note) => toEnglishText(note, ""))
+    .filter(Boolean);
+  const title = toEnglishText(payload.title ?? generatedCopy?.title ?? "", "");
+  const caption = toEnglishText(payload.caption ?? generatedCopy?.body ?? "", "");
 
-  if (!title && !caption && (!notes || notes.length === 0)) {
+  if (!title && !caption && notes.length === 0) {
     return null;
   }
 
   return {
-    title,
-    caption,
+    title: title || null,
+    caption: caption || null,
     notes,
   };
 }
@@ -454,6 +480,7 @@ export async function fetchAtlasStatus(options: AtlasRequestOptions = {}): Promi
 export async function fetchAiInspirations(
   apiBase: string,
   dbPath?: string | null,
+  contextAssetIds: string[] = [],
 ): Promise<string[]> {
   const response = await fetch(`${apiBase.replace(/\/$/, "")}/v1/inspiration/generate`, {
     method: "POST",
@@ -462,6 +489,7 @@ export async function fetchAiInspirations(
     },
     body: JSON.stringify({
       db_path: dbPath && dbPath.trim().length > 0 ? dbPath : undefined,
+      context_asset_ids: contextAssetIds.length > 0 ? contextAssetIds : undefined,
       count: 5,
     }),
   });
@@ -471,9 +499,34 @@ export async function fetchAiInspirations(
   }
   return Array.isArray(payload.suggestions)
     ? payload.suggestions
-        .map((suggestion) => String(suggestion || "").trim())
+        .map((suggestion) => toEnglishText(String(suggestion || "").trim(), ""))
         .filter((suggestion) => suggestion.length > 0)
     : [];
+}
+
+export function atlasAssetToPhotoAsset(
+  asset: AtlasAsset,
+  index: number,
+  apiBase: string,
+  imageLibraryDir: string | null | undefined,
+): PhotoAsset {
+  return toPhotoAsset(
+    {
+      id: asset.id,
+      filename: asset.filename,
+      relative_path: asset.relative_path,
+      taken_at: asset.taken_at,
+      place_name: asset.place_name,
+      country: asset.country,
+      description: asset.description,
+      tags: asset.tags,
+      score: asset.quality_score,
+      matched_terms: [],
+    },
+    index,
+    apiBase,
+    imageLibraryDir,
+  );
 }
 
 export async function rebuildAtlas(options: AtlasRequestOptions = {}): Promise<AtlasStatus> {

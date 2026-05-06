@@ -101,10 +101,10 @@ def main() -> int:
             "db_path": str(state_dir / "storage" / "photo_index.db"),
         },
     )
-    chinese_query_response = client.post(
+    no_people_beach_query_response = client.post(
         "/v1/retrieval/query",
         json={
-            "text": "不要人像的海边照片",
+            "text": "beach photos without portraits",
             "top_k": 3,
             "include_copy": False,
             "image_library_dir": str(photos_dir),
@@ -171,6 +171,7 @@ def main() -> int:
             "text": "quiet beach no people",
             "top_k": 3,
             "no_people": True,
+            "asset_ids": [atlas_asset_id] if atlas_asset_id else [],
             "include_copy": False,
         },
     )
@@ -209,6 +210,7 @@ def main() -> int:
         "/v1/inspiration/generate",
         json={
             "db_path": str(state_dir / "storage" / "photo_index.db"),
+            "context_asset_ids": [atlas_asset_id] if atlas_asset_id else [],
             "count": 3,
         },
     )
@@ -277,13 +279,13 @@ def main() -> int:
         ),
     )
     exclusion_only_plan = app.extensions["query_planner"]._fallback_plan(
-        text="不要人",
+        text="no people",
         current_datetime="2026-04-30T12:00:00-07:00",
         top_k_override=3,
     )
     exclusion_only_query = exclusion_only_plan.query
     mountain_no_people_plan = app.extensions["query_planner"]._fallback_plan(
-        text="9张有山景的图，但是不要有人",
+        text="9 mountain landscape photos without people",
         current_datetime="2026-04-30T12:00:00-07:00",
         top_k_override=9,
     )
@@ -404,9 +406,9 @@ def main() -> int:
         "query_result_status": query_response.json["status"],
         "query_candidate_count": len(query_response.json["data"]),
         "query_has_generated_copy": query_response.json.get("generated_copy") is not None,
-        "chinese_query_status": chinese_query_response.status_code,
-        "chinese_query_result_status": chinese_query_response.json["status"],
-        "chinese_query_candidate_count": len(chinese_query_response.json["data"]),
+        "no_people_beach_query_status": no_people_beach_query_response.status_code,
+        "no_people_beach_query_result_status": no_people_beach_query_response.json["status"],
+        "no_people_beach_query_candidate_count": len(no_people_beach_query_response.json["data"]),
         "missing_db_query_status": missing_db_query_response.status_code,
         "atlas_status_status": atlas_status_response.status_code,
         "atlas_status_needs_rebuild": (

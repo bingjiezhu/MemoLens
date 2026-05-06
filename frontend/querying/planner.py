@@ -53,8 +53,8 @@ Rules:
 - Keep terms short, lowercase, and retrieval-friendly.
 - If a phrase is important, keep it as one term if possible.
 - Use location_text for place constraints like "San Diego Zoo".
-- Treat negative constraints such as "不要", "不包含", "没有", "无人", "no people",
-  and "without people" as excluded_terms, not required_terms.
+- Treat negative constraints such as "no people", "without people", "excluding people",
+  and equivalent user wording as excluded_terms, not required_terms.
 - For no-person requests, include broad human-presence exclusions such as
   people, person, human, portrait, face, selfie, man, woman, child, children,
   boy, girl, and adult.
@@ -76,8 +76,8 @@ Rules:
 - Generate creative natural-language photo search queries the user could paste into a photo retrieval box.
 - Each query should ask for a useful set, not a single asset.
 - Prefer concrete visual constraints: theme, mood, people/no-people, diversity, posting/story use.
-- Match the user's likely bilingual context: Chinese is welcome, with short English visual keywords only when useful.
-- Keep each query concise, ideally 8-24 Chinese characters or 5-14 English words.
+- Return English-only suggestions.
+- Keep each query concise, ideally 5-14 English words.
 - Do not mention metadata, embeddings, indexes, databases, or model behavior.
 - Do not include markdown or extra explanation.
 """
@@ -119,42 +119,41 @@ LOCAL_QUERY_STOPWORDS = {
     "with",
     "year",
     "yesterday",
-    "一",
-    "一些",
-    "一下",
-    "一种",
-    "一种",
-    "不",
-    "不要",
-    "不是",
-    "不用",
-    "人物",
-    "人像",
-    "人",
-    "们",
-    "图",
-    "图片",
-    "场景",
-    "张",
-    "帮",
-    "帮我",
-    "找",
-    "找找",
-    "挑",
-    "挑出",
-    "照片",
-    "照",
-    "给我",
-    "自然",
-    "要",
-    "选",
-    "选出",
-    "这类",
-    "这种",
-    "那种",
-    "里",
-    "风光",
-    "风景",
+    "\u4e00",
+    "\u4e00\u4e9b",
+    "\u4e00\u4e0b",
+    "\u4e00\u79cd",
+    "\u4e0d",
+    "\u4e0d\u8981",
+    "\u4e0d\u662f",
+    "\u4e0d\u7528",
+    "\u4eba\u7269",
+    "\u4eba\u50cf",
+    "\u4eba",
+    "\u4eec",
+    "\u56fe",
+    "\u56fe\u7247",
+    "\u573a\u666f",
+    "\u5f20",
+    "\u5e2e",
+    "\u5e2e\u6211",
+    "\u627e",
+    "\u627e\u627e",
+    "\u6311",
+    "\u6311\u51fa",
+    "\u7167\u7247",
+    "\u7167",
+    "\u7ed9\u6211",
+    "\u81ea\u7136",
+    "\u8981",
+    "\u9009",
+    "\u9009\u51fa",
+    "\u8fd9\u7c7b",
+    "\u8fd9\u79cd",
+    "\u90a3\u79cd",
+    "\u91cc",
+    "\u98ce\u5149",
+    "\u98ce\u666f",
 }
 LOCAL_DATE_PATTERNS = [
     r"\btoday\b",
@@ -165,16 +164,16 @@ LOCAL_DATE_PATTERNS = [
     r"\bthis\s+month\b",
     r"\bthis\s+year\b",
     r"\bin\s+(19|20)\d{2}\b",
-    r"今天",
-    r"昨天",
-    r"最近半年",
-    r"最近一个月",
-    r"最近一周",
-    r"上周",
-    r"上个月",
-    r"去年",
-    r"今年",
-    r"(19|20)\d{2}年",
+    "\u4eca\u5929",
+    "\u6628\u5929",
+    "\u6700\u8fd1\u534a\u5e74",
+    "\u6700\u8fd1\u4e00\u4e2a\u6708",
+    "\u6700\u8fd1\u4e00\u5468",
+    "\u4e0a\u5468",
+    "\u4e0a\u4e2a\u6708",
+    "\u53bb\u5e74",
+    "\u4eca\u5e74",
+    "(19|20)\\d{2}\u5e74",
 ]
 LOCAL_EXCLUSION_PATTERN = re.compile(
     r"\b(?:without|excluding|except|not)\s+([a-z0-9-]+(?:\s+[a-z0-9-]+){0,2})",
@@ -186,15 +185,15 @@ LOCAL_COMPLEX_QUERY_MARKERS = [
     "autumn",
     "fall",
     "winter",
-    "春",
-    "夏",
-    "秋",
-    "冬",
-    "优先",
-    "最好",
-    "或者",
-    "同时",
-    "然后",
+    "\u6625",
+    "\u590f",
+    "\u79cb",
+    "\u51ac",
+    "\u4f18\u5148",
+    "\u6700\u597d",
+    "\u6216\u8005",
+    "\u540c\u65f6",
+    "\u7136\u540e",
 ]
 LOCAL_HUMAN_PRESENCE_TERMS = [
     "person",
@@ -237,27 +236,27 @@ LOCAL_HUMAN_PRESENCE_TERMS = [
 LOCAL_HUMAN_PRESENCE_TERM_SET = set(LOCAL_HUMAN_PRESENCE_TERMS)
 LOCAL_EXCLUSION_TERM_MAP: list[tuple[list[str], list[str]]] = [
     (
-        ["不包含人像", "不要人像", "别要人像", "不带人像", "不要有人像"],
+        ["\u4e0d\u5305\u542b\u4eba\u50cf", "\u4e0d\u8981\u4eba\u50cf", "\u522b\u8981\u4eba\u50cf", "\u4e0d\u5e26\u4eba\u50cf", "\u4e0d\u8981\u6709\u4eba\u50cf"],
         LOCAL_HUMAN_PRESENCE_TERMS,
     ),
     (
-        ["不包含人物", "不要人物", "别有人物", "不要有人物", "不带人物"],
+        ["\u4e0d\u5305\u542b\u4eba\u7269", "\u4e0d\u8981\u4eba\u7269", "\u522b\u6709\u4eba\u7269", "\u4e0d\u8981\u6709\u4eba\u7269", "\u4e0d\u5e26\u4eba\u7269"],
         LOCAL_HUMAN_PRESENCE_TERMS,
     ),
     (
         [
-            "不包含人",
-            "不要人",
-            "不要有人",
-            "不带人",
-            "别带人",
-            "没有人",
-            "不能有人",
-            "不出现人",
-            "无人",
-            "没人",
-            "避开人",
-            "排除人",
+            "\u4e0d\u5305\u542b\u4eba",
+            "\u4e0d\u8981\u4eba",
+            "\u4e0d\u8981\u6709\u4eba",
+            "\u4e0d\u5e26\u4eba",
+            "\u522b\u5e26\u4eba",
+            "\u6ca1\u6709\u4eba",
+            "\u4e0d\u80fd\u6709\u4eba",
+            "\u4e0d\u51fa\u73b0\u4eba",
+            "\u65e0\u4eba",
+            "\u6ca1\u4eba",
+            "\u907f\u5f00\u4eba",
+            "\u6392\u9664\u4eba",
             "no people",
             "no person",
             "without people",
@@ -265,20 +264,20 @@ LOCAL_EXCLUSION_TERM_MAP: list[tuple[list[str], list[str]]] = [
         ],
         LOCAL_HUMAN_PRESENCE_TERMS,
     ),
-    (["不包含脸", "不要脸部", "不要脸"], ["face", "portrait", "selfie"]),
+    (["\u4e0d\u5305\u542b\u8138", "\u4e0d\u8981\u8138\u90e8", "\u4e0d\u8981\u8138"], ["face", "portrait", "selfie"]),
 ]
 LOCAL_SEMANTIC_TERM_MAP: list[tuple[str, list[str]]] = [
     (
         "mountain",
         [
-            "山景",
-            "山景照",
-            "山",
-            "山脉",
-            "山峰",
-            "雪山",
-            "岩山",
-            "群山",
+            "\u5c71\u666f",
+            "\u5c71\u666f\u7167",
+            "\u5c71",
+            "\u5c71\u8109",
+            "\u5c71\u5cf0",
+            "\u96ea\u5c71",
+            "\u5ca9\u5c71",
+            "\u7fa4\u5c71",
             "mountain",
             "mountains",
             "mountain view",
@@ -288,47 +287,48 @@ LOCAL_SEMANTIC_TERM_MAP: list[tuple[str, list[str]]] = [
             "summit",
         ],
     ),
-    ("beach", ["海边", "海", "beach", "coast", "ocean"]),
+    ("beach", ["\u6d77\u8fb9", "\u6d77", "beach", "coast", "ocean"]),
     (
         "landscape",
         [
-            "山景",
-            "山景照",
+            "\u5c71\u666f",
+            "\u5c71\u666f\u7167",
             "mountain view",
             "mountain landscape",
-            "自然风光",
-            "风景",
-            "风景照",
-            "景色",
+            "\u81ea\u7136\u98ce\u5149",
+            "\u98ce\u666f",
+            "\u98ce\u666f\u7167",
+            "\u666f\u8272",
             "landscape",
             "scenery",
         ],
     ),
-    ("nature", ["自然风光", "大自然", "自然景色", "nature"]),
-    ("scenery", ["自然风光", "风景", "scenery"]),
-    ("quiet", ["安静", "安静一点", "quiet", "calm"]),
-    ("soft", ["温柔", "柔和", "soft", "gentle"]),
-    ("daily", ["日常", "生活感", "daily"]),
-    ("portrait", ["人物", "某个人", "一个人", "portrait"]),
-    ("friends", ["和朋友", "朋友们", "friends"]),
-    ("walk", ["散步", "走路", "walk"]),
-    ("coffee", ["咖啡", "coffee", "cafe"]),
-    ("city", ["城市", "街头", "city", "street"]),
-    ("sunset", ["日落", "傍晚", "sunset"]),
-    ("travel", ["旅行", "度假", "travel", "trip"]),
-    ("nature", ["森林", "花园", "湖", "山", "nature"]),
-    ("bridge", ["桥", "大桥", "bridge"]),
-    ("fog", ["雾", "fog", "mist"]),
-    ("food", ["吃饭", "美食", "食物", "food", "dish"]),
-    ("dining", ["聚餐", "用餐", "餐桌", "dining", "meal"]),
-    ("restaurant", ["餐厅", "饭店", "restaurant"]),
+    ("nature", ["\u81ea\u7136\u98ce\u5149", "\u5927\u81ea\u7136", "\u81ea\u7136\u666f\u8272", "nature"]),
+    ("scenery", ["\u81ea\u7136\u98ce\u5149", "\u98ce\u666f", "scenery"]),
+    ("quiet", ["\u5b89\u9759", "\u5b89\u9759\u4e00\u70b9", "quiet", "calm"]),
+    ("soft", ["\u6e29\u67d4", "\u67d4\u548c", "soft", "gentle"]),
+    ("daily", ["\u65e5\u5e38", "\u751f\u6d3b\u611f", "daily"]),
+    ("portrait", ["\u4eba\u7269", "\u67d0\u4e2a\u4eba", "\u4e00\u4e2a\u4eba", "portrait"]),
+    ("friends", ["\u548c\u670b\u53cb", "\u670b\u53cb\u4eec", "friends"]),
+    ("walk", ["\u6563\u6b65", "\u8d70\u8def", "walk"]),
+    ("coffee", ["\u5496\u5561", "coffee", "cafe"]),
+    ("city", ["\u57ce\u5e02", "\u8857\u5934", "city", "street"]),
+    ("sunset", ["\u65e5\u843d", "\u508d\u665a", "sunset"]),
+    ("travel", ["\u65c5\u884c", "\u5ea6\u5047", "travel", "trip"]),
+    ("nature", ["\u68ee\u6797", "\u82b1\u56ed", "\u6e56", "\u5c71", "nature"]),
+    ("bridge", ["\u6865", "\u5927\u6865", "bridge"]),
+    ("fog", ["\u96fe", "fog", "mist"]),
+    ("food", ["\u5403\u996d", "\u7f8e\u98df", "\u98df\u7269", "food", "dish"]),
+    ("dining", ["\u805a\u9910", "\u7528\u9910", "\u9910\u684c", "dining", "meal"]),
+    ("restaurant", ["\u9910\u5385", "\u996d\u5e97", "restaurant"]),
 ]
 LOCAL_LOCATION_TERMS: list[tuple[str, list[str]]] = [
-    ("los angeles", ["洛杉矶", "los angeles", " la "]),
-    ("santa monica", ["圣塔莫尼卡", "santa monica"]),
-    ("malibu", ["马里布", "malibu"]),
-    ("san francisco", ["旧金山", "san francisco", "sf "]),
+    ("los angeles", ["\u6d1b\u6749\u77f6", "los angeles", " la "]),
+    ("santa monica", ["\u5723\u5854\u83ab\u5c3c\u5361", "santa monica"]),
+    ("malibu", ["\u9a6c\u91cc\u5e03", "malibu"]),
+    ("san francisco", ["\u65e7\u91d1\u5c71", "san francisco", "sf "]),
 ]
+HAN_TEXT_RE = re.compile("[\u3400-\u9fff]")
 PLANNER_CACHE_LIMIT = 128
 
 
@@ -436,12 +436,15 @@ class OpenAICompatibleQueryPlanner:
         *,
         library_summary: dict[str, object],
         memories: list[dict[str, object]],
+        context_assets: list[dict[str, object]] | None = None,
         count: int = 5,
     ) -> list[str]:
         desired_count = max(3, min(int(count or 5), 8))
+        context_assets = context_assets or []
         fallback_suggestions = self._fallback_search_suggestions(
             library_summary=library_summary,
             memories=memories,
+            context_assets=context_assets,
             count=desired_count,
         )
         if self.settings.query_provider != "vertex" and not self.settings.query_api_key:
@@ -467,10 +470,23 @@ class OpenAICompatibleQueryPlanner:
             }
             for memory in memories[:10]
         ]
+        safe_context_assets = [
+            {
+                "title": asset.get("title") or asset.get("filename"),
+                "taken_at": asset.get("taken_at"),
+                "place_name": asset.get("place_name"),
+                "tags": list(asset.get("tags") or [])[:8],
+                "description": str(asset.get("description") or "")[:220],
+                "quality_score": asset.get("quality_score"),
+                "people_risk": asset.get("people_risk"),
+            }
+            for asset in context_assets[:12]
+        ]
         user_content = (
             f"Generate {desired_count} search suggestions from this private local photo library summary.\n"
             f"Library summary:\n{safe_summary}\n\n"
-            f"Representative memories:\n{safe_memories}"
+            f"Representative memories:\n{safe_memories}\n\n"
+            f"User-selected visual context photos:\n{safe_context_assets}"
         )
 
         try:
@@ -566,38 +582,54 @@ class OpenAICompatibleQueryPlanner:
         *,
         library_summary: dict[str, object],
         memories: list[dict[str, object]],
+        context_assets: list[dict[str, object]] | None = None,
         count: int,
     ) -> list[str]:
+        context_assets = context_assets or []
+        context_terms = []
+        for asset in context_assets[:12]:
+            for term in list(asset.get("tags") or [])[:6]:
+                cleaned = str(term).strip()
+                if cleaned and not HAN_TEXT_RE.search(cleaned) and cleaned not in context_terms:
+                    context_terms.append(cleaned)
         concepts = [
             str(term).strip()
             for term in list(library_summary.get("top_concepts") or [])
-            if str(term).strip()
+            if str(term).strip() and not HAN_TEXT_RE.search(str(term))
         ]
         places = [
             str(place).strip()
             for place in list(library_summary.get("places") or [])
-            if str(place).strip()
+            if str(place).strip() and not HAN_TEXT_RE.search(str(place))
         ]
         suggestions: list[str] = []
+        if context_terms:
+            suggestions.append(
+                f"Find more photos like the selected set, with {', '.join(context_terms[:3])} and low repetition"
+            )
+            suggestions.append(
+                f"Expand the selected photos into a nine-photo set with a {context_terms[0]} mood"
+            )
+            suggestions.append("Keep pure landscapes similar to the selected photos, without people")
         if concepts:
-            suggestions.append(f"找 9 张{concepts[0]}主题照片，相似度低，适合发朋友圈")
+            suggestions.append(f"Find 9 {concepts[0]} photos with low repetition for a social post")
         if len(concepts) >= 2:
-            suggestions.append(f"挑一组{concepts[0]}和{concepts[1]}有关的安静故事线")
+            suggestions.append(f"Build a quiet storyline around {concepts[0]} and {concepts[1]}")
         for memory in memories[:4]:
             memory_concepts = [
                 str(term).strip()
                 for term in list(memory.get("top_concepts") or [])[:3]
-                if str(term).strip()
+                if str(term).strip() and not HAN_TEXT_RE.search(str(term))
             ]
             label = str(memory.get("label") or "").strip()
-            if label and memory_concepts:
+            if label and not HAN_TEXT_RE.search(label) and memory_concepts:
                 suggestions.append(
-                    f"从 {label} 里挑 9 张照片，突出 {', '.join(memory_concepts)}，相似度低"
+                    f"Pick 9 photos from {label}, emphasizing {', '.join(memory_concepts)}, with low repetition"
                 )
         if places:
-            suggestions.append(f"找一组关于 {places[0]} 的旅行片段，不要重复构图")
-        suggestions.append("根据最近照片给我 3 个可以发布的故事主题")
-        suggestions.append("找 9 张山景照片，不要人，相似度低")
+            suggestions.append(f"Find a travel fragment around {places[0]} with varied compositions")
+        suggestions.append("Suggest 3 publishable story themes from recent photos")
+        suggestions.append("Find 9 mountain landscape photos without people and with low repetition")
         return list(dict.fromkeys(suggestions))[:count]
 
     def _request_planning_content(
@@ -846,20 +878,20 @@ class OpenAICompatibleQueryPlanner:
             end = start + timedelta(days=1) - timedelta(microseconds=1)
             return start.isoformat(), end.isoformat()
 
-        if "today" in lowered or "今天" in text:
+        if "today" in lowered or "\u4eca\u5929" in text:
             return day_bounds(reference_datetime)
-        if "yesterday" in lowered or "昨天" in text:
+        if "yesterday" in lowered or "\u6628\u5929" in text:
             return day_bounds(reference_datetime - timedelta(days=1))
-        if "last week" in lowered or "最近一周" in text or "上周" in text:
+        if "last week" in lowered or "\u6700\u8fd1\u4e00\u5468" in text or "\u4e0a\u5468" in text:
             start = reference_datetime - timedelta(days=7)
             return start.isoformat(), reference_datetime.isoformat()
         if "this month" in lowered:
             start = reference_datetime.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             return start.isoformat(), reference_datetime.isoformat()
-        if "最近一个月" in text:
+        if "\u6700\u8fd1\u4e00\u4e2a\u6708" in text:
             start = reference_datetime - timedelta(days=30)
             return start.isoformat(), reference_datetime.isoformat()
-        if "last month" in lowered or "上个月" in text:
+        if "last month" in lowered or "\u4e0a\u4e2a\u6708" in text:
             current_month_start = reference_datetime.replace(
                 day=1,
                 hour=0,
@@ -876,7 +908,7 @@ class OpenAICompatibleQueryPlanner:
                 microsecond=0,
             )
             return previous_month_start.isoformat(), previous_month_end.isoformat()
-        if "this year" in lowered or "今年" in text:
+        if "this year" in lowered or "\u4eca\u5e74" in text:
             start = reference_datetime.replace(
                 month=1,
                 day=1,
@@ -886,7 +918,7 @@ class OpenAICompatibleQueryPlanner:
                 microsecond=0,
             )
             return start.isoformat(), reference_datetime.isoformat()
-        if "last year" in lowered or "去年" in text:
+        if "last year" in lowered or "\u53bb\u5e74" in text:
             previous_year = reference_datetime.year - 1
             start = reference_datetime.replace(
                 year=previous_year,
@@ -907,12 +939,12 @@ class OpenAICompatibleQueryPlanner:
                 microsecond=999999,
             )
             return start.isoformat(), end.isoformat()
-        if "最近半年" in text:
+        if "\u6700\u8fd1\u534a\u5e74" in text:
             start = reference_datetime - timedelta(days=183)
             return start.isoformat(), reference_datetime.isoformat()
 
         explicit_year = re.search(r"\bin\s+((?:19|20)\d{2})\b", lowered)
-        explicit_year_cn = re.search(r"((?:19|20)\d{2})年", text)
+        explicit_year_cn = re.search("((?:19|20)\\d{2})\u5e74", text)
         year_match = explicit_year or explicit_year_cn
         if year_match:
             year = int(year_match.group(1))

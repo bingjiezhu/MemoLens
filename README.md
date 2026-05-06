@@ -11,7 +11,7 @@ This repository is not just an image browser. It is an experimental workspace bu
 
 ![MemoLens architecture](docs/assets/memolens-architecture.png)
 
-Architecture diagram source: [MemoLens Architecture with Models](https://www.figma.com/board/vP1MAiLXXP29ymSYRK3cKl/MemoLens-Architecture-with-Models?node-id=0-1&t=gbEaNXfUiJ2Nmxy6-1)
+Architecture diagram source: [MemoLens Architecture - Latest 2026-05-06](https://www.figma.com/board/vP1MAiLXXP29ymSYRK3cKl/MemoLens-Architecture-with-Models?node-id=48-95)
 
 ## Project Goal
 
@@ -45,18 +45,25 @@ When an external vision profile is unavailable, MemoLens can fall back to local 
 
 ## Architecture Overview
 
-The main workflow in this repository looks like this:
+The current implementation is organized around five boundaries:
 
-1. A local photo folder enters the indexing pipeline, which extracts EXIF data, optional geo metadata, visual descriptions, and lightweight semantic vectors.
-2. Processed records are written into the SQLite `image_index` table, which acts as the retrieval foundation.
-3. A natural-language user prompt is sent to the query planner and rewritten into a structured query.
-4. The retrieval service ranks candidates using time, location, text similarity, tag matching, aesthetic score, and near-duplicate penalties.
-5. The Photo Atlas service can materialize a local Memory Workbench from the same SQLite records, including PCA layout coordinates, semantic clusters, memory groups, duplicate stacks, people-risk hints, cleanup queues, curated baskets, and local feedback.
-6. The renderer turns those memories into a Keyword Galaxy, so users can understand what the library contains before writing a precise query.
-7. Compose can preview the same local evidence, use AI-generated query ideas, and generate a final set with explanations and copy.
-8. Final results can be returned to the Electron desktop UI or adapted into chat responses through `photon-bot`.
+| Layer | Current code | Responsibility |
+| --- | --- | --- |
+| User surfaces | `src/App.tsx`, `src/AtlasView.tsx`, `photon-bot/` | Desktop workflow, Memory Workbench, Compose, chat follow-ups, and browser fallback |
+| Desktop runtime | `electron/main.ts`, `electron/preload.ts`, `electron/backendManager.ts`, `electron/desktopSettings.ts` | Native folder selection, managed Flask startup, local indexing progress, pause/resume control, and safe local preview access |
+| API services | `backend/src/api/routes.py` | Health/settings, indexing, retrieval, copywriting, AI inspiration, Atlas workbench, cleanup, feedback, baskets, and browser-safe JPEG previews |
+| AI and memory engines | `indexing/`, `frontend/querying/`, `core/photo_atlas.py`, `core/text_embeddings.py` | Vision tagging, EXIF/GPS processing, semantic vectors, query planning, multi-signal ranking, diversity rerank, grounded copy, PCA/KMeans Atlas layers, memory groups, duplicate stacks, and storylines |
+| Local data and model layer | `core/db.py`, `core/config.py`, `core/local_model_runtime.py`, `config.yaml` | SQLite `image_index` and `atlas_*` tables, persisted settings, local-first guardrails, model profile routing, and Ollama/Gemma recommendations |
 
-The current `config.yaml` keeps separate profiles for vision and query/copy work. The default profile can be changed through environment variables or the desktop control panel.
+The main product loop now has five connected paths:
+
+1. **Indexing path**: Electron or the browser-backed API sends a local folder or file batch to `/v1/indexing/jobs`. The Python pipeline extracts file metadata, EXIF timestamps, GPS coordinates, optional reverse geocoding, VLM descriptions and tags, semantic vectors, text embeddings, and quality scores, then writes the result into SQLite.
+2. **Retrieval path**: Compose or `photon-bot` sends a natural-language goal to `/v1/retrieval/query`. The planner rewrites the prompt into a structured query, retrieval scores candidates with text, tag, time, location, semantic, quality, and exclusion signals, then reranks for diversity before the copywriter creates a grounded title, caption, and highlights.
+3. **Atlas path**: `/v1/atlas/rebuild` derives a local memory layer from the same SQLite records. It projects vectors into layout coordinates, clusters concepts, creates memory cards, detects duplicate/similar stacks, assigns roles such as cover/detail/ending, and builds cleanup queues.
+4. **Workbench path**: `src/AtlasView.tsx` renders those derived records as lenses, Memory Workbench cards, Keyword Galaxy, storylines, basket selections, feedback actions, and cleanup decisions.
+5. **Inspiration path**: `/v1/inspiration/generate` uses sanitized library summaries and optional basket context to propose new search prompts without sending raw file paths, database paths, API settings, or full-library text.
+
+The current `config.yaml` keeps separate profiles for vision and query/copy work. The desktop control panel can stage local or API profiles independently, while `core/local_model_runtime.py` inspects the machine and recommends practical Ollama/Gemma profiles when they exist.
 
 Included profile families include:
 
@@ -65,7 +72,7 @@ Included profile families include:
 - OpenAI-compatible API profiles
 - DashScope profiles
 - Ollama local profiles, including Gemma 4 options
-- `semantic_hash` as the default local semantic vector backend
+- `semantic_hash` as the default dependency-light semantic vector backend
 
 ## Repository Structure
 
@@ -89,8 +96,13 @@ If you want a practical reading order, start with:
 - `backend/src/__init__.py`
 - `indexing/pipeline.py`
 - `frontend/querying/retrieval.py`
+- `frontend/querying/copywriter.py`
+- `core/photo_atlas.py`
 - `src/App.tsx`
+- `src/AtlasView.tsx`
+- `src/query/api.ts`
 - `electron/main.ts`
+- `photon-bot/src/agent.ts`
 
 ## Quick Start
 

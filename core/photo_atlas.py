@@ -221,21 +221,21 @@ HUMAN_TERMS = {
     "woman",
     "women",
     "worker",
-    "人",
-    "人物",
-    "人像",
-    "有人",
-    "脸",
+    "\u4eba",
+    "\u4eba\u7269",
+    "\u4eba\u50cf",
+    "\u6709\u4eba",
+    "\u8138",
 }
 ABSENCE_PHRASES = {
     "no person",
     "no people",
     "without person",
     "without people",
-    "无人",
-    "没有人",
-    "不要人",
-    "不要有人",
+    "\u65e0\u4eba",
+    "\u6ca1\u6709\u4eba",
+    "\u4e0d\u8981\u4eba",
+    "\u4e0d\u8981\u6709\u4eba",
 }
 DIVERSITY_PHRASES = {
     "diverse",
@@ -244,24 +244,24 @@ DIVERSITY_PHRASES = {
     "no duplicates",
     "avoid duplicates",
     "less repetitive",
-    "相似度低",
-    "不要重复",
-    "不重复",
-    "不要太像",
-    "别太像",
-    "差异大",
-    "多样",
+    "\u76f8\u4f3c\u5ea6\u4f4e",
+    "\u4e0d\u8981\u91cd\u590d",
+    "\u4e0d\u91cd\u590d",
+    "\u4e0d\u8981\u592a\u50cf",
+    "\u522b\u592a\u50cf",
+    "\u5dee\u5f02\u5927",
+    "\u591a\u6837",
 }
 SOCIAL_POST_PHRASES = {
     "post",
     "publish",
     "social",
     "instagram",
-    "朋友圈",
-    "小红书",
-    "发图",
-    "发照片",
-    "发布",
+    "\u670b\u53cb\u5708",
+    "\u5c0f\u7ea2\u4e66",
+    "\u53d1\u56fe",
+    "\u53d1\u7167\u7247",
+    "\u53d1\u5e03",
 }
 GENERIC_TERMS = {
     "a",
@@ -288,24 +288,53 @@ GENERIC_TERMS = {
     "view",
     "without",
     "with",
-    "照片",
-    "图片",
-    "场景",
-    "风景",
+    "\u7167\u7247",
+    "\u56fe\u7247",
+    "\u573a\u666f",
+    "\u98ce\u666f",
 }
 CONCEPT_ALIASES = {
-    "山": "mountain",
-    "山景": "mountain",
-    "山峰": "mountain",
-    "山脉": "mountain",
-    "群山": "mountain",
-    "雪山": "mountain",
+    "\u5c71": "mountain",
+    "\u5c71\u666f": "mountain",
+    "\u5c71\u5cf0": "mountain",
+    "\u5c71\u8109": "mountain",
+    "\u7fa4\u5c71": "mountain",
+    "\u96ea\u5c71": "mountain",
+    "\u5ca9\u5c71": "mountain",
     "mountains": "mountain",
     "peak": "mountain",
     "summit": "mountain",
     "valley": "mountain",
-    "海边": "beach",
-    "海": "beach",
+    "\u6d77\u8fb9": "beach",
+    "\u6d77": "beach",
+    "\u6cb3": "river",
+    "\u6e56": "lake",
+    "\u68ee\u6797": "forest",
+    "\u82b1\u56ed": "garden",
+    "\u81ea\u7136": "nature",
+    "\u5927\u81ea\u7136": "nature",
+    "\u81ea\u7136\u98ce\u5149": "landscape",
+    "\u81ea\u7136\u666f\u8272": "landscape",
+    "\u98ce\u666f\u7167": "landscape",
+    "\u666f\u8272": "scenery",
+    "\u9633\u5149\u660e\u5a9a": "sunny",
+    "\u9633\u5149": "sunlight",
+    "\u767d\u5929": "daytime",
+    "\u57ce\u5e02": "city",
+    "\u8857\u5934": "street",
+    "\u5efa\u7b51\u7269": "architecture",
+    "\u5efa\u7b51": "architecture",
+    "\u6865": "bridge",
+    "\u5927\u6865": "bridge",
+    "\u96fe": "fog",
+    "\u98df\u7269": "food",
+    "\u7f8e\u98df": "food",
+    "\u5403\u996d": "food",
+    "\u9910\u5385": "restaurant",
+    "\u996d\u5e97": "restaurant",
+    "\u5496\u5561": "coffee",
+    "\u65e5\u843d": "sunset",
+    "\u508d\u665a": "sunset",
     "coast": "beach",
     "ocean": "beach",
     "street": "city",
@@ -321,6 +350,7 @@ CONCEPT_ALIASES = {
     "person": "people",
     "people": "people",
 }
+HAN_TEXT_RE = re.compile("[\u3400-\u9fff]")
 
 
 @dataclass
@@ -593,18 +623,34 @@ class PhotoAtlasService:
         show_duplicates: bool = False,
     ) -> dict[str, object]:
         effective_no_people = no_people or query_requests_no_people(text)
+        context_assets: list[dict[str, object]] = []
+        context_terms: list[str] = []
+        if asset_ids:
+            self._ensure_derived_layers()
+            with self._connect() as connection:
+                context_assets = self._assets_by_ids(connection, asset_ids[:24])
+            context_terms = context_terms_from_assets(context_assets)
+        effective_text = append_context_terms(text, context_terms)
         filters = AtlasFilters(
             mode=mode,
-            query=text,
+            query=effective_text,
             no_people=effective_no_people,
             min_quality=min_quality,
             show_duplicates=show_duplicates,
             limit=MAX_VISIBLE_LIMIT,
             cluster_id=cluster_id,
-            asset_ids=asset_ids,
+            asset_ids=None,
         )
         overview = self.overview(filters)
         candidates = list(overview["assets"])
+        if context_assets:
+            existing_ids = {str(asset["id"]) for asset in candidates}
+            candidates.extend(
+                asset
+                for asset in context_assets
+                if str(asset["id"]) not in existing_ids
+                and (not effective_no_people or float(asset.get("people_risk") or 0.0) < 0.45)
+            )
         if not candidates:
             return {
                 "object": "atlas.generate",
@@ -616,7 +662,12 @@ class PhotoAtlasService:
                 "atlas": overview,
             }
 
-        selected = self._curate_assets(candidates, text=text, top_k=top_k)
+        selected = self._curate_assets(
+            candidates,
+            text=effective_text,
+            top_k=top_k,
+            context_assets=context_assets,
+        )
 
         return {
             "object": "atlas.generate",
@@ -627,6 +678,11 @@ class PhotoAtlasService:
             "data": [self._asset_to_retrieval_image(asset) for asset in selected[:top_k]],
             "atlas": overview,
         }
+
+    def assets_by_ids(self, asset_ids: list[str]) -> list[dict[str, object]]:
+        self._ensure_derived_layers()
+        with self._connect() as connection:
+            return self._assets_by_ids(connection, asset_ids)
 
     def query_preview(
         self,
@@ -1631,13 +1687,13 @@ class PhotoAtlasService:
             "object": "atlas.memory",
             "id": row["id"],
             "kind": row["kind"],
-            "label": row["label"],
+            "label": english_text(row["label"], "Memory"),
             "asset_count": len(assets),
             "asset_ids": [str(asset["id"]) for asset in assets],
             "representative_asset_ids": [str(asset["id"]) for asset in representative_assets],
             "representative_assets": representative_assets[:5],
-            "top_concepts": parse_json_list(row["top_concepts_json"]),
-            "place_label": row["place_label"],
+            "top_concepts": english_terms(parse_json_list(row["top_concepts_json"])),
+            "place_label": english_text(row["place_label"]) or None,
             "time_label": row["time_label"],
             "x": float(row["x"]),
             "y": float(row["y"]),
@@ -1837,18 +1893,18 @@ class PhotoAtlasService:
             "id": row["image_id"],
             "filename": row["filename"],
             "relative_path": row["relative_path"],
-            "title": title_from_filename(row["filename"]),
+            "title": english_text(title_from_filename(row["filename"]), "Photo"),
             "taken_at": row["taken_at"],
-            "place_name": row["place_name"],
-            "country": row["country"],
-            "description": row["description"],
-            "tags": tags,
-            "combined_text": row["combined_text"],
+            "place_name": english_text(row["place_name"]) or None,
+            "country": english_text(row["country"]) or None,
+            "description": english_text(row["description"], "Local library photo"),
+            "tags": english_terms(tags),
+            "combined_text": english_text(row["combined_text"], ""),
             "embedding_backend": row["embedding_backend"],
             "base_x": base_x,
             "base_y": base_y,
             "cluster_id": row["cluster_id"],
-            "cluster_label": cluster_labels.get(row["cluster_id"], "Semantic group"),
+            "cluster_label": english_text(cluster_labels.get(row["cluster_id"], "Semantic group"), "Semantic group"),
             "event_id": row["event_id"],
             "duplicate_group_id": row["duplicate_group_id"],
             "neighbor_ids": parse_json_list(row["neighbor_ids_json"]),
@@ -2059,6 +2115,7 @@ class PhotoAtlasService:
         *,
         text: str,
         top_k: int,
+        context_assets: list[dict[str, object]] | None = None,
     ) -> list[dict[str, object]]:
         if not candidates:
             return []
@@ -2067,17 +2124,20 @@ class PhotoAtlasService:
             similarity = self._similarity_lookup(connection)
 
         query_terms = normalize_query_terms(text)
+        context_assets = context_assets or []
         selected: list[dict[str, object]] = []
         pending = [
             {
                 **asset,
                 "_relevance": self._asset_relevance(asset, query_terms, feedback_boosts),
+                "_context_score": self._context_asset_score(asset, context_assets, similarity),
             }
             for asset in candidates
         ]
         pending.sort(
             key=lambda item: (
                 float(item["_relevance"]),
+                float(item["_context_score"]),
                 float(item["quality_score"]),
                 str(item.get("taken_at") or ""),
             ),
@@ -2099,6 +2159,7 @@ class PhotoAtlasService:
                 duplicate_penalty = self._duplicate_penalty(candidate, selected)
                 score = (
                     0.64 * float(candidate["_relevance"])
+                    + 0.34 * float(candidate["_context_score"])
                     + 0.3 * float(candidate["quality_score"])
                     - diversity_weight * diversity_penalty
                     - duplicate_weight * duplicate_penalty
@@ -2114,6 +2175,43 @@ class PhotoAtlasService:
             chosen["_duplicate_penalty"] = round(best_duplicate_penalty, 4)
             selected.append(chosen)
         return selected
+
+    def _context_asset_score(
+        self,
+        candidate: dict[str, object],
+        context_assets: list[dict[str, object]],
+        similarity: dict[tuple[str, str], float],
+    ) -> float:
+        if not context_assets:
+            return 0.0
+        candidate_id = str(candidate["id"])
+        candidate_terms = set(
+            extract_concepts(
+                [str(tag) for tag in candidate.get("tags", [])],
+                str(candidate.get("combined_text") or candidate.get("description") or ""),
+            )
+        )
+        best_similarity = 0.0
+        best_overlap = 0.0
+        for context_asset in context_assets:
+            context_id = str(context_asset["id"])
+            if context_id == candidate_id:
+                best_similarity = max(best_similarity, 0.72)
+            else:
+                pair = tuple(sorted([candidate_id, context_id]))
+                best_similarity = max(best_similarity, similarity.get(pair, 0.0))
+            context_terms = set(
+                extract_concepts(
+                    [str(tag) for tag in context_asset.get("tags", [])],
+                    str(context_asset.get("combined_text") or context_asset.get("description") or ""),
+                )
+            )
+            if candidate_terms and context_terms:
+                best_overlap = max(
+                    best_overlap,
+                    len(candidate_terms & context_terms) / max(1, len(candidate_terms | context_terms)),
+                )
+        return max(0.0, min(1.0, 0.65 * best_similarity + 0.35 * best_overlap))
 
     def _evidence_assets(
         self,
@@ -2509,7 +2607,7 @@ def build_memory_chapters(assets: list[dict[str, object]]) -> list[dict[str, obj
         chapters.append(
             {
                 "id": key,
-                "label": event_label(key) if key.startswith("event_") else key[:10],
+                "label": english_text(event_label(key) if key.startswith("event_") else key[:10], "Memory event"),
                 "asset_count": len(members),
                 "representative_assets": best_assets(members, limit=4),
                 "time_label": time_label_for_assets(members),
@@ -2544,12 +2642,13 @@ def build_library_summary(
     index_health: object,
 ) -> dict[str, object]:
     places = [
-        label
+        english_text(label)
         for label, _count in Counter(
             str(asset.get("place_name") or asset.get("country") or "")
             for asset in assets
             if asset.get("place_name") or asset.get("country")
         ).most_common(6)
+        if english_text(label)
     ]
     dated_assets = [str(asset.get("taken_at"))[:10] for asset in assets if asset.get("taken_at")]
     time_range = {
@@ -2571,7 +2670,7 @@ def build_library_summary(
         if assets
         else 0.0
     )
-    strongest_memory = memories[0]["label"] if memories else None
+    strongest_memory = english_text(memories[0]["label"], "Memory") if memories else None
     return {
         "object": "atlas.library_summary",
         "asset_count": len(assets),
@@ -2603,7 +2702,7 @@ def build_inspiration_cards(
     seen_prompts: set[str] = set()
 
     for memory in memories[:8]:
-        concepts = [str(term) for term in memory.get("top_concepts", [])][:4]
+        concepts = english_terms(memory.get("top_concepts", []))[:4]
         prompt = prompt_for_memory(memory, social=True)
         if prompt in seen_prompts:
             continue
@@ -2642,7 +2741,7 @@ def build_inspiration_cards(
                 "kind": "theme",
                 "title": "Quiet mountain set",
                 "summary": "Mountain views with low people risk and low repetition.",
-                "prompt": "找 9 张山景照片，不要人，相似度低，适合发朋友圈",
+                "prompt": "Find 9 mountain landscape photos without people and with low repetition for a social post",
                 "memory_ids": [],
                 "asset_ids": [str(asset["id"]) for asset in best_assets(mountain_assets, limit=9)],
                 "top_concepts": ["mountain", "landscape", "quiet"],
@@ -2659,7 +2758,7 @@ def build_inspiration_cards(
                 "kind": "cleanup",
                 "title": "Review similar photos",
                 "summary": "Find repeated or weaker frames before making a set.",
-                "prompt": "找出重复和相似度很高的照片，先不要删除，只给我审阅建议",
+                "prompt": "Review duplicate and highly similar photos without deleting anything",
                 "memory_ids": [],
                 "asset_ids": [],
                 "top_concepts": ["cleanup", "duplicates"],
@@ -2687,7 +2786,7 @@ def build_storylines(memories: list[dict[str, object]]) -> list[dict[str, object
             "memory_ids": [memory["id"]],
             "asset_count": int(memory.get("asset_count") or 0),
             "chapter_count": int(memory.get("chapter_count") or 0),
-            "top_concepts": [str(term) for term in memory.get("top_concepts", [])][:5],
+            "top_concepts": english_terms(memory.get("top_concepts", []))[:5],
         }
         for memory in story_memories
     ]
@@ -2695,9 +2794,9 @@ def build_storylines(memories: list[dict[str, object]]) -> list[dict[str, object
 
 def suggested_queries_from_memories(memories: list[dict[str, object]]) -> list[str]:
     queries = [prompt_for_memory(memory, social=True) for memory in memories[:5]]
-    if not any("山景" in query or "mountain" in query for query in queries):
-        queries.append("找 9 张山景照片，不要人，相似度低")
-    queries.append("根据这些照片给我 3 个可以发布的故事主题")
+    if not any("mountain" in query for query in queries):
+        queries.append("Find 9 mountain landscape photos without people and with low repetition")
+    queries.append("Suggest 3 publishable story themes from these photos")
     return list(dict.fromkeys(queries))[:8]
 
 
@@ -2797,23 +2896,23 @@ def library_summary_sentence(
 
 
 def prompt_for_memory(memory: dict[str, object], *, social: bool) -> str:
-    label = str(memory.get("label") or "this memory")
-    concepts = ", ".join(str(term) for term in memory.get("top_concepts", [])[:3])
-    base = f"从 {label} 里挑 9 张照片"
+    label = english_text(memory.get("label"), "this memory")
+    concepts = ", ".join(english_terms(memory.get("top_concepts", [])[:3]))
+    base = f"Pick 9 photos from {label}"
     if concepts:
-        base += f"，突出 {concepts}"
-    base += "，相似度低"
+        base += f", emphasizing {concepts}"
+    base += ", with low repetition"
     if float(memory.get("people_risk") or 0.0) < 0.45:
-        base += "，不要人"
+        base += ", without people"
     if social:
-        base += "，适合发朋友圈"
+        base += ", for a social post"
     else:
-        base += "，整理成一条自然的故事线"
+        base += ", arranged as a natural storyline"
     return base
 
 
 def inspiration_title(memory: dict[str, object]) -> str:
-    label = str(memory.get("label") or "Memory")
+    label = english_text(memory.get("label"), "Memory")
     if len(label) > 42:
         return label[:39] + "..."
     return label
@@ -2825,7 +2924,7 @@ def inspiration_summary(memory: dict[str, object], concepts: list[str]) -> str:
 
 
 def storyline_title(memory: dict[str, object]) -> str:
-    label = str(memory.get("label") or "Story")
+    label = english_text(memory.get("label"), "Story")
     return f"Story: {label}" if not label.lower().startswith("story") else label
 
 
@@ -2837,32 +2936,34 @@ def storyline_summary(memory: dict[str, object]) -> str:
     if memory.get("time_label"):
         parts.append(str(memory["time_label"]))
     if memory.get("place_label"):
-        parts.append(str(memory["place_label"]))
+        place_label = english_text(memory["place_label"])
+        if place_label:
+            parts.append(place_label)
     return " · ".join(parts)
 
 
 def target_count_from_query(text: str) -> int:
     normalized = normalize_text(text)
-    photo_count_match = re.search(r"([1-9]|[12]\d|3[0-6])\s*张", text)
+    photo_count_match = re.search("([1-9]|[12]\\d|3[0-6])\\s*\u5f20", text)
     if photo_count_match:
         return int(photo_count_match.group(1))
     digit_match = re.search(r"\b([1-9]|[12]\d|3[0-6])\b", normalized)
     if digit_match:
         return int(digit_match.group(1))
     chinese_counts = {
-        "一": 1,
-        "二": 2,
-        "两": 2,
-        "三": 3,
-        "四": 4,
-        "五": 5,
-        "六": 6,
-        "七": 7,
-        "八": 8,
-        "九": 9,
+        "\u4e00": 1,
+        "\u4e8c": 2,
+        "\u4e24": 2,
+        "\u4e09": 3,
+        "\u56db": 4,
+        "\u4e94": 5,
+        "\u516d": 6,
+        "\u4e03": 7,
+        "\u516b": 8,
+        "\u4e5d": 9,
     }
     for token, value in chinese_counts.items():
-        if f"{token}张" in text or f"{token} 张" in text:
+        if f"{token}\u5f20" in text or f"{token} \u5f20" in text:
             return value
     return 9
 
@@ -2884,11 +2985,11 @@ def query_mentions_social(text: str) -> bool:
 
 def style_from_query(text: str) -> str | None:
     normalized = normalize_text(text)
-    if any(term in normalized for term in {"温柔", "柔和", "soft", "gentle"}):
+    if any(term in normalized for term in {"\u6e29\u67d4", "\u67d4\u548c", "soft", "gentle"}):
         return "soft"
-    if any(term in normalized for term in {"安静", "quiet", "calm"}):
+    if any(term in normalized for term in {"\u5b89\u9759", "quiet", "calm"}):
         return "quiet"
-    if any(term in normalized for term in {"自然", "natural", "日常", "everyday"}):
+    if any(term in normalized for term in {"\u81ea\u7136", "natural", "\u65e5\u5e38", "everyday"}):
         return "natural"
     return None
 
@@ -3164,7 +3265,33 @@ def normalize_concept(raw_term: str) -> str:
         return ""
     if normalized in CONCEPT_ALIASES:
         return CONCEPT_ALIASES[normalized]
+    if HAN_TEXT_RE.search(normalized):
+        return ""
     return normalized
+
+
+def english_text(value: object, fallback: str = "") -> str:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return fallback
+    for source, target in CONCEPT_ALIASES.items():
+        if HAN_TEXT_RE.search(source):
+            cleaned = cleaned.replace(source, humanize_concept(target))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned if cleaned and not HAN_TEXT_RE.search(cleaned) else fallback
+
+
+def english_terms(values: Iterable[object]) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        normalized = normalize_concept(str(value))
+        if normalized and normalized not in terms:
+            terms.append(normalized)
+            continue
+        cleaned = english_text(value)
+        if cleaned and cleaned not in terms:
+            terms.append(cleaned)
+    return terms
 
 
 def normalize_text(text: str) -> str:
@@ -3191,6 +3318,28 @@ def normalize_query_terms(text: str) -> list[str]:
             continue
         terms.append(term)
     return terms
+
+
+def context_terms_from_assets(assets: list[dict[str, object]], limit: int = 10) -> list[str]:
+    counter: Counter[str] = Counter()
+    for asset in assets:
+        concepts = extract_concepts(
+            [str(tag) for tag in asset.get("tags", [])],
+            str(asset.get("combined_text") or asset.get("description") or ""),
+        )
+        for concept in concepts[:8]:
+            counter[concept] += 1
+    return [term for term, _count in counter.most_common(limit)]
+
+
+def append_context_terms(text: str, context_terms: list[str]) -> str:
+    cleaned_text = str(text or "").strip()
+    unique_terms = [term for term in context_terms if term and term not in normalize_query_terms(cleaned_text)]
+    if not unique_terms:
+        return cleaned_text
+    if not cleaned_text:
+        return " ".join(unique_terms[:8])
+    return f"{cleaned_text} {' '.join(unique_terms[:8])}"
 
 
 def people_risk(tags: list[str], text: str) -> float:
@@ -3314,7 +3463,7 @@ def event_label(event_id: str) -> str:
 
 
 def common_label(values: list[str]) -> str | None:
-    cleaned = [value.strip() for value in values if value.strip()]
+    cleaned = [value.strip() for value in values if value.strip() and not HAN_TEXT_RE.search(value)]
     if not cleaned:
         return None
     return Counter(cleaned).most_common(1)[0][0]
@@ -3337,6 +3486,8 @@ def top_terms(terms: Iterable[str], limit: int = 6) -> list[str]:
 
 
 def humanize_concept(concept: str) -> str:
+    if HAN_TEXT_RE.search(concept):
+        return "Memory"
     return concept.replace("_", " ").replace("-", " ").title()
 
 

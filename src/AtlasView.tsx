@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { MouseEvent } from "react";
 
 import {
   buildPreviewImageUrl,
@@ -18,6 +19,13 @@ const GALAXY_WIDTH = 1000;
 const GALAXY_HEIGHT = 620;
 const GALAXY_CENTER_X = GALAXY_WIDTH / 2;
 const GALAXY_CENTER_Y = GALAXY_HEIGHT / 2;
+const GALAXY_REPULSION = 8000;
+const GALAXY_LINK_DISTANCE = 220;
+const GALAXY_LINK_STRENGTH = 0.001;
+const GALAXY_CENTER_GRAVITY = 0.003;
+const GALAXY_COLLISION_PADDING = 26;
+const GALAXY_LAYOUT_LINKS = 45;
+const GALAXY_RENDER_LINKS = 72;
 
 interface AtlasViewProps {
   apiBase: string;
@@ -29,6 +37,9 @@ interface AtlasViewProps {
     storylines: AtlasStoryline[],
     suggestedQueries: string[],
   ) => void;
+  basketAssetIds?: string[];
+  onBasketToggle?: (asset: AtlasAsset) => void;
+  onBasketAddMany?: (assets: AtlasAsset[]) => void;
 }
 
 type GalaxyNodeKind = "concept" | "memory";
@@ -106,24 +117,56 @@ function hashUnit(value: string): number {
   return (Math.abs(hash) % 1000) / 1000;
 }
 
-function normalizeConcept(value: string): string {
-  return value.trim().toLowerCase();
+const HAN_TEXT_PATTERN = /[\u3400-\u9fff]/u;
+
+function hasHanText(value: string): boolean {
+  return HAN_TEXT_PATTERN.test(value);
 }
 
-function nodePreviewUrl(apiBase: string, node: GalaxyNode, imageLibraryDir?: string | null): string | null {
-  const asset = node.memory?.representative_assets[0] ?? node.memory?.best_assets[0] ?? null;
-  return asset ? previewUrl(apiBase, asset, imageLibraryDir, 240) : null;
+function normalizeConcept(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  return hasHanText(normalized) ? "" : normalized;
+}
+
+function sanitizeDisplayText(value: string, fallback: string): string {
+  let cleaned = value.replace(/\s+/g, " ").trim();
+  return cleaned && !hasHanText(cleaned) ? cleaned : fallback;
+}
+
+function compactGalaxyLabel(value: string, maxLength = 18): string {
+  const normalized = sanitizeDisplayText(value, "Memory");
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 3)}...` : normalized;
 }
 
 function previewUrl(apiBase: string, asset: AtlasAsset, imageLibraryDir?: string | null, width = 420): string {
   return buildPreviewImageUrl(apiBase, asset.relative_path, imageLibraryDir, width);
 }
 
+function assetMatchesConcept(asset: AtlasAsset, concept: string): boolean {
+  const normalizedConcept = normalizeConcept(concept);
+  if (!normalizedConcept) {
+    return false;
+  }
+  const searchable = [
+    asset.filename,
+    asset.title,
+    asset.description,
+    asset.combined_text,
+    asset.cluster_label,
+    asset.mode_cluster_label,
+    ...asset.tags,
+  ].join(" ").toLowerCase();
+  return searchable.includes(normalizedConcept);
+}
+
 function photoStrip(assets: AtlasAsset[], apiBase: string, imageLibraryDir?: string | null) {
   return (
     <div className="memory-photo-strip">
       {assets.slice(0, 5).map((asset) => (
-        <img key={asset.id} src={previewUrl(apiBase, asset, imageLibraryDir, 260)} alt={asset.title} />
+        <img key={asset.id} src={previewUrl(apiBase, asset, imageLibraryDir, 260)} alt={sanitizeDisplayText(asset.title, "Photo")} />
       ))}
     </div>
   );
@@ -203,7 +246,7 @@ function buildKeywordGalaxy(workbench: AtlasWorkbench | null): GalaxyData {
     return {
       id: `memory:${memory.id}`,
       kind: "memory",
-      label: memory.label,
+      label: sanitizeDisplayText(memory.label, "Memory"),
       x: clamp(rawX, 105, GALAXY_WIDTH - 105),
       y: clamp(rawY, 92, GALAXY_HEIGHT - 92),
       radius: clamp(36 + Math.sqrt(memory.asset_count) * 2.8, 44, 78),
@@ -258,27 +301,55 @@ function buildKeywordGalaxy(workbench: AtlasWorkbench | null): GalaxyData {
     }
   }
 
-  // Force simulation: repulsion + link attraction + center gravity
+  const rankedLinks = [...links]
+    .sort((left, right) => {
+      const weightDelta = right.weight - left.weight;
+      if (Math.abs(weightDelta) > 0.001) {
+        return weightDelta;
+      }
+      const leftPriority = left.kind === "cooccurrence" ? 1 : 0;
+      const rightPriority = right.kind === "cooccurrence" ? 1 : 0;
+      return rightPriority - leftPriority;
+    });
+  const layoutLinks = rankedLinks.slice(0, GALAXY_LAYOUT_LINKS);
+  const renderLinks = rankedLinks.slice(0, GALAXY_RENDER_LINKS);
+
+  // Force simulation: repulsion + collision + light link attraction + center gravity.
   const iterations = 80;
   for (let iter = 0; iter < iterations; iter++) {
     const alpha = 1 - iter / iterations;
     // Repulsion between all node pairs
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
-        const dx = nodes[j].x - nodes[i].x;
-        const dy = nodes[j].y - nodes[i].y;
+        const rawDx = nodes[j].x - nodes[i].x;
+        const rawDy = nodes[j].y - nodes[i].y;
+        const rawDist = Math.sqrt(rawDx * rawDx + rawDy * rawDy);
+        const fallbackAngle = (i * 12.9898 + j * 78.233) % (Math.PI * 2);
+        const dx = rawDist < 0.001 ? Math.cos(fallbackAngle) : rawDx;
+        const dy = rawDist < 0.001 ? Math.sin(fallbackAngle) : rawDy;
         const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-        const repulsion = (alpha * 2800) / (dist * dist);
+        const repulsion = (alpha * GALAXY_REPULSION) / (dist * dist);
         const fx = (dx / dist) * repulsion;
         const fy = (dy / dist) * repulsion;
         nodes[i].x -= fx;
         nodes[i].y -= fy;
         nodes[j].x += fx;
         nodes[j].y += fy;
+
+        const minDistance = nodes[i].radius + nodes[j].radius + GALAXY_COLLISION_PADDING;
+        if (dist < minDistance) {
+          const push = (minDistance - dist) * 0.5 * alpha;
+          const pushX = (dx / dist) * push;
+          const pushY = (dy / dist) * push;
+          nodes[i].x -= pushX;
+          nodes[i].y -= pushY;
+          nodes[j].x += pushX;
+          nodes[j].y += pushY;
+        }
       }
     }
     // Attraction along links
-    for (const link of links) {
+    for (const link of layoutLinks) {
       const s = nodeById.get(link.source);
       const t = nodeById.get(link.target);
       if (!s || !t) {
@@ -287,7 +358,7 @@ function buildKeywordGalaxy(workbench: AtlasWorkbench | null): GalaxyData {
       const dx = t.x - s.x;
       const dy = t.y - s.y;
       const dist = Math.max(Math.sqrt(dx * dx + dy * dy), 1);
-      const attraction = alpha * link.weight * (dist - 120) * 0.004;
+      const attraction = alpha * link.weight * (dist - GALAXY_LINK_DISTANCE) * GALAXY_LINK_STRENGTH;
       const fx = (dx / dist) * attraction;
       const fy = (dy / dist) * attraction;
       s.x += fx;
@@ -297,8 +368,8 @@ function buildKeywordGalaxy(workbench: AtlasWorkbench | null): GalaxyData {
     }
     // Center gravity
     for (const node of nodes) {
-      node.x += (GALAXY_CENTER_X - node.x) * alpha * 0.008;
-      node.y += (GALAXY_CENTER_Y - node.y) * alpha * 0.008;
+      node.x += (GALAXY_CENTER_X - node.x) * alpha * GALAXY_CENTER_GRAVITY;
+      node.y += (GALAXY_CENTER_Y - node.y) * alpha * GALAXY_CENTER_GRAVITY;
     }
     // Boundary clamping
     for (const node of nodes) {
@@ -308,7 +379,7 @@ function buildKeywordGalaxy(workbench: AtlasWorkbench | null): GalaxyData {
   }
 
   // Update link source/target node references after simulation
-  for (const link of links) {
+  for (const link of renderLinks) {
     const s = nodeById.get(link.source);
     const t = nodeById.get(link.target);
     if (s) {
@@ -321,7 +392,7 @@ function buildKeywordGalaxy(workbench: AtlasWorkbench | null): GalaxyData {
 
   return {
     nodes,
-    links: links.slice(0, 80),
+    links: renderLinks,
     conceptNodes,
     memoryNodes,
   };
@@ -333,6 +404,9 @@ function AtlasView({
   dbPath,
   canUseBackend,
   onInspirationChange,
+  basketAssetIds = [],
+  onBasketToggle,
+  onBasketAddMany,
 }: AtlasViewProps) {
   const [lens, setLens] = useState<AtlasLens>("explore");
   const [workbench, setWorkbench] = useState<AtlasWorkbench | null>(null);
@@ -343,6 +417,8 @@ function AtlasView({
   const [isLoading, setIsLoading] = useState(false);
   const [isRebuilding, setIsRebuilding] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const filmstripRef = useRef<HTMLDivElement | null>(null);
+  const lastFilmstripIndexRef = useRef<number | null>(null);
 
   const loadWorkbench = useCallback(async () => {
     if (!canUseBackend) {
@@ -399,6 +475,19 @@ function AtlasView({
   const librarySummary = workbench?.library_summary ?? null;
   const indexHealth = workbench?.index_health ?? workbench?.overview.index_health ?? null;
   const placeLensCount = workbench?.lenses.find((item) => item.id === "map")?.count ?? 0;
+  const assetsById = useMemo(() => {
+    const next = new Map<string, AtlasAsset>();
+    for (const asset of workbench?.overview.assets ?? []) {
+      next.set(asset.id, asset);
+    }
+    for (const memory of workbench?.memories ?? []) {
+      for (const asset of [...memory.representative_assets, ...memory.best_assets]) {
+        next.set(asset.id, asset);
+      }
+    }
+    return next;
+  }, [workbench]);
+  const basketIdSet = useMemo(() => new Set(basketAssetIds), [basketAssetIds]);
   const galaxy = useMemo(() => buildKeywordGalaxy(workbench), [workbench]);
   const activeGalaxyNodeId = hoveredGalaxyNodeId ?? selectedGalaxyNodeId ?? (selectedMemoryId ? `memory:${selectedMemoryId}` : null);
   const selectedGalaxyNode =
@@ -410,10 +499,21 @@ function AtlasView({
         .map((node) => node.memory)
         .filter((memory): memory is AtlasMemory => Boolean(memory))
     : [];
-  const conceptAssets = conceptMemories
-    .flatMap((memory) => memory.representative_assets)
-    .filter((asset, index, list) => list.findIndex((item) => item.id === asset.id) === index)
-    .slice(0, 6);
+  const focusedConceptAssets = selectedConceptNode
+    ? (workbench?.overview.assets ?? [])
+        .filter((asset) => assetMatchesConcept(asset, selectedConceptNode.label))
+        .sort((left, right) => right.quality_score - left.quality_score)
+    : [];
+  const selectedMemoryAssets = selectedMemory
+    ? selectedMemory.asset_ids
+        .map((assetId) => assetsById.get(assetId))
+        .filter((asset): asset is AtlasAsset => Boolean(asset))
+    : [];
+  const focusAssets = selectedConceptNode
+    ? focusedConceptAssets
+    : selectedMemoryAssets.length > 0
+      ? selectedMemoryAssets
+      : selectedMemory?.representative_assets ?? [];
 
   async function handleRebuild(): Promise<void> {
     setIsRebuilding(true);
@@ -461,6 +561,29 @@ function AtlasView({
       return true;
     }
     return link.source === activeGalaxyNodeId || link.target === activeGalaxyNodeId;
+  }
+
+  function scrollFilmstrip(direction: -1 | 1): void {
+    filmstripRef.current?.scrollBy({
+      left: direction * 440,
+      behavior: "smooth",
+    });
+  }
+
+  function handleFilmstripAssetClick(
+    asset: AtlasAsset,
+    index: number,
+    event: MouseEvent<HTMLButtonElement>,
+  ): void {
+    setSelectedAssetId(asset.id);
+    if (event.shiftKey && lastFilmstripIndexRef.current !== null) {
+      const start = Math.min(lastFilmstripIndexRef.current, index);
+      const end = Math.max(lastFilmstripIndexRef.current, index);
+      onBasketAddMany?.(focusAssets.slice(start, end + 1));
+    } else {
+      onBasketToggle?.(asset);
+    }
+    lastFilmstripIndexRef.current = index;
   }
 
   return (
@@ -628,7 +751,7 @@ function AtlasView({
                       <circle r={node.radius + 14} className="concept-glow" style={{ fill: node.color }} />
                       <circle r={node.radius} className="concept-core" style={{ fill: node.color }} />
                       <text className="concept-label" textAnchor="middle" dominantBaseline="middle">
-                        {node.label}
+                        {compactGalaxyLabel(node.label, 12)}
                       </text>
                       <text className="concept-count" textAnchor="middle" y={node.radius + 20}>
                         {formatCount(node.count)}
@@ -641,8 +764,6 @@ function AtlasView({
               <g className="galaxy-memories">
                 {galaxy.memoryNodes.map((node) => {
                   const active = nodeIsActive(node.id);
-                  const imageUrl = nodePreviewUrl(apiBase, node, imageLibraryDir);
-                  const imageSize = (node.radius - 5) * 2;
                   return (
                     <g
                       key={node.id}
@@ -662,26 +783,13 @@ function AtlasView({
                     >
                       <title>{`${node.label} · ${formatCount(node.count)} photos · ${node.concepts.slice(0, 3).join(", ")}`}</title>
                       <circle r={node.radius + 10} className="memory-glow" style={{ fill: node.color }} />
-                      {imageUrl ? (
-                        <foreignObject
-                          x={-node.radius + 5}
-                          y={-node.radius + 5}
-                          width={imageSize}
-                          height={imageSize}
-                        >
-                          <div className="memory-node-image">
-                            <img src={imageUrl} alt={node.label} />
-                          </div>
-                        </foreignObject>
-                      ) : (
-                        <circle r={node.radius - 5} className="memory-fallback" />
-                      )}
-                      <circle r={node.radius - 5} className="memory-ring" />
-                      <text className="memory-label" textAnchor="middle" y={node.radius + 20}>
-                        {node.label}
+                      <circle r={node.radius} className="memory-core" style={{ fill: node.color }} />
+                      <circle r={node.radius} className="memory-ring" />
+                      <text className="memory-label" textAnchor="middle" dominantBaseline="middle">
+                        {compactGalaxyLabel(node.label)}
                       </text>
-                      <text className="memory-count" textAnchor="middle" y={node.radius + 38}>
-                        {formatCount(node.count)} photos
+                      <text className="memory-count" textAnchor="middle" y={node.radius + 20}>
+                        {formatCount(node.count)}
                       </text>
                     </g>
                   );
@@ -714,58 +822,80 @@ function AtlasView({
             ) : null}
           </div>
 
-          {selectedConceptNode ? (
+          {selectedConceptNode || selectedMemory ? (
             <div className="memory-insight-strip">
               <div>
-                <p className="eyebrow">Keyword</p>
-                <h3>{selectedConceptNode.label}</h3>
+                <p className="eyebrow">{selectedConceptNode ? "Keyword" : selectedMemory?.kind}</p>
+                <h3>{selectedConceptNode?.label ?? selectedMemory?.label}</h3>
                 <p>
-                  Connected to {conceptMemories.length} memories and {formatCount(selectedConceptNode.count)} weighted photos.
+                  {selectedConceptNode
+                    ? `${focusAssets.length} matching photos · ${conceptMemories.length} connected memories`
+                    : `${selectedMemory?.asset_count ?? focusAssets.length} photos · ${selectedMemory?.chapter_count ?? 0} chapters · quality ${formatScore(selectedMemory?.score ?? 0)}`}
                 </p>
                 <div className="highlight-row">
-                  {conceptMemories.slice(0, 5).map((memory) => (
-                    <span key={memory.id} className="highlight-chip">{memory.label}</span>
-                  ))}
-                </div>
-              </div>
-              <div className="memory-insight-photos">
-                {conceptAssets.map((asset) => (
-                  <button
-                    key={asset.id}
-                    type="button"
-                    className={selectedAssetId === asset.id ? "active" : ""}
-                    onClick={() => setSelectedAssetId(asset.id)}
-                  >
-                    <img src={previewUrl(apiBase, asset, imageLibraryDir, 360)} alt={asset.title} />
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : selectedMemory ? (
-            <div className="memory-insight-strip">
-              <div>
-                <p className="eyebrow">{selectedMemory.kind}</p>
-                <h3>{selectedMemory.label}</h3>
-                <p>
-                  {selectedMemory.asset_count} photos · {selectedMemory.chapter_count} chapters · quality {formatScore(selectedMemory.score)}
-                </p>
-                <div className="highlight-row">
-                  {selectedMemory.top_concepts.slice(0, 5).map((term) => (
+                  {(selectedConceptNode
+                    ? conceptMemories.slice(0, 5).map((memory) => sanitizeDisplayText(memory.label, "Memory"))
+                    : (selectedMemory?.top_concepts ?? []).map(normalizeConcept).filter(Boolean).slice(0, 5)
+                  ).map((term) => (
                     <span key={term} className="highlight-chip">{term}</span>
                   ))}
                 </div>
               </div>
-              <div className="memory-insight-photos">
-                {selectedMemory.representative_assets.slice(0, 6).map((asset) => (
-                  <button
-                    key={asset.id}
-                    type="button"
-                    className={selectedAssetId === asset.id ? "active" : ""}
-                    onClick={() => setSelectedAssetId(asset.id)}
-                  >
-                    <img src={previewUrl(apiBase, asset, imageLibraryDir, 360)} alt={asset.title} />
-                  </button>
-                ))}
+              <div className="memory-filmstrip-panel">
+                <div className="filmstrip-toolbar">
+                  <span>
+                    {focusAssets.length} photos · {basketAssetIds.filter((assetId) => focusAssets.some((asset) => asset.id === assetId)).length} selected here
+                  </span>
+                  <div className="filmstrip-actions">
+                    <button type="button" className="icon-button" onClick={() => scrollFilmstrip(-1)} aria-label="Scroll filmstrip left">
+                      ‹
+                    </button>
+                    <button type="button" className="icon-button" onClick={() => scrollFilmstrip(1)} aria-label="Scroll filmstrip right">
+                      ›
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button compact-button"
+                      onClick={() => onBasketAddMany?.(focusAssets)}
+                      disabled={focusAssets.length === 0}
+                    >
+                      Add all
+                    </button>
+                  </div>
+                </div>
+                <div className="memory-insight-filmstrip" ref={filmstripRef}>
+                  {focusAssets.map((asset, index) => {
+                    const isInBasket = basketIdSet.has(asset.id);
+                    return (
+                      <button
+                        key={asset.id}
+                        type="button"
+                        className={`filmstrip-photo${selectedAssetId === asset.id ? " active" : ""}${isInBasket ? " selected" : ""}`}
+                        onClick={(event) => handleFilmstripAssetClick(asset, index, event)}
+                      >
+                        <img
+                          src={previewUrl(apiBase, asset, imageLibraryDir, 320)}
+                          alt={sanitizeDisplayText(asset.title, "Photo")}
+                          loading="lazy"
+                          decoding="async"
+                        />
+                        <span className="filmstrip-check" aria-hidden="true">
+                          {isInBasket ? "✓" : ""}
+                        </span>
+                        <span className="filmstrip-caption">
+                          <strong>{sanitizeDisplayText(asset.title, "Photo")}</strong>
+                          <small>{sanitizeDisplayText(asset.place_name ?? asset.country ?? asset.taken_at?.slice(0, 10) ?? "Local library", "Local library")}</small>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {focusAssets.length === 0 ? (
+                  <div className="empty-card">
+                    <strong>No matching photos in this map view</strong>
+                    <span>Rebuild Atlas or switch lenses to refresh the local evidence.</span>
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : null}
