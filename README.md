@@ -1,31 +1,35 @@
 # MemoLens
 
-MemoLens is a local photo agent for personal image libraries. It combines natural-language search, model-pluggable image understanding, lightweight semantic indexing, SQLite storage, and result copy generation into one workflow, so you can search your own photos with plain language, filter and curate candidate sets, and produce results that are easier to review or share.
+MemoLens is a local-first AI photo memory workbench for personal image libraries. It turns a folder of private photos into a searchable, explorable, and reusable memory layer: users can index a local library, search with natural language, curate high-quality result sets, generate grounded captions, and reuse the same retrieval stack from the desktop app or chat interfaces.
 
-This repository is not just an image browser. It is an experimental workspace built around the idea of local memory retrieval:
+The project is designed around a practical product loop rather than a single model demo:
 
-- Electron + React provide the desktop interface
-- Flask exposes indexing and retrieval APIs
-- The Python model layer handles pluggable vision and text profiles, semantic indexing, geo enrichment, and ranking
-- `photon-bot/` reuses the same backend capabilities through Discord / iMessage entry points
+- **Index** local photos into a SQLite-backed semantic library.
+- **Understand** images with pluggable vision models, EXIF/GPS metadata, quality signals, and lightweight semantic vectors.
+- **Retrieve** photos from natural-language requests with query planning, multi-signal ranking, exclusion handling, and diversity reranking.
+- **Organize** the library through Memory Workbench, Keyword Galaxy, storylines, baskets, duplicate stacks, and cleanup cues.
+- **Generate** grounded titles, captions, highlights, and fresh search inspiration from selected or summarized local evidence.
+- **Share** the same backend capability through `photon-bot/` for Discord / iMessage-style workflows.
 
 ![MemoLens architecture](docs/assets/memolens-architecture.png)
 
 Architecture diagram source: [MemoLens Architecture - Latest 2026-05-06](https://www.figma.com/board/vP1MAiLXXP29ymSYRK3cKl/MemoLens-Architecture-with-Models?node-id=48-95)
 
-## Project Goal
+## Product Goal
 
-MemoLens is trying to solve more than “list my images.” The real goal is to make it easier to recall, filter, and organize personal photos in a more natural way.
+MemoLens solves a common gap in personal media management: people remember photos by scene, mood, moment, place, people, and intended use, but most local libraries are still organized by filename, folder, or date. The goal is to let users work with photos the way they actually remember them, while keeping the original library local and under their control.
 
 Typical use cases include:
 
-- Searching with plain language, such as “night scenes by the beach last winter” or “quieter everyday photos with fewer portraits”
+- Searching with plain language, such as "night scenes by the beach last winter" or "quiet mountain photos without people"
 - Indexing a local image folder into a searchable SQLite database
+- Finding strong, diverse results instead of a page full of near-duplicates
+- Exploring a large library as memories, concepts, places, stories, and cleanup opportunities
 - Applying diversity reranking so one result set is not dominated by near-duplicate images
-- Generating titles, captions, and highlights from the retrieved images
+- Generating titles, captions, and highlights grounded in retrieved images
 - Reusing the same retrieval stack from both the desktop app and chat-based interfaces
 
-## Current Capabilities
+## What Works Today
 
 - Local photo indexing: scan image folders and extract file metadata, dimensions, EXIF timestamps, and GPS data
 - Image understanding: call the configured vision profile to generate `description`, `tags`, and a conservative `location_hint`
@@ -42,6 +46,20 @@ Typical use cases include:
 - Multi-entry support: the same backend currently powers both the desktop app and `photon-bot`
 
 When an external vision profile is unavailable, MemoLens can fall back to local metadata-derived descriptions and keep the rest of the query and copy workflow available through the configured text profile.
+
+## Demo Flow
+
+A complete local demo can show the full product loop:
+
+1. Open the Electron desktop app and confirm the local backend in `Control`.
+2. Choose a local photo folder and build or refresh the SQLite index.
+3. Search from `Compose` with a request such as "9 mountain photos, no people, low repetition."
+4. Review reranked results, browser-safe previews, matched evidence, and generated copy.
+5. Open `Atlas` to rebuild Memory Workbench and inspect memories, Keyword Galaxy, storylines, duplicate stacks, cleanup cues, and basket selections.
+6. Use `AI Inspire` to generate new search ideas from sanitized library summaries or selected context.
+7. Run `photon-bot/` and search from Discord using the same retrieval backend.
+
+This loop is intentionally local-first: original photos and generated SQLite indexes are not committed to the repository, and model calls receive selected or summarized context rather than full local library dumps.
 
 ## Architecture Overview
 
@@ -341,15 +359,19 @@ cd photon-bot
 npm run doctor:discord
 ```
 
-## Current State
+## Development Status
 
-This repository already has a runnable local-first prototype path, but it still clearly shows an in-progress architecture. It is best understood as a system that is being consolidated:
+The current version is a runnable local-first product prototype with a complete desktop and chat-assisted workflow:
 
-- `src/query/` already defines the intended frontend query boundary
-- The active Python query stack still lives under `frontend/querying/` and should move into a backend-owned package in a later cleanup
-- The model stack is configurable by task: vision can stay on an API profile while query planning and copy generation move to a local Ollama profile
-- When the backend is unavailable, the UI can fall back to a local mock curation flow so interface work can continue
-- The desktop shell now includes a visible control center for runtime settings and can auto-start the local Python backend
-- The root README now documents the whole system rather than only the frontend submodule
+- The Electron shell can manage the Flask backend and desktop runtime settings.
+- The indexing pipeline writes local image metadata, semantic text, embeddings, and quality scores into SQLite.
+- The retrieval service supports structured query planning, negative constraints, semantic scoring, quality-aware selection, and duplicate suppression.
+- Memory Workbench derives Atlas assets, clusters, memories, roles, duplicate stacks, feedback records, baskets, and cleanup views from the same local index.
+- The frontend exposes Compose, AI Inspire, Atlas, Keyword Galaxy, basket selection, and browser-safe image previews.
+- Photon Bot reuses the Flask retrieval API from Discord and keeps short-lived channel sessions for follow-up requests.
 
-If you continue developing this project, the next high-value cleanup is to further unify the local indexing boundary and the retrieval execution boundary, which are still split across Electron, local SQLite handling, and Python prototype code.
+Known engineering notes:
+
+- `frontend/querying/` still contains the active Python query services for historical reasons. The boundary is stable, but a future cleanup can move those modules under a backend-owned package.
+- Model behavior depends on the configured provider and local environment. The project keeps model profiles configurable so a demo can use API models, Vertex/Gemini, MiniMax, DashScope, or local Ollama/Gemma profiles.
+- The repository intentionally excludes local photos, generated databases, `.env` files, runtime caches, exported PDFs, and other private artifacts.
