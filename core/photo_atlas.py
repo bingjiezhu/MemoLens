@@ -8,7 +8,6 @@ import math
 import re
 import sqlite3
 import time
-from pathlib import Path
 from typing import Iterable
 
 import numpy as np
@@ -350,9 +349,6 @@ CONCEPT_ALIASES = {
     "person": "people",
     "people": "people",
 }
-HAN_TEXT_RE = re.compile("[\u3400-\u9fff]")
-
-
 @dataclass
 class AtlasFilters:
     mode: str = DEFAULT_MODE
@@ -936,6 +932,16 @@ class PhotoAtlasService:
         return {
             "object": "atlas.basket",
             "status": "saved",
+            "basket": basket,
+        }
+
+    def load_basket(self) -> dict[str, object]:
+        self._ensure_current_cache()
+        with self._connect() as connection:
+            basket = self._latest_basket(connection)
+        return {
+            "object": "atlas.basket",
+            "status": "completed",
             "basket": basket,
         }
 
@@ -3250,7 +3256,7 @@ def extract_concepts(tags: list[str], text: str) -> list[str]:
     concepts: list[str] = []
     for raw_term in [*tags, *normalize_text(text).split()]:
         term = normalize_concept(raw_term)
-        if not term or term in GENERIC_TERMS or len(term) < 3:
+        if not term or term in GENERIC_TERMS or (term.isascii() and len(term) < 3):
             continue
         if term not in concepts:
             concepts.append(term)
@@ -3265,8 +3271,6 @@ def normalize_concept(raw_term: str) -> str:
         return ""
     if normalized in CONCEPT_ALIASES:
         return CONCEPT_ALIASES[normalized]
-    if HAN_TEXT_RE.search(normalized):
-        return ""
     return normalized
 
 
@@ -3274,11 +3278,8 @@ def english_text(value: object, fallback: str = "") -> str:
     cleaned = str(value or "").strip()
     if not cleaned:
         return fallback
-    for source, target in CONCEPT_ALIASES.items():
-        if HAN_TEXT_RE.search(source):
-            cleaned = cleaned.replace(source, humanize_concept(target))
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned if cleaned and not HAN_TEXT_RE.search(cleaned) else fallback
+    return cleaned or fallback
 
 
 def english_terms(values: Iterable[object]) -> list[str]:
@@ -3463,7 +3464,7 @@ def event_label(event_id: str) -> str:
 
 
 def common_label(values: list[str]) -> str | None:
-    cleaned = [value.strip() for value in values if value.strip() and not HAN_TEXT_RE.search(value)]
+    cleaned = [re.sub(r"\s+", " ", value).strip() for value in values if value.strip()]
     if not cleaned:
         return None
     return Counter(cleaned).most_common(1)[0][0]
@@ -3486,8 +3487,6 @@ def top_terms(terms: Iterable[str], limit: int = 6) -> list[str]:
 
 
 def humanize_concept(concept: str) -> str:
-    if HAN_TEXT_RE.search(concept):
-        return "Memory"
     return concept.replace("_", " ").replace("-", " ").title()
 
 
@@ -3497,7 +3496,7 @@ def title_from_filename(filename: str) -> str:
 
 def slugify(value: str) -> str:
     normalized = normalize_text(value)
-    slug = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "-", normalized).strip("-")
+    slug = re.sub(r"[^\w]+", "-", normalized).strip("-")
     return slug[:48] or "group"
 
 

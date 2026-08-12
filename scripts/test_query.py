@@ -62,15 +62,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--copywriter-image-limit",
         type=int,
-        default=6,
-        help="How many top retrieved images to send into the VLM copywriter.",
+        default=0,
+        help="How many top retrieved images to upload to the configured vision provider (default: 0).",
+    )
+    parser.add_argument(
+        "--allow-photo-upload",
+        action="store_true",
+        help="Explicitly allow --copywriter-image-limit photos to leave this machine for the configured vision provider.",
     )
     parser.add_argument(
         "--skip-copywriting",
         action="store_true",
         help="Skip the post-retrieval VLM copywriting step.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.copywriter_image_limit < 0:
+        parser.error("--copywriter-image-limit must be zero or greater")
+    if args.copywriter_image_limit > 0 and not args.allow_photo_upload:
+        parser.error(
+            "--copywriter-image-limit uploads photo copies; add --allow-photo-upload to confirm"
+        )
+    return args
 
 
 def main() -> int:

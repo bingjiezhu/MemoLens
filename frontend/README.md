@@ -1,18 +1,18 @@
-# Frontend Query Runtime (Python)
+# Legacy Python Query Imports
 
 This folder is **not** the React UI.
 
 The Electron / Vite renderer lives in repo-root `src/`.  
-This `frontend/` package still hosts the active Python retrieval stack for historical reasons:
+The active Python retrieval stack now lives under `backend/src/retrieval/`:
 
 ```text
-frontend/querying/
+backend/src/retrieval/
   planner.py      # natural-language → structured query
   retrieval.py    # multi-signal ranking + diversity rerank
   copywriter.py   # grounded title / caption / highlights
 ```
 
-`backend/src/retrieval/` re-exports these modules so the Flask API can keep a stable import path while the package boundary migrates.
+`frontend/querying/` contains compatibility imports only so existing scripts do not break. New code must import from `backend.src.retrieval`.
 
 ## Responsibility Split
 
@@ -20,7 +20,7 @@ frontend/querying/
 | --- | --- | --- |
 | Renderer UI | `src/`, `src/query/` | Compose, Workbench, Control, HTTP client, Electron bridge |
 | Flask API | `backend/` | Routes, settings, indexing jobs, Atlas endpoints |
-| Query engines | `frontend/querying/` | Planning, retrieval, copy generation |
+| Query engines | `backend/src/retrieval/` | Planning, retrieval, copy generation |
 | Indexing / shared | `indexing/`, `core/` | EXIF, vision, vectors, SQLite, Atlas derivation |
 
 Default local photo placeholder: `./local-photo-library`  

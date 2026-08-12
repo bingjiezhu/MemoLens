@@ -14,6 +14,7 @@ import type {
   DraftResult,
   ParsedQueryPreview,
   PhotoAsset,
+  ScopedIndexStatusResponse,
   ToneVariant,
 } from "./types";
 
@@ -86,6 +87,7 @@ interface FetchDraftOptions {
   contextAssetIds?: string[];
   onCopyUpdate?: (update: DraftCopyUpdate) => void;
   shouldApplyCopyUpdate?: () => boolean;
+  signal?: AbortSignal;
 }
 
 interface SaveBackendSettingsInput {
@@ -126,6 +128,7 @@ interface AtlasRequestOptions {
   selectedMemoryIds?: string[];
   inspirationId?: string | null;
   previewWidth?: number;
+  signal?: AbortSignal;
 }
 
 interface InspirationApiResponse {
@@ -156,16 +159,14 @@ const SLOT_KEYWORDS: Array<{ slot: string; keywords: string[] }> = [
   { slot: "quiet", keywords: ["quiet", "light", "window", "interior", "plant"] },
 ];
 
-const HAN_TEXT_PATTERN = /[\u3400-\u9fff]/u;
-
-function toEnglishText(value: string | null | undefined, fallback: string): string {
-  let cleaned = String(value ?? "").replace(/\s+/g, " ").trim();
-  return cleaned && !HAN_TEXT_PATTERN.test(cleaned) ? cleaned : fallback;
+function normalizeDisplayText(value: string | null | undefined, fallback: string): string {
+  const cleaned = String(value ?? "").replace(/\s+/g, " ").trim();
+  return cleaned || fallback;
 }
 
-function toEnglishTags(tags: string[]): string[] {
+function normalizeTags(tags: string[]): string[] {
   return tags
-    .map((tag) => toEnglishText(tag, ""))
+    .map((tag) => normalizeDisplayText(tag, ""))
     .filter((tag, index, list) => tag.length > 0 && list.indexOf(tag) === index);
 }
 
@@ -266,17 +267,17 @@ function toPhotoAsset(
   apiBase: string,
   imageLibraryDir: string | null | undefined,
 ): PhotoAsset {
-  const location = toEnglishText(
+  const location = normalizeDisplayText(
     [image.place_name, image.country].filter(Boolean).join(" · "),
     "Local library",
   );
   const imageUrl = buildPreviewImageUrl(apiBase, image.relative_path, imageLibraryDir, 1100);
-  const title = toEnglishText(
+  const title = normalizeDisplayText(
     image.filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "),
     "Photo",
   );
-  const description = toEnglishText(image.description, "Local library photo");
-  const tags = toEnglishTags(image.tags);
+  const description = normalizeDisplayText(image.description, "Local library photo");
+  const tags = normalizeTags(image.tags);
 
   return {
     id: image.id,
@@ -304,11 +305,11 @@ function toParsedQueryPreview(
     topK: parsedQuery.top_k,
     dateFrom: parsedQuery.date_from,
     dateTo: parsedQuery.date_to,
-    locationText: toEnglishText(parsedQuery.location_text, "") || null,
-    descriptiveQuery: toEnglishText(parsedQuery.descriptive_query, "") || null,
-    requiredTerms: toEnglishTags(parsedQuery.required_terms),
-    optionalTerms: toEnglishTags(parsedQuery.optional_terms),
-    excludedTerms: toEnglishTags(parsedQuery.excluded_terms),
+    locationText: normalizeDisplayText(parsedQuery.location_text, "") || null,
+    descriptiveQuery: normalizeDisplayText(parsedQuery.descriptive_query, "") || null,
+    requiredTerms: normalizeTags(parsedQuery.required_terms),
+    optionalTerms: normalizeTags(parsedQuery.optional_terms),
+    excludedTerms: normalizeTags(parsedQuery.excluded_terms),
   };
 }
 
@@ -318,7 +319,7 @@ function fallbackNotes(images: RetrievalApiImage[]): string[] {
   }
 
   const first = images[0];
-  const title = toEnglishText(first.filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "), "the lead photo");
+  const title = normalizeDisplayText(first.filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "), "the lead photo");
   return [
     `The set opens with a stronger lead frame like ${title} to establish the theme quickly.`,
     "The middle introduces detail and space so the sequence does not stay stuck at one viewing distance.",
@@ -339,10 +340,10 @@ function buildDraftResult(args: {
     toPhotoAsset(image, index, apiBase, imageLibraryDir),
   );
   const generatedCopy = payload.generated_copy ?? null;
-  const resolvedTitle = toEnglishText(payload.title ?? generatedCopy?.title ?? "", "");
-  const resolvedCaption = toEnglishText(payload.caption ?? generatedCopy?.body ?? "", "");
+  const resolvedTitle = normalizeDisplayText(payload.title ?? generatedCopy?.title ?? "", "");
+  const resolvedCaption = normalizeDisplayText(payload.caption ?? generatedCopy?.body ?? "", "");
   const resolvedNotes = (payload.notes ?? generatedCopy?.highlights ?? [])
-    .map((note) => toEnglishText(note, ""))
+    .map((note) => normalizeDisplayText(note, ""))
     .filter(Boolean);
 
   return {
@@ -368,6 +369,7 @@ async function fetchGeneratedCopyFromBackend(args: {
   prompt: string;
   imageLibraryDir?: string | null;
   images: RetrievalApiImage[];
+  signal?: AbortSignal;
 }): Promise<DraftCopyUpdate | null> {
   const response = await fetch(`${args.apiBase}/v1/retrieval/copy`, {
     method: "POST",
@@ -379,6 +381,7 @@ async function fetchGeneratedCopyFromBackend(args: {
       image_library_dir: args.imageLibraryDir ?? undefined,
       images: args.images.slice(0, 9),
     }),
+    signal: args.signal,
   });
 
   const payload = (await response.json().catch(() => ({}))) as RetrievalCopyApiResponse;
@@ -388,10 +391,10 @@ async function fetchGeneratedCopyFromBackend(args: {
 
   const generatedCopy = payload.generated_copy ?? null;
   const notes = (payload.notes ?? generatedCopy?.highlights ?? [])
-    .map((note) => toEnglishText(note, ""))
+    .map((note) => normalizeDisplayText(note, ""))
     .filter(Boolean);
-  const title = toEnglishText(payload.title ?? generatedCopy?.title ?? "", "");
-  const caption = toEnglishText(payload.caption ?? generatedCopy?.body ?? "", "");
+  const title = normalizeDisplayText(payload.title ?? generatedCopy?.title ?? "", "");
+  const caption = normalizeDisplayText(payload.caption ?? generatedCopy?.body ?? "", "");
 
   if (!title && !caption && notes.length === 0) {
     return null;
@@ -427,6 +430,7 @@ export async function fetchDraftFromBackend(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(requestBody),
+    signal: options.signal,
   });
 
   const payload = (await response.json().catch(() => ({}))) as RetrievalApiResponse;
@@ -444,6 +448,7 @@ export async function fetchDraftFromBackend(
       prompt,
       imageLibraryDir: options.imageLibraryDir,
       images: payload.data,
+      signal: options.signal,
     })
       .then((copyUpdate) => {
         if (copyUpdate && (!options.shouldApplyCopyUpdate || options.shouldApplyCopyUpdate())) {
@@ -469,7 +474,9 @@ export async function fetchAtlasStatus(options: AtlasRequestOptions = {}): Promi
     params.set("db_path", options.dbPath);
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
-  const response = await fetch(`${apiBase}/v1/atlas/status${suffix}`);
+  const response = await fetch(`${apiBase}/v1/atlas/status${suffix}`, {
+    signal: options.signal,
+  });
   const payload = (await response.json().catch(() => ({}))) as AtlasStatus & { message?: string };
   if (!response.ok) {
     throw new Error(payload.message ?? `atlas status failed with status ${response.status}`);
@@ -477,10 +484,30 @@ export async function fetchAtlasStatus(options: AtlasRequestOptions = {}): Promi
   return payload;
 }
 
+export async function fetchScopedIndexStatus(options: AtlasRequestOptions = {}): Promise<ScopedIndexStatusResponse> {
+  const apiBase = options.apiBase ?? "";
+  const params = new URLSearchParams();
+  if (options.dbPath && options.dbPath.trim().length > 0) {
+    params.set("db_path", options.dbPath);
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${apiBase}/v1/index/status${suffix}`, {
+    signal: options.signal,
+  });
+  const payload = (await response.json().catch(() => ({}))) as Partial<ScopedIndexStatusResponse> & {
+    message?: string;
+  };
+  if (!response.ok || !payload.index_stats || typeof payload.db_path !== "string") {
+    throw new Error(payload.message ?? `index status failed with status ${response.status}`);
+  }
+  return payload as ScopedIndexStatusResponse;
+}
+
 export async function fetchAiInspirations(
   apiBase: string,
   dbPath?: string | null,
   contextAssetIds: string[] = [],
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const response = await fetch(`${apiBase.replace(/\/$/, "")}/v1/inspiration/generate`, {
     method: "POST",
@@ -492,6 +519,7 @@ export async function fetchAiInspirations(
       context_asset_ids: contextAssetIds.length > 0 ? contextAssetIds : undefined,
       count: 5,
     }),
+    signal,
   });
   const payload = (await response.json().catch(() => ({}))) as InspirationApiResponse;
   if (!response.ok) {
@@ -499,7 +527,7 @@ export async function fetchAiInspirations(
   }
   return Array.isArray(payload.suggestions)
     ? payload.suggestions
-        .map((suggestion) => toEnglishText(String(suggestion || "").trim(), ""))
+        .map((suggestion) => normalizeDisplayText(String(suggestion || "").trim(), ""))
         .filter((suggestion) => suggestion.length > 0)
     : [];
 }
@@ -537,6 +565,7 @@ export async function rebuildAtlas(options: AtlasRequestOptions = {}): Promise<A
       "Content-Type": "application/json",
     },
     body: JSON.stringify(buildAtlasPayload(options)),
+    signal: options.signal,
   });
   const payload = (await response.json().catch(() => ({}))) as AtlasStatus & { message?: string };
   if (!response.ok) {
@@ -567,12 +596,36 @@ export async function fetchAtlasWorkbench(
   const params = new URLSearchParams();
   appendAtlasSearchParams(params, options);
   const suffix = params.toString() ? `?${params.toString()}` : "";
-  const response = await fetch(`${apiBase}/v1/atlas/workbench${suffix}`);
+  const response = await fetch(`${apiBase}/v1/atlas/workbench${suffix}`, {
+    signal: options.signal,
+  });
   const payload = (await response.json().catch(() => ({}))) as AtlasWorkbench & { message?: string };
   if (!response.ok) {
     throw new Error(payload.message ?? `atlas workbench failed with status ${response.status}`);
   }
   return payload;
+}
+
+export async function fetchAtlasBasket(
+  options: AtlasRequestOptions = {},
+): Promise<AtlasBasket> {
+  const apiBase = options.apiBase ?? "";
+  const params = new URLSearchParams();
+  if (options.dbPath && options.dbPath.trim().length > 0) {
+    params.set("db_path", options.dbPath);
+  }
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  const response = await fetch(`${apiBase}/v1/atlas/basket${suffix}`, {
+    signal: options.signal,
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    message?: string;
+    basket?: AtlasBasket;
+  };
+  if (!response.ok || !payload.basket) {
+    throw new Error(payload.message ?? `atlas basket failed with status ${response.status}`);
+  }
+  return payload.basket;
 }
 
 export async function fetchAtlasMemoryDetail(
@@ -707,6 +760,7 @@ export async function saveAtlasBasket(input: AtlasRequestOptions & {
       asset_ids: input.assetIds,
       name: input.name ?? undefined,
     }),
+    signal: input.signal,
   });
   const payload = (await response.json().catch(() => ({}))) as { message?: string; basket?: AtlasBasket };
   if (!response.ok || !payload.basket) {
@@ -756,6 +810,7 @@ export async function fetchAtlasDraftFromBackend(
       top_k: 9,
       include_copy: true,
     }),
+    signal: options.signal,
   });
   const payload = (await response.json().catch(() => ({}))) as RetrievalApiResponse;
   if (!response.ok) {
@@ -775,8 +830,9 @@ export async function fetchAtlasDraftFromBackend(
 
 export async function fetchBackendSettings(
   apiBase: string,
+  signal?: AbortSignal,
 ): Promise<BackendSettingsResponse> {
-  const response = await fetch(`${apiBase}/v1/settings`);
+  const response = await fetch(`${apiBase}/v1/settings`, { signal });
   if (!response.ok) {
     throw new Error(`settings request failed with status ${response.status}`);
   }
@@ -835,12 +891,12 @@ export async function startBackendIndexing(input: {
   if (!response.ok) {
     throw new Error(payload.message ?? `indexing request failed with status ${response.status}`);
   }
-  if (payload.status !== "completed") {
-    throw new Error(payload.message ?? "Indexing did not complete successfully.");
+  if (!["completed", "partial", "failed", "empty"].includes(payload.status)) {
+    throw new Error(payload.message ?? "Indexing returned an unexpected status.");
   }
 
   return {
-    status: "completed",
+    status: payload.status as DesktopIndexingResult["status"],
     folderPath: payload.meta?.image_dir ?? input.imageLibraryDir,
     dbPath: payload.meta?.db_path ?? input.dbPath ?? "",
     total:

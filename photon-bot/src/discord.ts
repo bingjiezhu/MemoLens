@@ -14,6 +14,7 @@ import {
 } from "discord.js";
 
 import type { BotConfig } from "./config.js";
+import { shouldHandleDiscordMessage } from "./discordAccess.js";
 import type { BotReply, IncomingMessage, MessagePlatformAdapter } from "./types.js";
 
 const MAX_ATTACHMENT_BYTES_PER_FILE = 7_500_000;
@@ -33,7 +34,11 @@ export class DiscordAdapter implements MessagePlatformAdapter {
   constructor(
     private readonly config: Pick<
       BotConfig,
-      "discordBotToken" | "discordAllowedChannelIds" | "discordSendImageWidth" | "logLevel"
+      | "discordBotToken"
+      | "discordAllowedUserIds"
+      | "discordAllowedChannelIds"
+      | "discordSendImageWidth"
+      | "logLevel"
     >,
   ) {
     this.client = new Client({
@@ -60,11 +65,27 @@ export class DiscordAdapter implements MessagePlatformAdapter {
     });
 
     this.client.on(Events.MessageCreate, async (message) => {
-      if (!shouldHandleMessage(message, this.client.user?.id, this.config.discordAllowedChannelIds)) {
+      const botUserId = this.client.user?.id;
+      if (
+        !shouldHandleDiscordMessage(
+          {
+            authorId: message.author.id,
+            channelId: message.channelId,
+            isAuthorBot: message.author.bot,
+            isSystemMessage: message.system,
+            isDirectMessage: message.channel.isDMBased(),
+            mentionsBot: botUserId ? message.mentions.users.has(botUserId) : false,
+          },
+          {
+            allowedUserIds: this.config.discordAllowedUserIds,
+            allowedChannelIds: this.config.discordAllowedChannelIds,
+          },
+        )
+      ) {
         return;
       }
 
-      const incoming = toIncomingMessage(message, this.client.user?.id);
+      const incoming = toIncomingMessage(message, botUserId);
       if (!incoming) {
         return;
       }
@@ -132,26 +153,6 @@ export class DiscordAdapter implements MessagePlatformAdapter {
     this.client.destroy();
     this.started = false;
   }
-}
-
-function shouldHandleMessage(
-  message: Message,
-  botUserId: string | undefined,
-  allowedChannelIds: readonly string[],
-): boolean {
-  if (message.author.bot || message.system) {
-    return false;
-  }
-
-  if (message.channel.isDMBased()) {
-    return true;
-  }
-
-  if (allowedChannelIds.includes(message.channelId)) {
-    return true;
-  }
-
-  return botUserId ? message.mentions.users.has(botUserId) : false;
 }
 
 function toIncomingMessage(

@@ -25,6 +25,8 @@ def main() -> int:
     note_path.write_text("not an image", encoding="utf-8")
 
     os.environ["MEMOLENS_APP_STATE_DIR"] = str(state_dir)
+    desktop_session_token = "memolens-local-verification-token"
+    os.environ["MEMOLENS_DESKTOP_SESSION_TOKEN"] = desktop_session_token
     for env_name in (
         "MINIMAX_KEY",
         "OPENAI_API_KEY",
@@ -40,10 +42,11 @@ def main() -> int:
     os.environ.pop("SQLITE_DB_PATH", None)
 
     from backend.src import create_app
-    from frontend.querying.retrieval import RetrievalService
+    from backend.src.retrieval import RetrievalService
 
     app = create_app()
     client = app.test_client()
+    client.environ_base["HTTP_X_MEMOLENS_DESKTOP_TOKEN"] = desktop_session_token
 
     settings_response = client.put(
         "/v1/settings",

@@ -14,8 +14,18 @@ RUNTIME_ROOT="${APP_STATE_DIR}/runtime"
 TARGET_APP="${RUNTIME_ROOT}/Electron.app"
 
 if [ ! -d "${SOURCE_APP}" ]; then
-  echo "Electron.app was not found under node_modules."
-  echo "Run npm install first."
+  ELECTRON_BIN="${PROJECT_ROOT}/node_modules/.bin/electron"
+  if [ ! -x "${ELECTRON_BIN}" ]; then
+    echo "Electron is not installed under node_modules. Run npm install first." >&2
+    exit 1
+  fi
+
+  echo "Downloading the Electron runtime for this platform..."
+  env -u ELECTRON_RUN_AS_NODE "${ELECTRON_BIN}" --version >/dev/null
+fi
+
+if [ ! -d "${SOURCE_APP}" ]; then
+  echo "Electron.app is still missing after the runtime download." >&2
   exit 1
 fi
 
