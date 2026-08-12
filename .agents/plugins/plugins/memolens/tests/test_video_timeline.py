@@ -611,24 +611,44 @@ class VideoTimelineTests(unittest.TestCase):
 
     def test_mcp_exposes_only_read_or_in_memory_tools_with_accurate_annotations(self) -> None:
         self.assertEqual(SERVER_INFO["version"], PLUGIN_VERSION)
-        names = {tool["name"] for tool in TOOLS}
-        self.assertEqual(len(names), 13)
-        self.assertTrue(
-            {
-                "memolens_mixed_search",
-                "memolens_video_search",
-                "memolens_media_list",
-                "memolens_media_get",
-                "memolens_timeline_draft",
-                "memolens_timeline_revise_draft",
-                "memolens_timeline_validate",
-                "memolens_timeline_list",
-                "memolens_timeline_get",
-            }.issubset(names)
+        expected_titles = {
+            "memolens_status": "Check MemoLens readiness",
+            "memolens_search": "Find photo memories",
+            "memolens_mixed_search": "Find photos and video moments",
+            "memolens_memories": "Explore memory themes",
+            "memolens_cleanup": "Review cleanup suggestions",
+            "memolens_video_search": "Find moments inside videos",
+            "memolens_media_list": "Browse indexed media",
+            "memolens_media_get": "Open media details",
+            "memolens_timeline_draft": "Shape an unsaved story timeline",
+            "memolens_timeline_revise_draft": (
+                "Refine the unsaved story timeline"
+            ),
+            "memolens_timeline_validate": "Check the timeline draft",
+            "memolens_timeline_list": "Browse existing timeline history",
+            "memolens_timeline_get": "Open an existing timeline revision",
+        }
+        self.assertEqual(
+            {tool["name"]: tool["title"] for tool in TOOLS},
+            expected_titles,
         )
-        self.assertFalse(any("save" in name or "render" in name or "export" in name for name in names))
-        self.assertTrue(all(tool["annotations"]["readOnlyHint"] for tool in TOOLS))
-        self.assertTrue(all(not tool["annotations"]["openWorldHint"] for tool in TOOLS))
+        self.assertFalse(
+            any(
+                "save" in name or "render" in name or "export" in name
+                for name in expected_titles
+            )
+        )
+        for tool in TOOLS:
+            self.assertEqual(
+                tool["annotations"],
+                {
+                    "title": expected_titles[tool["name"]],
+                    "readOnlyHint": True,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+            )
 
     def test_cli_video_search_is_clean_json_from_non_repo_cwd(self) -> None:
         env = os.environ.copy()

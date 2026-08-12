@@ -1,24 +1,39 @@
-# MemoLens Codex plugin 0.3.1
+# MemoLens for Codex 0.4.0
 
-MemoLens provides local, safe-default access to indexed photo, video, and audio metadata plus pure Timeline 1.0 planning. It uses only the Python standard library.
+> Your private media memory, ready when the story arrives.
 
-## Exposed capabilities
+Describe a moment. MemoLens finds the right photo or the exact beat inside a video, keeps every choice tied to its source, and shapes the selection into an **unsaved** hard-cut timeline draft for desktop review.
 
-- Read-only SQLite status, unified photo/video-segment search, focused per-type search, mixed-media list/get, and persisted timeline list/get.
-- Deterministic in-memory `timeline_draft`, hard-cut `timeline_revise_draft`, and render-compatible `timeline_validate`.
-- Optional unauthenticated loopback **read** features after the user independently enables `MEMOLENS_PLUGIN_TRUST_LOCAL_API=1`.
+**Find → Select → Shape → Review**
 
-The plugin exposes no project/timeline save, preview, render, export, cancel, delete, overwrite, or arbitrary-path write tool. The environment opt-in never grants those capabilities.
+Nothing is silently changed. Safe-default access stays local and read-only, uses no third-party model API key, and exposes no save, render, export, delete, or arbitrary-path write tool.
 
-## Safe defaults
+## Start with an idea
 
-Safe-default commands perform no socket or DNS call. SQLite opens through a `mode=ro` URI and `PRAGMA query_only=ON`; schema capability probing supports the current `asset_analysis_heads`/successful `analysis_runs` contract and a compatible explicit legacy head. It never chooses video analysis with `MAX(revision)`. Missing reliable tables return `video_index_unavailable`.
+Try asking Codex:
 
-Timeline drafts bind every non-text asset to `asset_source_id` and SHA-256 provenance. Video clips also bind their segment to an analysis-run ID and integer analysis revision. Drafts are JSON values only: review and import or confirm them in the MemoLens desktop application.
+- “Find the strongest photo and video moments for a quiet one-minute travel story.”
+- “Shape these selected moments into an unsaved hard-cut timeline.”
+- “Show me what MemoLens can access before we begin.”
 
-## Run
+The natural flow is intentionally short:
 
-Configure `MEMOLENS_DB_PATH` when automatic application-state discovery is not available, then use the MCP server in `.mcp.json` or:
+1. **Check** which local indexes are ready.
+2. **Find** a small, source-grounded set of photos or video moments.
+3. **Shape** the selection into an in-memory Timeline 1.0 draft.
+4. **Review** the validated JSON, then confirm or import it in the MemoLens desktop app.
+
+## What stays private
+
+Safe-default commands perform no socket or DNS call. SQLite opens through a `mode=ro` URI and `PRAGMA query_only=ON`. Video search uses only the explicit current successful analysis head—never an inferred highest revision. If no reliable current head exists, MemoLens returns `video_index_unavailable`.
+
+Every non-text timeline item keeps its `asset_source_id` and SHA-256 provenance. Video clips also keep the source segment, analysis-run ID, and integer analysis revision. Drafts are JSON values held in memory; the plugin does not import or persist them.
+
+An optional, user-controlled `MEMOLENS_PLUGIN_TRUST_LOCAL_API=1` setting unlocks only additional loopback **read** views such as memory clusters. It never grants write, render, export, indexing, or cancellation capability.
+
+## Developer entry points
+
+Configure `MEMOLENS_DB_PATH` when fixed application-state discovery is not available, then use the MCP server in `.mcp.json` or the standard-library CLI:
 
 ```bash
 python3 scripts/memolens_cli.py status
@@ -26,4 +41,4 @@ python3 scripts/memolens_cli.py video-search "海边日落"
 python3 scripts/memolens_cli.py timeline-validate --input timeline.json
 ```
 
-All CLI output is JSON. The scripts work from a non-repository current working directory.
+All CLI output is one JSON value. The scripts work from a non-repository current working directory and require only the Python standard library.
