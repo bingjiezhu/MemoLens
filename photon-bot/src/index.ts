@@ -27,6 +27,7 @@ export async function startBot(): Promise<void> {
     backendSendPathOverrides: config.backendSendPathOverrides,
     discordSendImageWidth: config.discordSendImageWidth,
     backendRequestTimeoutMs: config.backendRequestTimeoutMs,
+    allowedUserCount: config.discordAllowedUserIds.length,
     allowedChannelCount: config.discordAllowedChannelIds.length,
   });
 

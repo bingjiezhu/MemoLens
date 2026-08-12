@@ -287,7 +287,7 @@ class Settings:
             ),
             geocode_enabled=_as_bool(
                 os.getenv("ENABLE_REVERSE_GEOCODE"),
-                bool(geocode_config.get("enabled", True)),
+                bool(geocode_config.get("enabled", False)),
             ),
             geocode_user_agent=os.getenv(
                 "GEOCODE_USER_AGENT",

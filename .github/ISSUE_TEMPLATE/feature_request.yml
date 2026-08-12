@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose an improvement grounded in a user journey.
+title: "[Idea]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: What is the user trying to remember, curate, or complete?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the successful flow, not only a UI control.
+    validations:
+      required: true
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Local-first and privacy impact
+      description: What data is read, written, or sent to a configured provider?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

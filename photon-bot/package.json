@@ -1,11 +1,12 @@
 {
   "name": "memolens-photon-bot",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/discordAccess.test.ts",
     "doctor:discord": "tsx src/doctor-discord.ts",
     "doctor:imessage": "tsx src/doctor.ts",
     "dev": "tsx src/index.ts",
@@ -14,14 +15,14 @@
   "dependencies": {
     "@photon-ai/imessage-kit": "^2.1.2",
     "better-sqlite3": "^12.4.1",
-    "discord.js": "^14.19.3"
+    "discord.js": "^14.27.0"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
-    "tsx": "^4.20.5",
+    "tsx": "^4.23.12",
     "typescript": "^5.9.2"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.12.0"
   }
 }

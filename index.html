@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -10,6 +10,10 @@
       name="description"
       content="MemoLens turns a local photo library into a ready-to-post story draft."
     />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http://127.0.0.1:* http://localhost:* http://[::1]:*; connect-src 'self' http://127.0.0.1:* http://localhost:* http://[::1]:* ws://127.0.0.1:* ws://localhost:* ws://[::1]:*; font-src 'self';"
+    />
     <title>MemoLens</title>
   </head>
   <body>
@@ -17,4 +21,3 @@
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

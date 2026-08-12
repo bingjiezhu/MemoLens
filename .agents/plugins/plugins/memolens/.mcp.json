@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "memolens": {
+      "command": "python3",
+      "args": [
+        "./scripts/memolens_mcp.py"
+      ],
+      "cwd": ".",
+      "env_vars": [
+        "MEMOLENS_BASE_URL",
+        "MEMOLENS_DB_PATH",
+        "MEMOLENS_LIBRARY_DIR",
+        "MEMOLENS_APP_STATE_DIR",
+        "MEMOLENS_PLUGIN_TRUST_LOCAL_API"
+      ]
+    }
+  }
+}
