@@ -14,6 +14,17 @@ from PIL import ExifTags, Image, ImageOps
 from core.schemas import LocalImageMetadata
 
 
+def ensure_heif_support() -> None:
+    """Register HEIC/HEIF openers when pillow-heif is installed."""
+    try:
+        import pillow_heif
+    except ImportError:
+        return
+    pillow_heif.register_heif_opener()
+
+
+ensure_heif_support()
+
 GPS_TAG_ID = next(key for key, value in ExifTags.TAGS.items() if value == "GPSInfo")
 DATE_TIME_ORIGINAL_TAG_ID = next(
     key for key, value in ExifTags.TAGS.items() if value == "DateTimeOriginal"
@@ -167,6 +178,8 @@ def is_supported_image(path: Path) -> bool:
         ".gif",
         ".tif",
         ".tiff",
+        ".heic",
+        ".heif",
     }
 
 
