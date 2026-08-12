@@ -11,6 +11,23 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1; then
+    echo "Installing FFmpeg for video understanding, previews, and exports..."
+    brew install ffmpeg
+  else
+    echo "MemoLens video workflows require FFmpeg 6 or newer." >&2
+    echo "Install Homebrew from https://brew.sh, then run: brew install ffmpeg" >&2
+    exit 1
+  fi
+fi
+
+FFMPEG_MAJOR="$(ffmpeg -version | awk 'NR == 1 { print $3 }' | sed -E 's/^[^0-9]*([0-9]+).*/\1/')"
+if ! [[ "${FFMPEG_MAJOR}" =~ ^[0-9]+$ ]] || [ "${FFMPEG_MAJOR}" -lt 6 ]; then
+  echo "MemoLens requires FFmpeg 6 or newer; found: $(ffmpeg -version | head -n 1)" >&2
+  exit 1
+fi
+
 PYTHON_BIN="${MEMOLENS_PYTHON:-}"
 if [ -n "${PYTHON_BIN}" ]; then
   PYTHON_CANDIDATES=("${PYTHON_BIN}")

@@ -50,6 +50,14 @@ app-state/
 # Local databases and photos
 local-photo-library/
 demo-photo-library/
+local-media-library/
+demo-media-library/
+media-cache/
+renders/
+exports/
+.memolens-cache/
+*.part
+*.part.mp4
 # MemoLens only guarantees that its managed/default photo directories are
 # ignored. Keep arbitrary private libraries outside the repository.
 *.db

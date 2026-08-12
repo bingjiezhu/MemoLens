@@ -6,6 +6,10 @@ import type {
   DesktopIndexingStartOptions,
   DesktopSettings,
 } from "./query/types";
+import type {
+  DesktopArtifactSaveRequest,
+  DesktopArtifactSaveResult,
+} from "./video/types";
 
 declare global {
   interface Window {
@@ -17,6 +21,9 @@ declare global {
       startIndexing(options: DesktopIndexingStartOptions): Promise<DesktopIndexingResult>;
       pauseIndexing(): Promise<boolean>;
       resumeIndexing(): Promise<boolean>;
+      saveVideoArtifact(
+        request: DesktopArtifactSaveRequest,
+      ): Promise<DesktopArtifactSaveResult>;
       onIndexingProgress(
         callback: (progress: DesktopIndexingProgress) => void,
       ): () => void;

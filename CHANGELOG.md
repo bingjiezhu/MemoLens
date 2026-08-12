@@ -3,6 +3,32 @@
 All notable changes to MemoLens are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-08-12
+
+### Added
+
+- A local-first Video Creative Workbench spanning media memory, grounded direction, versioned timeline editing, and a playable 720p MP4 preview that Electron can save safely.
+- Persistent video indexing jobs with ffprobe metadata, adaptive visual scene segmentation, representative keyframes, optional sidecar transcripts, progress, cancellation, and restart-safe states. Search in 0.3 is deterministic metadata/sidecar text rather than full semantic video understanding.
+- Unified search results for existing image records and timestamped video segments, with stable provenance that can be compiled into a timeline.
+- Deterministic creative briefs, storyboards, typed timeline operations, validation, immutable revisions, and bounded FFmpeg render jobs.
+- A responsive Create Video experience with capability diagnostics, real loading/retry/cancel states, native media playback, and safe desktop Save As for completed previews.
+- Offline Codex plugin tools for unified photo/video-segment search, timeline drafting/revision/validation, and read-only persisted-timeline inspection.
+- Synthetic landscape-with-audio and silent vertical video fixtures for privacy-safe demos and real FFmpeg regression coverage.
+- Spec 005, documenting the product contract, coarse-to-fine video understanding, security boundaries, schemas, UX states, and release gates.
+
+### Changed
+
+- Reframed MemoLens from a photo-only memory workbench into a photo-and-video creative memory system while preserving the existing image index and Atlas APIs.
+- Updated macOS setup and CI to require FFmpeg 6+ and verify the media workflow on both Linux and macOS.
+- Updated the architecture, product strategy, security model, privacy disclosures, and Codex onboarding for video frames, audio, transcripts, timelines, and renders.
+
+### Security
+
+- Kept video frame/audio analysis offline by default even when a cloud provider key is already configured; video data egress requires a separate explicit opt-in.
+- Restricted expensive or state-changing media operations to authenticated desktop calls or independent scoped capabilities; originless loopback trust and the plugin's read-risk opt-in do not grant write access.
+- Validated all source IDs, source time ranges, library roots, output roots, and timeline operations before invoking fixed FFmpeg argument arrays; originals are never modified.
+- Made preview output and desktop Save As bounded and non-overwriting, render jobs cancellable, and Codex safe-default media tools zero-network and SQLite read-only. Final 1080p export remains fail-closed until Electron can issue a scoped output grant.
+
 ## [0.2.0] - 2026-08-12
 
 ### Added
@@ -29,4 +55,5 @@ All notable changes to MemoLens are documented here. The project follows
 - Hardened the loopback API, backend identity checks, Electron sandbox/navigation/IPC boundaries, local file serving, and release build freshness.
 - Distinguished empty, partial, and failed indexing outcomes instead of presenting them as successful work.
 
+[0.3.0]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.3.0
 [0.2.0]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.2.0
