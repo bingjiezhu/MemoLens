@@ -49,6 +49,9 @@ app-state/
 
 # Local databases and photos
 local-photo-library/
+demo-photo-library/
+# MemoLens only guarantees that its managed/default photo directories are
+# ignored. Keep arbitrary private libraries outside the repository.
 *.db
 *.sqlite
 *.sqlite3

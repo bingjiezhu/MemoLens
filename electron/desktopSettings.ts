@@ -1,11 +1,29 @@
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { dirname, join, normalize, resolve } from "node:path";
 
 import type { DesktopSettings } from "../src/query/types.js";
 import { getCanonicalAppStateDir } from "./appPaths.js";
 
 export const DEFAULT_BACKEND_URL = "http://127.0.0.1:5519";
+
+function normalizeLibraryIdentity(folderPath: string): string {
+  const normalized = normalize(resolve(folderPath)).normalize("NFC");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+export function resolveLibraryDbPath(folderPath: string): string {
+  const digest = createHash("sha256")
+    .update(normalizeLibraryIdentity(folderPath), "utf8")
+    .digest("hex")
+    .slice(0, 24);
+  return join(
+    getCanonicalAppStateDir(),
+    "storage",
+    `photo-index-${digest}.db`,
+  );
+}
 
 function getSettingsPath(): string {
   return join(getCanonicalAppStateDir(), "desktop-settings.json");
@@ -67,12 +85,11 @@ function normalizeSettings(
 
 export async function loadDesktopSettings(projectRoot: string): Promise<DesktopSettings> {
   const defaultLibraryDir = resolve(projectRoot, "local-photo-library");
-  const appStateDir = getCanonicalAppStateDir();
   const defaults: DesktopSettings = {
     pythonCommand: await getDefaultPythonCommand(projectRoot),
     autoStartBackend: true,
     defaultLibraryDir,
-    defaultDbPath: join(appStateDir, "storage", "photo_index.db"),
+    defaultDbPath: resolveLibraryDbPath(defaultLibraryDir),
   };
 
   try {

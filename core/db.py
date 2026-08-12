@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS image_index (
 """
 
 INDEXES_SQL = """
-CREATE INDEX IF NOT EXISTS idx_image_index_relative_path
+CREATE UNIQUE INDEX IF NOT EXISTS idx_image_index_relative_path
     ON image_index(relative_path);
 
 CREATE INDEX IF NOT EXISTS idx_image_index_taken_at
@@ -49,6 +49,12 @@ CREATE INDEX IF NOT EXISTS idx_image_index_taken_at
 CREATE INDEX IF NOT EXISTS idx_image_index_place_name
     ON image_index(place_name);
 """
+
+INDEX_STATEMENTS = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_image_index_relative_path ON image_index(relative_path)",
+    "CREATE INDEX IF NOT EXISTS idx_image_index_taken_at ON image_index(taken_at)",
+    "CREATE INDEX IF NOT EXISTS idx_image_index_place_name ON image_index(place_name)",
+)
 
 FALLBACK_DESCRIPTION_PREFIX = "Local image file named "
 
@@ -74,9 +80,14 @@ class ImageIndexRepository:
             self._ensure_indexes(connection)
 
     def upsert(self, record: StoredImageRecord) -> None:
-        self.delete_by_relative_path(record.relative_path, keep_id=record.id)
-
         with self._connect() as connection:
+            # Keep the path cleanup and replacement in one transaction. If the
+            # INSERT fails (for example because of a SHA collision), SQLite
+            # rolls the cleanup back instead of silently dropping the old row.
+            connection.execute(
+                "DELETE FROM image_index WHERE relative_path = ? AND id != ?",
+                (record.relative_path, record.id),
+            )
             connection.execute(
                 """
                 INSERT INTO image_index (
@@ -207,7 +218,22 @@ class ImageIndexRepository:
         updated_at: str,
     ) -> None:
         with self._connect() as connection:
+            # A content-identical file may have moved onto a path previously
+            # occupied by another SHA. Serialize that check/cleanup/update so
+            # readers never observe two records for the same filesystem path,
+            # and so a missing source SHA cannot delete the destination row.
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT 1 FROM image_index WHERE sha256 = ? LIMIT 1",
+                (sha256,),
+            ).fetchone()
+            if existing is None:
+                raise LookupError(f"Indexed SHA256 no longer exists: {sha256}")
             connection.execute(
+                "DELETE FROM image_index WHERE relative_path = ? AND sha256 != ?",
+                (relative_path, sha256),
+            )
+            cursor = connection.execute(
                 """
                 UPDATE image_index
                 SET
@@ -239,6 +265,8 @@ class ImageIndexRepository:
                     sha256,
                 ),
             )
+            if cursor.rowcount != 1:
+                raise RuntimeError(f"Failed to refresh indexed SHA256: {sha256}")
 
     def summarize_index_health(self) -> dict[str, int | float | bool]:
         summary: dict[str, int | float | bool] = {
@@ -418,7 +446,39 @@ class ImageIndexRepository:
 
     @staticmethod
     def _ensure_indexes(connection: sqlite3.Connection) -> None:
-        connection.executescript(INDEXES_SQL)
+        index_rows = connection.execute("PRAGMA index_list(image_index)").fetchall()
+        relative_path_index = next(
+            (row for row in index_rows if row["name"] == "idx_image_index_relative_path"),
+            None,
+        )
+        if relative_path_index is None or not bool(relative_path_index["unique"]):
+            # Versions before 0.2 could leave more than one row pointing at the
+            # same relative path after a file was replaced with already-indexed
+            # bytes. Keep the most recently updated row before enforcing the
+            # invariant at the database layer. This only removes stale index
+            # rows; original files are never touched and can be reindexed.
+            connection.execute(
+                """
+                DELETE FROM image_index
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM image_index AS preferred
+                    WHERE preferred.relative_path = image_index.relative_path
+                      AND (
+                        COALESCE(preferred.updated_at, '') > COALESCE(image_index.updated_at, '')
+                        OR (
+                          COALESCE(preferred.updated_at, '') = COALESCE(image_index.updated_at, '')
+                          AND preferred.rowid > image_index.rowid
+                        )
+                      )
+                )
+                """
+            )
+            # SQLite's IF NOT EXISTS would keep the old non-unique definition
+            # under the same name, so replace it only during this migration.
+            connection.execute("DROP INDEX IF EXISTS idx_image_index_relative_path")
+        for statement in INDEX_STATEMENTS:
+            connection.execute(statement)
 
     @staticmethod
     def _ensure_text_columns(connection: sqlite3.Connection, columns: set[str]) -> None:

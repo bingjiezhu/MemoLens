@@ -1,5 +1,3 @@
-import { createRequire } from "node:module";
-
 import type {
   DesktopBackendStatus,
   DesktopFolderSelection,
@@ -9,7 +7,9 @@ import type {
   DesktopSettings,
 } from "../src/query/types.js";
 
-const require = createRequire(import.meta.url);
+// Sandboxed preload scripts run in Electron's restricted CommonJS context.
+// `electron` is one of the explicitly supported modules there; Node built-ins
+// such as `node:module` and ESM imports are intentionally unavailable.
 const { contextBridge, ipcRenderer } = require("electron") as typeof Electron.Renderer;
 
 contextBridge.exposeInMainWorld("memolensDesktop", {

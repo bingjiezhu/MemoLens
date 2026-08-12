@@ -32,6 +32,7 @@ interface AtlasViewProps {
   imageLibraryDir?: string | null;
   dbPath?: string | null;
   canUseBackend: boolean;
+  refreshKey?: number;
   onInspirationChange?: (
     cards: AtlasInspirationCard[],
     storylines: AtlasStoryline[],
@@ -117,23 +118,13 @@ function hashUnit(value: string): number {
   return (Math.abs(hash) % 1000) / 1000;
 }
 
-const HAN_TEXT_PATTERN = /[\u3400-\u9fff]/u;
-
-function hasHanText(value: string): boolean {
-  return HAN_TEXT_PATTERN.test(value);
-}
-
 function normalizeConcept(value: string): string {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) {
-    return "";
-  }
-  return hasHanText(normalized) ? "" : normalized;
+  return value.trim().toLocaleLowerCase();
 }
 
 function sanitizeDisplayText(value: string, fallback: string): string {
-  let cleaned = value.replace(/\s+/g, " ").trim();
-  return cleaned && !hasHanText(cleaned) ? cleaned : fallback;
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  return cleaned || fallback;
 }
 
 function compactGalaxyLabel(value: string, maxLength = 18): string {
@@ -166,7 +157,13 @@ function photoStrip(assets: AtlasAsset[], apiBase: string, imageLibraryDir?: str
   return (
     <div className="memory-photo-strip">
       {assets.slice(0, 5).map((asset) => (
-        <img key={asset.id} src={previewUrl(apiBase, asset, imageLibraryDir, 260)} alt={sanitizeDisplayText(asset.title, "Photo")} />
+        <img
+          key={asset.id}
+          src={previewUrl(apiBase, asset, imageLibraryDir, 260)}
+          alt={sanitizeDisplayText(asset.title, "Photo")}
+          loading="lazy"
+          decoding="async"
+        />
       ))}
     </div>
   );
@@ -403,30 +400,46 @@ function AtlasView({
   imageLibraryDir,
   dbPath,
   canUseBackend,
+  refreshKey = 0,
   onInspirationChange,
   basketAssetIds = [],
   onBasketToggle,
   onBasketAddMany,
 }: AtlasViewProps) {
   const [lens, setLens] = useState<AtlasLens>("explore");
-  const [workbench, setWorkbench] = useState<AtlasWorkbench | null>(null);
+  const [loadedWorkbench, setLoadedWorkbench] = useState<AtlasWorkbench | null>(null);
+  const [loadedWorkbenchScope, setLoadedWorkbenchScope] = useState<string | null>(null);
+  const requestedScopeRef = useRef<string | null>(dbPath ?? null);
   const [selectedMemoryId, setSelectedMemoryId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [selectedGalaxyNodeId, setSelectedGalaxyNodeId] = useState<string | null>(null);
   const [hoveredGalaxyNodeId, setHoveredGalaxyNodeId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadRetryKey, setLoadRetryKey] = useState(0);
   const [isRebuilding, setIsRebuilding] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [messageIsError, setMessageIsError] = useState(false);
   const filmstripRef = useRef<HTMLDivElement | null>(null);
   const lastFilmstripIndexRef = useRef<number | null>(null);
+  const workbenchRunIdRef = useRef(0);
+  const currentScope = dbPath?.trim() || null;
+  const workbench = loadedWorkbenchScope === currentScope ? loadedWorkbench : null;
 
-  const loadWorkbench = useCallback(async () => {
+  const loadWorkbench = useCallback(async (signal?: AbortSignal) => {
     if (!canUseBackend) {
       setMessage("Local backend is offline.");
+      setMessageIsError(true);
+      setLoadError("Start or reconnect the local service to load this library map.");
       return;
     }
     setIsLoading(true);
+    setLoadError(null);
     setMessage(null);
+    setMessageIsError(false);
+    const runId = workbenchRunIdRef.current + 1;
+    workbenchRunIdRef.current = runId;
+    requestedScopeRef.current = dbPath ?? null;
     try {
       const nextWorkbench = await fetchAtlasWorkbench({
         apiBase,
@@ -434,8 +447,13 @@ function AtlasView({
         lens,
         showDuplicates: true,
         limit: 1200,
+        signal,
       });
-      setWorkbench(nextWorkbench);
+      if (signal?.aborted || workbenchRunIdRef.current !== runId) {
+        return;
+      }
+      setLoadedWorkbench(nextWorkbench);
+      setLoadedWorkbenchScope(currentScope);
       setSelectedMemoryId((current) =>
         current && nextWorkbench.memories.some((memory) => memory.id === current)
           ? current
@@ -447,18 +465,49 @@ function AtlasView({
           : nextWorkbench.featured_memory?.representative_asset_ids[0] ?? nextWorkbench.overview.assets[0]?.id ?? null,
       );
     } catch (error) {
+      if (signal?.aborted || workbenchRunIdRef.current !== runId) {
+        return;
+      }
       setMessage(error instanceof Error ? error.message : "Memory Workbench failed to load.");
+      setMessageIsError(true);
+      setLoadError(error instanceof Error ? error.message : "Memory Workbench failed to load.");
     } finally {
-      setIsLoading(false);
+      if (workbenchRunIdRef.current === runId) {
+        setIsLoading(false);
+      }
     }
   }, [apiBase, canUseBackend, dbPath, lens]);
 
   useEffect(() => {
-    void loadWorkbench();
-  }, [loadWorkbench]);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => {
+      setLoadError("Loading the library map timed out. Retry when the local service is responsive.");
+      setMessage("Loading the library map timed out.");
+      setMessageIsError(true);
+      setIsLoading(false);
+      controller.abort();
+    }, 15_000);
+    void loadWorkbench(controller.signal).finally(() => window.clearTimeout(timeoutId));
+    return () => {
+      window.clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [loadRetryKey, loadWorkbench, refreshKey]);
+
+  useEffect(() => {
+    if (requestedScopeRef.current !== (dbPath ?? null)) {
+      requestedScopeRef.current = dbPath ?? null;
+      setLoadedWorkbench(null);
+      setLoadedWorkbenchScope(null);
+      setSelectedMemoryId(null);
+      setSelectedAssetId(null);
+      setSelectedGalaxyNodeId(null);
+    }
+  }, [currentScope, dbPath]);
 
   useEffect(() => {
     if (!workbench) {
+      onInspirationChange?.([], [], []);
       return;
     }
     onInspirationChange?.(
@@ -518,15 +567,22 @@ function AtlasView({
   async function handleRebuild(): Promise<void> {
     setIsRebuilding(true);
     setMessage(null);
+    setMessageIsError(false);
     try {
       await rebuildAtlas({ apiBase, dbPath });
       await loadWorkbench();
       setMessage("Memory Workbench rebuilt locally.");
+      setMessageIsError(false);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Rebuild failed.");
+      setMessageIsError(true);
     } finally {
       setIsRebuilding(false);
     }
+  }
+
+  function handleRetryLoad(): void {
+    setLoadRetryKey((current) => current + 1);
   }
 
   function selectMemory(memory: AtlasMemory): void {
@@ -566,7 +622,7 @@ function AtlasView({
   function scrollFilmstrip(direction: -1 | 1): void {
     filmstripRef.current?.scrollBy({
       left: direction * 440,
-      behavior: "smooth",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
     });
   }
 
@@ -610,9 +666,37 @@ function AtlasView({
           <button className="secondary-button" type="button" onClick={handleRebuild} disabled={!canUseBackend || isRebuilding}>
             {isRebuilding ? "Rebuilding" : "Rebuild Atlas"}
           </button>
+          {loadError ? (
+            <button className="secondary-button" type="button" onClick={handleRetryLoad} disabled={isLoading}>
+              Retry map
+            </button>
+          ) : null}
         </div>
       </div>
 
+      {isLoading && !workbench ? (
+        <div className="atlas-state-card" role="status" aria-live="polite">
+          <span className="atlas-state-orbit" aria-hidden="true" />
+          <strong>Loading this library map</strong>
+          <span>MemoLens is reading the selected SQLite library and preparing its memory graph.</span>
+        </div>
+      ) : loadError && !workbench ? (
+        <div className="atlas-state-card atlas-state-error" role="alert">
+          <strong>Library map could not load</strong>
+          <span>{loadError}</span>
+          <button type="button" className="primary-button compact-button" onClick={handleRetryLoad}>
+            Retry map
+          </button>
+        </div>
+      ) : workbench && workbench.overview.asset_count === 0 ? (
+        <div className="atlas-state-card">
+          <strong>No indexed photos in this library yet</strong>
+          <span>Choose a folder and finish indexing. MemoLens will refresh this map automatically.</span>
+          <button type="button" className="secondary-button compact-button" onClick={handleRetryLoad}>
+            Check again
+          </button>
+        </div>
+      ) : (
       <div className="workbench-grid">
         <aside className="memory-rail">
           {librarySummary ? (
@@ -872,6 +956,7 @@ function AtlasView({
                         type="button"
                         className={`filmstrip-photo${selectedAssetId === asset.id ? " active" : ""}${isInBasket ? " selected" : ""}`}
                         onClick={(event) => handleFilmstripAssetClick(asset, index, event)}
+                        aria-pressed={isInBasket}
                       >
                         <img
                           src={previewUrl(apiBase, asset, imageLibraryDir, 320)}
@@ -902,8 +987,17 @@ function AtlasView({
 
         </main>
       </div>
+      )}
 
-      {message ? <p className="inline-note">{message}</p> : null}
+      {message ? (
+        <p
+          className={messageIsError ? "inline-error" : "inline-note"}
+          role={messageIsError ? "alert" : "status"}
+          aria-live={messageIsError ? "assertive" : "polite"}
+        >
+          {message}
+        </p>
+      ) : null}
     </section>
   );
 }

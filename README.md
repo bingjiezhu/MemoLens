@@ -14,6 +14,8 @@ Turn a private photo folder into a searchable memory layer — index locally, se
   <a href="#quick-start">Quick Start</a> ·
   <a href="#what-you-get">Features</a> ·
   <a href="#architecture">Architecture</a> ·
+  <a href="docs/product-strategy.md">Product Strategy</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
   <a href="#model-profiles">Models</a> ·
   <a href="#photon-bot">Photon Bot</a> ·
   <a href="#privacy">Privacy</a>
@@ -32,7 +34,7 @@ People remember photos by scene, mood, place, and intent — not by filename or 
 | Captions you can trust | Grounds titles / captions / highlights in retrieved evidence |
 | Chat access to the same photos | Runs Discord through `photon-bot/` against the same Flask API |
 
-Original photos and generated indexes stay local. Model calls get selected or summarized context — not a dump of your whole library.
+Original files and generated indexes stay local in the desktop/browser workflow. When you choose an API-based vision profile, indexing sends a resized working copy of each processed photo to that provider for analysis; local Ollama and metadata-only fallback profiles keep that step on the device. Query, inspiration, and copy paths send indexed facts or selected context rather than photo bytes. Photon image replies deliberately upload selected copies to Discord; see its privacy boundary below.
 
 ---
 
@@ -48,7 +50,7 @@ Original photos and generated indexes stay local. Model calls get selected or su
 
 When an external vision profile is unavailable, MemoLens can fall back to metadata-derived descriptions and keep query / copy flowing through the configured text profile.
 
-Reverse geocoding is implemented but **off by default** (`geocode.enabled: false` / `ENABLE_REVERSE_GEOCODE=false`).
+Reverse geocoding is implemented but **off by default** (`geocode.enabled: false` / `ENABLE_REVERSE_GEOCODE=false`). Enabling it sends each GPS-tagged photo's precise latitude/longitude to OpenStreetMap Nominatim, whose privacy and retention terms then apply.
 
 ---
 
@@ -57,17 +59,17 @@ Reverse geocoding is implemented but **off by default** (`geocode.enabled: false
 ### Requirements
 
 - macOS recommended for the desktop app
-- Python 3.9+
-- Node.js 18+
+- Python 3.10+ (3.11 recommended)
+- Node.js 22.12+
 - A local photo folder
-- API keys or a local Ollama install for the profiles you enable
+- API keys or a local Ollama install are optional; metadata + semantic-hash fallbacks work without either
 
 ### Fastest path (macOS)
 
 ```bash
 git clone https://github.com/bingjiezhu/MemoLens.git
 cd MemoLens
-cp .env.example .env   # add MINIMAX_KEY or switch profiles
+cp .env.example .env   # optional: add a provider key or switch to Ollama
 npm run setup:mac
 ./Launch\ MemoLens.command
 ```
@@ -111,11 +113,36 @@ Optional one-shot local stack:
 npm run dev:local
 ```
 
+Want to evaluate the full flow without pointing MemoLens at private photos? Create a deterministic synthetic library first:
+
+```bash
+npm run demo:library
+```
+
+Then choose `./demo-photo-library` in the app. The folder is gitignored and safe to regenerate with `npm run demo:library -- --force`.
+
 Verify before you ship changes:
 
 ```bash
 npm run verify:local
 ```
+
+---
+
+## Codex Plugin
+
+This repository includes a local, read-only Codex plugin that exposes MemoLens status, natural-language photo search, memory discovery, and cleanup review. The plugin itself needs no API key and never deletes, moves, or modifies original photos.
+
+After cloning, run these commands from the repository root. In the first command, `$(pwd)` is the absolute `<repo-root>` required by `codex plugin marketplace add <repo-root>`:
+
+```bash
+codex plugin marketplace add "$(pwd)"
+codex plugin add memolens@memolens-local
+```
+
+Start a new Codex task after installation so the Skill and bundled MCP tools are loaded. `python3` 3.10+ must be available to the Codex process; no Python packages beyond the standard library are required by the plugin.
+
+The safe default never contacts localhost: `status` and `search` discover an existing SQLite index from MemoLens's application-state directory (or explicit `MEMOLENS_DB_PATH` / `MEMOLENS_LIBRARY_DIR`) and open it in strict read-only mode. Ranking is lexical in this mode. Memories, cleanup reports, and semantic backend search require the user to set `MEMOLENS_PLUGIN_TRUST_LOCAL_API=1` in the environment that starts Codex and restart Codex; this is explicit because the standalone loopback API does not authenticate independent local clients. The plugin never exposes indexing, rebuild, feedback, basket, or deletion operations.
 
 ---
 
@@ -172,7 +199,7 @@ Five boundaries, one local loop:
 | User surfaces | `src/App.tsx`, `src/AtlasView.tsx`, `photon-bot/` | Control, Library, Workbench, Compose, Discord |
 | Desktop runtime | `electron/` | Folder picker, managed Flask, indexing progress, local previews |
 | API services | `backend/src/api/routes.py` | Health, settings, indexing, retrieval, inspiration, Atlas, previews |
-| AI + memory | `indexing/`, `frontend/querying/`, `core/photo_atlas.py` | Vision, vectors, planning, ranking, Atlas derivation |
+| AI + memory | `indexing/`, `backend/src/retrieval/`, `core/photo_atlas.py` | Vision, vectors, planning, ranking, Atlas derivation |
 | Data + models | `core/db.py`, `core/config.py`, `config.yaml` | SQLite, profiles, local-first guardrails |
 
 ```text
@@ -183,7 +210,7 @@ Index  →  Compose (retrieve + copy)  →  Workbench / Keyword Galaxy  →  AI 
               Electron  ·  Browser  ·  photon-bot
 ```
 
-**Note:** active Python query engines still live under `frontend/querying/` for historical reasons; `backend/src/retrieval/` re-exports them. The React UI lives in repo-root `src/`.
+The Flask-owned query engines live under `backend/src/retrieval/`. The React UI lives in repo-root `src/`; `frontend/querying/` now contains compatibility imports only.
 
 ### Repository map
 
@@ -191,7 +218,7 @@ Index  →  Compose (retrieve + copy)  →  Workbench / Keyword Galaxy  →  AI 
 backend/       Flask entry + HTTP API
 core/          Config, SQLite, Atlas, embeddings, LLM helpers
 electron/      Desktop main / preload / backend manager
-frontend/      Python query engines (legacy path; see frontend/README.md)
+frontend/      Legacy Python compatibility imports
 indexing/      Scan, EXIF, vision, geocode, vectors
 photon-bot/    Discord messaging bridge
 scripts/       Bootstrap, verify, backfill, smoke tests
@@ -199,7 +226,7 @@ src/           Vite + React renderer
 config.yaml    Library defaults + model profiles
 ```
 
-Suggested reading order: `backend/src/api/routes.py` → `indexing/pipeline.py` → `frontend/querying/retrieval.py` → `core/photo_atlas.py` → `src/App.tsx` / `src/AtlasView.tsx` → `electron/main.ts`.
+Suggested reading order: `backend/src/api/routes.py` → `indexing/pipeline.py` → `backend/src/retrieval/retrieval.py` → `core/photo_atlas.py` → `src/App.tsx` / `src/AtlasView.tsx` → `electron/main.ts`.
 
 ---
 
@@ -209,7 +236,8 @@ Default bind: `http://127.0.0.1:5519` (loopback-only). Override with `MEMOLENS_B
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/healthz` | Health, profiles, index stats |
+| `GET` | `/healthz` | Minimal service identity, liveness, and desktop challenge proof |
+| `GET` | `/v1/index/status` | Index health scoped to one canonical SQLite path |
 | `GET` / `PUT` | `/v1/settings` | Persist library paths + active profiles |
 | `POST` | `/v1/indexing/jobs` | Index / rebuild a local folder |
 | `POST` | `/v1/retrieval/query` | Natural-language retrieval |
@@ -219,13 +247,13 @@ Default bind: `http://127.0.0.1:5519` (loopback-only). Override with `MEMOLENS_B
 | `GET` | `/v1/library/files/<path>` | Serve local originals (local clients) |
 | `GET` | `/v1/library/previews/<path>` | Browser-safe JPEG previews |
 
-Settings writes, indexing, and file serving are designed for **trusted local use**.
+The API rejects non-loopback callers and untrusted browser origins. The Electron renderer additionally uses a per-launch authenticated session; originless local clients such as curl and Photon remain part of the trusted-machine boundary.
 
 ---
 
 ## Photon Bot
 
-Discord bridge that calls the same Flask retrieval API and replies with text + images.
+Discord bridge that calls the same Flask retrieval API and replies with text + images. It fails closed unless at least one trusted Discord user ID is configured; server messages require both the user and channel allowlists. Image replies upload selected copies to Discord and may upload the original file if local resizing is unavailable and the file fits Discord's limit.
 
 ```bash
 cd photon-bot
@@ -260,25 +288,32 @@ npm run quality:backfill -- \
 
 ## Privacy
 
-- Photos, SQLite DBs, `.env`, caches, and exports are gitignored
+- MemoLens-managed/default photo directories, SQLite DBs, `.env`, caches, and exports are gitignored; keep arbitrary private libraries outside the repository
 - Default `config.yaml` uses `./local-photo-library` as a placeholder only
+- API vision profiles receive a resized working copy of each photo being indexed; choose a local Ollama profile or the metadata fallback when images must not leave the device
+- Enabling reverse geocoding sends precise EXIF coordinates to OpenStreetMap Nominatim; it remains off by default
 - Inspiration / copy paths send structured summaries and selected facts — not raw libraries or absolute private paths
+- Photon image replies leave the device for Discord; use strict user/channel allowlists and trusted destinations only
+- The Codex plugin is read-only and API-off by default; for photo requests, Codex may inspect a few traversal-checked local matches inside the active Codex session, subject to that workspace's Codex data controls
+- The desktop API binds to loopback and uses a per-launch authenticated session; do not expose port `5519` through a public tunnel
 - Prefer Application Support (desktop) over writing state into the photo folder itself
 
 ---
 
 ## Development Status
 
-Runnable local-first prototype with a complete desktop + Discord loop:
+Public beta with a complete local-first desktop + Discord loop:
 
 - Electron can manage Flask and desktop settings
 - Indexing writes metadata, semantics, embeddings, and quality into SQLite
 - Retrieval supports planning, negatives, semantic scoring, quality, and duplicate suppression
 - Workbench derives Atlas assets from the same index
-- Package boundary for query engines is mid-migration (`frontend/querying/` → eventual backend-owned package)
+- Query planning, ranking, and copy generation are owned by `backend/src/retrieval/`
 
 ---
 
-## License
+## Contributing & License
 
-No license file is published in this repository yet. All rights reserved by the author unless otherwise stated.
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and run `npm run check` before opening a pull request. Please report sensitive issues through the process in [SECURITY.md](SECURITY.md).
+
+MemoLens is released under the [MIT License](LICENSE).
