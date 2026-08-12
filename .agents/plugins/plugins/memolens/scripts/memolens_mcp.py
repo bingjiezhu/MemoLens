@@ -51,15 +51,15 @@ COMMON_OUTPUT = _output_schema(
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "memolens_status",
-        "title": "MemoLens status",
+        "title": "Check MemoLens readiness",
         "description": (
-            "Report the configured photo index through read-only SQLite without contacting "
-            "localhost. Also reports whether the user explicitly enabled local API trust."
+            "Check which MemoLens indexes and read-only features are ready. Safe-default "
+            "mode reads local SQLite without contacting the desktop service."
         ),
         "inputSchema": _schema(),
         "outputSchema": COMMON_OUTPUT,
         "annotations": {
-            "title": "MemoLens status",
+            "title": "Check MemoLens readiness",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -68,10 +68,10 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_search",
-        "title": "Search local photos",
+        "title": "Find photo memories",
         "description": (
-            "Search the local photo index. Safe-default mode uses read-only lexical SQLite "
-            "search and returns traversal-checked paths without contacting localhost."
+            "Find photos that match a remembered scene or idea. Safe-default mode searches "
+            "read-only local SQLite and returns only traversal-checked paths."
         ),
         "inputSchema": _schema(
             {
@@ -101,7 +101,7 @@ TOOLS: list[dict[str, Any]] = [
             ["object", "status", "source", "query", "result_count", "results"],
         ),
         "annotations": {
-            "title": "Search local photos",
+            "title": "Find photo memories",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -110,10 +110,10 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_mixed_search",
-        "title": "Search local photos and video segments",
+        "title": "Find photos and video moments",
         "description": (
-            "Run one query across the photo index and current successful video segments, "
-            "then return a single deterministic reciprocal-rank-fused result set."
+            "Find one source-grounded shortlist of photo memories and current video moments "
+            "for a story idea, using deterministic reciprocal-rank fusion."
         ),
         "inputSchema": _schema(
             {
@@ -143,7 +143,7 @@ TOOLS: list[dict[str, Any]] = [
             ["object", "status", "source", "query", "result_count", "results"],
         ),
         "annotations": {
-            "title": "Search local photos and video segments",
+            "title": "Find photos and video moments",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -152,10 +152,10 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_memories",
-        "title": "Explore photo memories",
+        "title": "Explore memory themes",
         "description": (
-            "Read event and theme clusters from the local MemoLens Atlas for album and "
-            "story planning. Requires the user's explicit unauthenticated local-API opt-in."
+            "Explore read-only event and theme clusters from the local MemoLens Atlas for "
+            "story planning. Requires the user's explicit loopback read opt-in."
         ),
         "inputSchema": _schema(
             {
@@ -182,7 +182,7 @@ TOOLS: list[dict[str, Any]] = [
             ["object", "status", "source", "memory_count", "memories"],
         ),
         "annotations": {
-            "title": "Explore photo memories",
+            "title": "Explore memory themes",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -191,10 +191,10 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_cleanup",
-        "title": "Review cleanup candidates",
+        "title": "Review cleanup suggestions",
         "description": (
-            "Return a read-only report of duplicate, similar, low-quality, and incomplete-"
-            "metadata candidates. Requires explicit local-API trust and never changes a photo."
+            "Review likely duplicates, similar photos, low-quality items, and missing metadata. "
+            "Requires explicit loopback read opt-in and never changes a photo."
         ),
         "inputSchema": _schema(),
         "outputSchema": _output_schema(
@@ -209,7 +209,7 @@ TOOLS: list[dict[str, Any]] = [
             ["object", "status", "source", "read_only", "counts", "stacks"],
         ),
         "annotations": {
-            "title": "Review cleanup candidates",
+            "title": "Review cleanup suggestions",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -218,10 +218,10 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_video_search",
-        "title": "Search current video segments",
+        "title": "Find moments inside videos",
         "description": (
-            "Search only the current successful video-analysis head through read-only "
-            "SQLite. Returns stable asset, source, segment, and analysis-run references."
+            "Find precise moments inside indexed videos. Uses only the current successful "
+            "analysis and returns stable source, segment, revision, and timing provenance."
         ),
         "inputSchema": _schema(
             {
@@ -237,7 +237,7 @@ TOOLS: list[dict[str, Any]] = [
         ),
         "outputSchema": COMMON_OUTPUT,
         "annotations": {
-            "title": "Search current video segments",
+            "title": "Find moments inside videos",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -246,10 +246,10 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_media_list",
-        "title": "List local media",
+        "title": "Browse indexed media",
         "description": (
-            "List indexed image, video, and audio metadata through read-only SQLite. "
-            "Does not scan folders or return unnecessary absolute paths."
+            "Browse indexed image, video, and audio details through read-only SQLite. Does "
+            "not scan folders or reveal unnecessary absolute paths."
         ),
         "inputSchema": _schema(
             {
@@ -270,7 +270,7 @@ TOOLS: list[dict[str, Any]] = [
         ),
         "outputSchema": COMMON_OUTPUT,
         "annotations": {
-            "title": "List local media",
+            "title": "Browse indexed media",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -279,9 +279,10 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_media_get",
-        "title": "Read local media details",
+        "title": "Open media details",
         "description": (
-            "Read one indexed asset and, for video, its current successful segments."
+            "Open source-grounded details for one indexed asset. Videos include only "
+            "segments from the current successful analysis."
         ),
         "inputSchema": _schema(
             {"asset_id": {"type": "string", "minLength": 1, "maxLength": 200}},
@@ -289,7 +290,7 @@ TOOLS: list[dict[str, Any]] = [
         ),
         "outputSchema": COMMON_OUTPUT,
         "annotations": {
-            "title": "Read local media details",
+            "title": "Open media details",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -298,10 +299,10 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_timeline_draft",
-        "title": "Draft an unsaved timeline",
+        "title": "Shape an unsaved story timeline",
         "description": (
-            "Build a deterministic Timeline 1.0 draft in memory. It is not persisted, "
-            "rendered, or exported; each source must include its ID and SHA provenance."
+            "Arrange selected photos, video moments, and audio into a deterministic hard-cut "
+            "Timeline 1.0 draft in memory. Nothing is saved, rendered, or exported."
         ),
         "inputSchema": _schema(
             {
@@ -351,7 +352,7 @@ TOOLS: list[dict[str, Any]] = [
         ),
         "outputSchema": COMMON_OUTPUT,
         "annotations": {
-            "title": "Draft an unsaved timeline",
+            "title": "Shape an unsaved story timeline",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -360,9 +361,10 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_timeline_revise_draft",
-        "title": "Revise an unsaved timeline draft",
+        "title": "Refine the unsaved story timeline",
         "description": (
-            "Apply strict typed operations to a Timeline 1.0 value in memory only."
+            "Apply strict typed changes to a Timeline 1.0 value and return a new in-memory "
+            "draft. Nothing is saved, rendered, or exported."
         ),
         "inputSchema": _schema(
             {
@@ -379,7 +381,7 @@ TOOLS: list[dict[str, Any]] = [
         ),
         "outputSchema": COMMON_OUTPUT,
         "annotations": {
-            "title": "Revise an unsaved timeline draft",
+            "title": "Refine the unsaved story timeline",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -388,16 +390,17 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_timeline_validate",
-        "title": "Validate a timeline",
+        "title": "Check the timeline draft",
         "description": (
-            "Pure structural Timeline 1.0 validation with no SQLite, file, or network access."
+            "Check whether a Timeline 1.0 draft is structurally ready for desktop review. "
+            "Does not access files or a network, verify sources, or save anything."
         ),
         "inputSchema": _schema(
             {"timeline": {"type": "object"}}, ["timeline"]
         ),
         "outputSchema": COMMON_OUTPUT,
         "annotations": {
-            "title": "Validate a timeline",
+            "title": "Check the timeline draft",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -406,8 +409,11 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_timeline_list",
-        "title": "List persisted timelines",
-        "description": "List the latest immutable timeline revisions through read-only SQLite.",
+        "title": "Browse existing timeline history",
+        "description": (
+            "Browse the latest immutable timeline revisions already stored by MemoLens "
+            "through read-only SQLite. Does not create or save a revision."
+        ),
         "inputSchema": _schema(
             {
                 "project_id": {"type": "string", "minLength": 1, "maxLength": 200},
@@ -417,7 +423,7 @@ TOOLS: list[dict[str, Any]] = [
         ),
         "outputSchema": COMMON_OUTPUT,
         "annotations": {
-            "title": "List persisted timelines",
+            "title": "Browse existing timeline history",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -426,8 +432,11 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "memolens_timeline_get",
-        "title": "Read a persisted timeline",
-        "description": "Read one immutable timeline revision through read-only SQLite.",
+        "title": "Open an existing timeline revision",
+        "description": (
+            "Open one immutable timeline revision already stored by MemoLens through "
+            "read-only SQLite. Does not alter or save the timeline."
+        ),
         "inputSchema": _schema(
             {
                 "timeline_id": {"type": "string", "minLength": 1, "maxLength": 200},
@@ -437,7 +446,7 @@ TOOLS: list[dict[str, Any]] = [
         ),
         "outputSchema": COMMON_OUTPUT,
         "annotations": {
-            "title": "Read a persisted timeline",
+            "title": "Open an existing timeline revision",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,

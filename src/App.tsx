@@ -1,5 +1,4 @@
-import { Suspense, lazy, useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
-import type { MouseEvent } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 
 import { usePersistedAtlasBasket } from "./basket/usePersistedAtlasBasket";
 import {
@@ -28,7 +27,7 @@ import {
   subscribeToIndexingProgress,
 } from "./query/desktop";
 import { INITIAL_PROMPT, PROMPT_PRESETS } from "./query/mockLibrary";
-import { analyzePrompt, createDraft, createPipelineSteps } from "./query/studio";
+import { createDraft, createPipelineSteps } from "./query/studio";
 import type {
   BackendHealth,
   BackendSettingsResponse,
@@ -49,6 +48,26 @@ const AtlasView = lazy(() => import("./AtlasView"));
 const VideoWorkbench = lazy(() => import("./VideoWorkbench"));
 
 const LOCAL_BACKEND_URL = "http://127.0.0.1:5519";
+
+type Workspace = "home" | "library" | "memories" | "create";
+type CreateMode = "photo" | "video";
+
+function initialWorkspace(): { workspace: Workspace; createMode: CreateMode } {
+  const hash = window.location.hash.slice(1);
+  if (hash === "control" || hash === "library") {
+    return { workspace: "library", createMode: "photo" };
+  }
+  if (hash === "atlas") {
+    return { workspace: "memories", createMode: "photo" };
+  }
+  if (hash === "video-studio") {
+    return { workspace: "create", createMode: "video" };
+  }
+  if (["compose", "process", "result"].includes(hash)) {
+    return { workspace: "create", createMode: "photo" };
+  }
+  return { workspace: "home", createMode: "photo" };
+}
 
 function normalizeUiText(value: string | null | undefined, fallback: string): string {
   const cleaned = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -222,6 +241,9 @@ function downloadDraft(draft: DraftResult): void {
 function App() {
   const desktopRuntime = isDesktopRuntime();
   const electronShell = isElectronShell();
+  const [destination, setDestination] = useState(initialWorkspace);
+  const { workspace: activeWorkspace, createMode } = destination;
+  const [hasVisitedCreate, setHasVisitedCreate] = useState(activeWorkspace === "create");
   const [prompt, setPrompt] = useState(INITIAL_PROMPT);
   const [atlasInspirationCards, setAtlasInspirationCards] = useState<AtlasInspirationCard[]>([]);
   const [atlasStorylines, setAtlasStorylines] = useState<AtlasStoryline[]>([]);
@@ -319,8 +341,6 @@ function App() {
       setHealthRefreshKey((current) => current + 1);
     },
   });
-  const deferredPrompt = useDeferredValue(prompt);
-  const previewAnalysis = analyzePrompt(deferredPrompt || INITIAL_PROMPT);
   const canUseMockMode = health.state === "mock";
   const displayDraft = normalizeDraftForDisplay(
     draft,
@@ -336,7 +356,6 @@ function App() {
   const libraryFolderLabel = selectedFolderPath ?? health.imageLibraryDir ?? "No folder selected";
   const libraryDbLabel = selectedDbPath ?? health.dbPath ?? "No database yet";
   const runtimeLabel = desktopRuntime ? "Desktop" : electronShell ? "Shell" : "Browser";
-  const heroSignals = [previewAnalysis.focus, previewAnalysis.toneLabel, previewAnalysis.timeHint];
   const canGenerateDraft = health.state === "connected" || canUseMockMode;
   const pipeline = createPipelineSteps(
     null,
@@ -638,11 +657,57 @@ function App() {
     setIsBasketOpen(false);
   }
 
-  function scrollToSection(sectionId: string): void {
+  function destinationForSection(sectionId: string): { workspace: Workspace; createMode: CreateMode } {
+    if (sectionId === "control" || sectionId === "library") {
+      return { workspace: "library", createMode };
+    }
+    if (sectionId === "atlas") {
+      return { workspace: "memories", createMode };
+    }
+    if (sectionId === "video-studio") {
+      return { workspace: "create", createMode: "video" };
+    }
+    if (sectionId === "compose" || sectionId === "process" || sectionId === "result") {
+      return { workspace: "create", createMode: "photo" };
+    }
+    return { workspace: "home", createMode };
+  }
+
+  function navigateToWorkspace(workspace: Workspace, mode: CreateMode = createMode): void {
     hasUserNavigatedRef.current = true;
-    document.getElementById(sectionId)?.scrollIntoView({
-      block: "start",
-      behavior: preferredScrollBehavior(),
+    if (workspace === "create") {
+      setHasVisitedCreate(true);
+    }
+    setDestination({ workspace, createMode: mode });
+    const nextHash = workspace === "home"
+      ? "hero"
+      : workspace === "library"
+        ? "library"
+        : workspace === "memories"
+          ? "atlas"
+          : mode === "video"
+            ? "video-studio"
+            : "compose";
+    window.history.replaceState(null, "", `#${nextHash}`);
+    window.requestAnimationFrame(() => {
+      window.scrollTo({ top: 0, left: 0, behavior: preferredScrollBehavior() });
+      document.getElementById("workspace-content")?.focus({ preventScroll: true });
+    });
+  }
+
+  function scrollToSection(sectionId: string): void {
+    const nextDestination = destinationForSection(sectionId);
+    hasUserNavigatedRef.current = true;
+    if (nextDestination.workspace === "create") {
+      setHasVisitedCreate(true);
+    }
+    setDestination(nextDestination);
+    window.history.replaceState(null, "", `#${sectionId}`);
+    window.requestAnimationFrame(() => {
+      document.getElementById(sectionId)?.scrollIntoView({
+        block: "start",
+        behavior: preferredScrollBehavior(),
+      });
     });
   }
 
@@ -1074,27 +1139,6 @@ function App() {
       && !scopedIndexStatusMatchesCurrent
       && !scopedIndexStatusError,
   );
-  const journeySteps = [
-    {
-      label: "Local service",
-      detail: health.state === "connected" ? "Verified and private" : "Connect MemoLens",
-      complete: health.state === "connected",
-    },
-    {
-      label: "Media library",
-      detail: selectedFolderPath ? "Folder selected" : "Choose a folder",
-      complete: Boolean(selectedFolderPath),
-    },
-    {
-      label: "Memory layer",
-      detail: isScopedIndexStatusPending
-        ? "Checking this SQLite library"
-        : hasIndexedLibrary
-          ? `${scopedIndexCount} photos ready`
-          : "Build the index",
-      complete: hasIndexedLibrary,
-    },
-  ];
   const showControlGrid = Boolean(desktopSettings) || Boolean(backendSettings);
   const runtimeHeading = desktopRuntime ? "Desktop runtime" : "Local runtime";
   const handleAtlasInspirationChange = useCallback(
@@ -1124,20 +1168,6 @@ function App() {
   const visibleAtlasInspiration = atlasInspirationCards.slice(0, 5);
   const visibleStorylinePrompts = atlasStorylines.slice(0, 3);
   const visibleSuggestedQueries = atlasSuggestedQueries.slice(0, 4);
-
-  function handleSectionNav(event: MouseEvent<HTMLAnchorElement>, sectionId: string): void {
-    event.preventDefault();
-    hasUserNavigatedRef.current = true;
-    const target = document.getElementById(sectionId);
-    if (!target) {
-      return;
-    }
-    window.history.replaceState(null, "", `#${sectionId}`);
-    const scrollToTarget = () => target.scrollIntoView({ block: "start", behavior: "auto" });
-    scrollToTarget();
-    window.setTimeout(scrollToTarget, 80);
-    window.setTimeout(scrollToTarget, 360);
-  }
 
   async function handleGenerateInspirations(): Promise<void> {
     if (health.state !== "connected") {
@@ -1183,11 +1213,19 @@ function App() {
       return;
     }
     if (!selectedFolderPath) {
-      const advancedSettings = document.querySelector<HTMLDetailsElement>(".advanced-settings");
-      if (advancedSettings) {
-        advancedSettings.open = true;
-      }
       scrollToSection("control");
+      window.requestAnimationFrame(() => {
+        const advancedSettings = document.querySelector<HTMLDetailsElement>(".advanced-settings");
+        if (!advancedSettings) {
+          return;
+        }
+        advancedSettings.open = true;
+        document.getElementById("browser-library-path")?.focus({ preventScroll: true });
+        advancedSettings.scrollIntoView({
+          block: "start",
+          behavior: preferredScrollBehavior(),
+        });
+      });
       return;
     }
     if (!hasIndexedLibrary) {
@@ -1225,63 +1263,86 @@ function App() {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#workspace-content">
+        Skip to workspace
+      </a>
       <header className="top-nav">
-        <a
+        <button
           className="brand"
-          href="#hero"
+          type="button"
           aria-label="MemoLens home"
-          onClick={(event) => handleSectionNav(event, "hero")}
+          onClick={() => navigateToWorkspace("home")}
         >
-          <span className="brand-mark">M</span>
+          <span className="brand-mark" aria-hidden="true">
+            <span />
+          </span>
           <span className="brand-text">
             MemoLens
-            <small>Local Media Agent</small>
+            <small>Private creative memory</small>
           </span>
-        </a>
+        </button>
 
-        <div className="nav-links-shell">
         <nav className="nav-links" aria-label="Primary">
-          <a href="#control" onClick={(event) => handleSectionNav(event, "control")}>
-            Setup
-          </a>
-          <a href="#library" onClick={(event) => handleSectionNav(event, "library")}>
+          <button
+            type="button"
+            className={activeWorkspace === "home" ? "active" : ""}
+            aria-current={activeWorkspace === "home" ? "page" : undefined}
+            onClick={() => navigateToWorkspace("home")}
+          >
+            Home
+          </button>
+          <button
+            type="button"
+            className={activeWorkspace === "library" ? "active" : ""}
+            aria-current={activeWorkspace === "library" ? "page" : undefined}
+            onClick={() => navigateToWorkspace("library")}
+          >
             Library
-          </a>
-          <a href="#atlas" onClick={(event) => handleSectionNav(event, "atlas")}>
-            Workbench
-          </a>
-          <a href="#video-studio" onClick={(event) => handleSectionNav(event, "video-studio")}>
-            Create video
-          </a>
-          <a href="#compose" onClick={(event) => handleSectionNav(event, "compose")}>
-            Photo compose
-          </a>
-          <a href="#result" onClick={(event) => handleSectionNav(event, "result")}>
-            Result
-          </a>
+          </button>
+          <button
+            type="button"
+            className={activeWorkspace === "memories" ? "active" : ""}
+            aria-current={activeWorkspace === "memories" ? "page" : undefined}
+            onClick={() => navigateToWorkspace("memories")}
+          >
+            Memories
+          </button>
+          <button
+            type="button"
+            className={activeWorkspace === "create" ? "active" : ""}
+            aria-current={activeWorkspace === "create" ? "page" : undefined}
+            onClick={() => navigateToWorkspace("create", createMode)}
+          >
+            Create
+          </button>
         </nav>
-        <span className="nav-scroll-hint" aria-hidden="true">More →</span>
-        </div>
 
-        <div className="nav-status" role="status" aria-live="polite">
-          <span className={`status-pill status-${health.state}`} title={health.message}>
-            {health.message}
-          </span>
-          <span className="status-pill">{runtimeLabel}</span>
-        </div>
+        <button
+          type="button"
+          className={`nav-status status-${health.state}`}
+          title={health.message}
+          aria-label={`${health.message}. Open Library settings.`}
+          onClick={() => navigateToWorkspace("library")}
+        >
+          <span className="service-dot" aria-hidden="true" />
+          <span>{health.state === "connected" ? "Private" : health.state === "checking" ? "Checking" : "Offline"}</span>
+          <small>{runtimeLabel}</small>
+        </button>
       </header>
 
-      <main className="page-shell">
+      <main className="page-shell" id="workspace-content" tabIndex={-1}>
+        {activeWorkspace === "home" ? (
+          <>
         <section className="hero-section" id="hero">
           <div className="hero-copy">
-            <p className="eyebrow">Local Media Agent</p>
+            <p className="eyebrow">Private creative memory</p>
             <h1>
-              Ask your media library
-              <span> to find, shape, and cut a story.</span>
+              Your media,
+              <span> remembered.</span>
             </h1>
             <p className="hero-lede">
-              Keep the originals on your machine. MemoLens builds a searchable memory layer,
-              explains every selection, and turns an idea into a grounded photo story or video first cut.
+              Find the exact photo or video moment. Shape it into a story. Make a first cut—without
+              surrendering your library or changing an original.
             </p>
             <div className="action-row hero-actions">
               <button
@@ -1295,32 +1356,25 @@ function App() {
               <button
                 className="secondary-button"
                 type="button"
-                onClick={() => scrollToSection("atlas")}
+                onClick={() => navigateToWorkspace("memories")}
                 disabled={!hasIndexedLibrary}
               >
                 Explore memories
               </button>
             </div>
             <div className="hero-chip-row">
-              <span className="status-pill">No model key required</span>
-              <span className="status-pill">Originals stay untouched</span>
-              {heroSignals.map((signal) => (
-                <span key={signal} className="status-pill">
-                  {signal}
-                </span>
-              ))}
+              <span className="trust-chip"><span aria-hidden="true">✓</span> Private by default</span>
+              <span className="trust-chip"><span aria-hidden="true">✓</span> Originals untouched</span>
             </div>
           </div>
 
           <aside className="hero-preview-card">
             <div className="hero-preview-header">
               <div>
-                <p className="eyebrow">Current draft</p>
-                <h2>{activeResultDraft?.title ?? "Waiting for the first draft"}</h2>
+                <p className="eyebrow">{activeResultDraft ? "Current draft" : "One private workspace"}</p>
+                <h2>{activeResultDraft?.title ?? "From memory to first cut."}</h2>
               </div>
-              <span className="status-pill">
-                {activeResultDraft ? `${activeResultDraft.selectedCount} selected` : "0 selected"}
-              </span>
+              {activeResultDraft ? <span className="status-pill">{activeResultDraft.selectedCount} selected</span> : null}
             </div>
 
             {previewPhotos.length > 0 ? (
@@ -1342,76 +1396,41 @@ function App() {
                 ))}
               </div>
             ) : (
-              <div className="empty-card hero-empty-card">
-                <strong>Pick a library, then generate a draft.</strong>
-                <span>Your local assistant preview will appear here.</span>
+              <div className="hero-empty-card" aria-label="MemoLens creative flow">
+                <div className="hero-flow-step">
+                  <span aria-hidden="true">01</span>
+                  <div><strong>Remember</strong><small>Photos and timestamped video moments</small></div>
+                </div>
+                <div className="hero-flow-line" aria-hidden="true" />
+                <div className="hero-flow-step">
+                  <span aria-hidden="true">02</span>
+                  <div><strong>Direct</strong><small>Grounded ideas from your real library</small></div>
+                </div>
+                <div className="hero-flow-line" aria-hidden="true" />
+                <div className="hero-flow-step">
+                  <span aria-hidden="true">03</span>
+                  <div><strong>Create</strong><small>Photo stories and editable first cuts</small></div>
+                </div>
               </div>
             )}
           </aside>
         </section>
 
-        <section className="journey-panel" aria-labelledby="journey-title">
-          <div className="journey-copy">
-            <p className="eyebrow">Your next step</p>
-            <h2 id="journey-title">
-              {hasIndexedLibrary
-                ? "Your memory layer is ready."
-                : health.state !== "connected"
-                  ? "Connect the private local service."
-                  : selectedFolderPath
-                    ? "Turn this folder into memories."
-                    : "Choose the library you want to understand."}
-            </h2>
-            <p>
-              {hasIndexedLibrary
-                ? "Describe a set, explore a memory, or use Codex to work with the same local index."
-                : "Three visible steps take you from a folder to a trustworthy, searchable photo library."}
-            </p>
-          </div>
-          <ol className="journey-steps">
-            {journeySteps.map((step, index) => (
-              <li className={step.complete ? "complete" : "pending"} key={step.label}>
-                <span aria-hidden="true">{step.complete ? "✓" : index + 1}</span>
-                <div>
-                  <strong>{step.label}</strong>
-                  <small>{step.detail}</small>
-                </div>
-              </li>
-            ))}
-          </ol>
-          <button
-            className="primary-button journey-action"
-            type="button"
-            onClick={handlePrimaryJourneyAction}
-            disabled={health.state === "checking" || isIndexing || isScopedIndexStatusPending}
-          >
-            {primaryJourneyLabel}
-          </button>
-        </section>
+          </>
+        ) : null}
+
+        {activeWorkspace === "library" ? (
+          <>
+            <header className="workspace-heading">
+              <p className="eyebrow">Library</p>
+              <h1>One place for your private media.</h1>
+              <p>Connect once, choose a folder, and let MemoLens build a memory layer you control.</p>
+            </header>
 
         <section className="section-block control-section" id="control">
           <div className="section-heading compact-heading">
             <p className="eyebrow">Control</p>
             <h2>{runtimeHeading}</h2>
-          </div>
-
-          <div className="meta-pills">
-            <span className={`status-pill status-${health.state}`}>{health.message}</span>
-            <span className="meta-pill">
-              Vision {health.visionProfile ?? "pending"}
-            </span>
-            <span className="meta-pill">
-              Query {health.queryProfile ?? "pending"}
-            </span>
-            <span className="meta-pill">
-              Embeddings {health.embeddingBackend ?? "pending"}
-            </span>
-            <span className={`meta-pill${hasStaleIndex ? " status-offline" : ""}`}>
-              {indexStatusLabel}
-            </span>
-            <span className="meta-pill">
-              {backendStatus?.startedByApp ? "Desktop managed" : "Local service"}
-            </span>
           </div>
 
           {health.state === "offline" ? (
@@ -1467,6 +1486,19 @@ function App() {
               </span>
               <span aria-hidden="true">＋</span>
             </summary>
+
+            <div className="meta-pills diagnostic-pills" aria-label="Runtime diagnostics">
+              <span className={`status-pill status-${health.state}`}>{health.message}</span>
+              <span className="meta-pill">Vision {health.visionProfile ?? "pending"}</span>
+              <span className="meta-pill">Query {health.queryProfile ?? "pending"}</span>
+              <span className="meta-pill">Embeddings {health.embeddingBackend ?? "pending"}</span>
+              <span className={`meta-pill${hasStaleIndex ? " status-offline" : ""}`}>
+                {indexStatusLabel}
+              </span>
+              <span className="meta-pill">
+                {backendStatus?.startedByApp ? "Desktop managed" : "Local service"}
+              </span>
+            </div>
 
             {showControlGrid ? (
               <div className="control-grid">
@@ -1539,6 +1571,7 @@ function App() {
                     <label className="settings-field">
                       <span>Photo library</span>
                       <input
+                        id="browser-library-path"
                         className="settings-input"
                         type="text"
                         value={backendSettings.effective.image_library_dir}
@@ -1893,7 +1926,16 @@ function App() {
             </p>
           ) : null}
         </section>
+          </>
+        ) : null}
 
+        {activeWorkspace === "memories" ? (
+          <>
+            <header className="workspace-heading">
+              <p className="eyebrow">Memories</p>
+              <h1>See the shape of your library.</h1>
+              <p>Move from themes and places to a grounded set without losing the evidence behind it.</p>
+            </header>
         <Suspense
           fallback={
             <section className="section-block atlas-section" id="atlas">
@@ -1914,7 +1956,42 @@ function App() {
             onBasketAddMany={addBasketItems}
           />
         </Suspense>
+          </>
+        ) : null}
 
+        {hasVisitedCreate ? (
+          <div hidden={activeWorkspace !== "create"}>
+            <header className="workspace-heading create-heading">
+              <div>
+                <p className="eyebrow">Create</p>
+                <h1>{createMode === "photo" ? "Shape a photo story." : "Build a grounded first cut."}</h1>
+                <p>
+                  {createMode === "photo"
+                    ? "Describe the feeling. MemoLens finds, orders, and explains a coherent set."
+                    : "Search real moments, define the intent, then revise a deterministic local timeline."}
+                </p>
+              </div>
+              <div className="mode-switch" role="group" aria-label="Creation mode">
+                <button
+                  type="button"
+                  className={createMode === "photo" ? "active" : ""}
+                  aria-pressed={createMode === "photo"}
+                  onClick={() => navigateToWorkspace("create", "photo")}
+                >
+                  Photo story
+                </button>
+                <button
+                  type="button"
+                  className={createMode === "video" ? "active" : ""}
+                  aria-pressed={createMode === "video"}
+                  onClick={() => navigateToWorkspace("create", "video")}
+                >
+                  Video first cut
+                </button>
+              </div>
+            </header>
+
+        <div hidden={createMode !== "video"}>
         <Suspense
           fallback={
             <section className="section-block video-workbench" id="video-studio" aria-labelledby="video-studio-loading-title">
@@ -1932,78 +2009,14 @@ function App() {
             indexedAssetCount={scopedIndexCount}
           />
         </Suspense>
+        </div>
+        {createMode === "photo" ? (
+          <>
 
         <section id="compose" className="section-block compose-card">
           <div className="section-heading">
             <p className="eyebrow">Compose</p>
             <h2>Describe the set you want.</h2>
-          </div>
-
-          <div className="compose-inspiration-panel">
-            <div className="compose-inspiration-head">
-              <div>
-                <p className="eyebrow">AI Inspiration</p>
-                <h3>Start from what your library already contains.</h3>
-              </div>
-              <span className="meta-pill">from Memory Workbench</span>
-            </div>
-
-            <div className="compose-inspiration-grid">
-              {visibleAtlasInspiration.map((card) => (
-                <button
-                  key={card.id}
-                  className="inspiration-card-button"
-                  type="button"
-                  onClick={() => setPrompt(card.prompt)}
-                >
-                  <strong>{card.title}</strong>
-                  <span>{card.summary}</span>
-                </button>
-              ))}
-              {visibleStorylinePrompts.map((storyline) => (
-                <button
-                  key={storyline.id}
-                  className="inspiration-card-button"
-                  type="button"
-                  onClick={() => setPrompt(storyline.prompt)}
-                >
-                  <strong>{storyline.title}</strong>
-                  <span>{storyline.summary}</span>
-                </button>
-              ))}
-            </div>
-
-            {visibleAtlasInspiration.length === 0 && visibleStorylinePrompts.length === 0 ? (
-              <p className="inline-note">AI Inspiration will appear after the local library map loads.</p>
-            ) : null}
-
-            {visibleSuggestedQueries.length > 0 ? (
-              <div className="composer-suggestions compact-suggestions">
-                {visibleSuggestedQueries.map((query) => (
-                  <button
-                    key={query}
-                    className="chip-button"
-                    type="button"
-                    onClick={() => setPrompt(query)}
-                  >
-                    {query}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-
-          <div className="composer-suggestions">
-            {PROMPT_PRESETS.map((preset) => (
-              <button
-                key={preset.label}
-                className="chip-button"
-                type="button"
-                onClick={() => appendPreset(preset.query)}
-              >
-                {preset.label}
-              </button>
-            ))}
           </div>
 
           {basketItems.length > 0 ? (
@@ -2071,7 +2084,7 @@ function App() {
               onClick={() => void handleGenerateInspirations()}
               disabled={isGeneratingInspirations || health.state !== "connected"}
             >
-              {isGeneratingInspirations ? "✨ Thinking..." : "✨ AI Inspire"}
+              {isGeneratingInspirations ? "Finding ideas…" : "Suggest ideas"}
             </button>
           </div>
 
@@ -2092,7 +2105,7 @@ function App() {
                   onClick={() => void handleGenerateInspirations()}
                   disabled={isGeneratingInspirations || health.state !== "connected"}
                 >
-                  ✨ Refresh
+                  Refresh ideas
                 </button>
               </div>
               <div className="composer-suggestions compact-suggestions">
@@ -2133,15 +2146,6 @@ function App() {
               >
                 {isGenerating && activeVariant === "soft" ? "Refining..." : "Make it softer"}
               </button>
-              {isGenerating ? (
-                <button
-                  className="secondary-button cancel-generation-button"
-                  type="button"
-                  onClick={handleCancelGeneration}
-                >
-                  Cancel
-                </button>
-              ) : null}
             </div>
 
             <div className="meta-pills">
@@ -2156,6 +2160,81 @@ function App() {
               <span className="meta-pill">Cmd/Ctrl + Enter</span>
             </div>
           </div>
+
+          <details className="compose-ideas">
+            <summary>
+              <span>
+                <strong>Need a starting point?</strong>
+                <small>Use a simple prompt or an idea grounded in your memory map.</small>
+              </span>
+              <span aria-hidden="true">＋</span>
+            </summary>
+            <div className="composer-suggestions">
+              {PROMPT_PRESETS.map((preset) => (
+                <button
+                  key={preset.label}
+                  className="chip-button"
+                  type="button"
+                  onClick={() => appendPreset(preset.query)}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+            <div className="compose-inspiration-panel">
+              <div className="compose-inspiration-head">
+                <div>
+                  <p className="eyebrow">From your memories</p>
+                  <h3>Start from what your library already contains.</h3>
+                </div>
+                <span className="meta-pill">Private index</span>
+              </div>
+
+              <div className="compose-inspiration-grid">
+                {visibleAtlasInspiration.map((card) => (
+                  <button
+                    key={card.id}
+                    className="inspiration-card-button"
+                    type="button"
+                    onClick={() => setPrompt(card.prompt)}
+                  >
+                    <strong>{card.title}</strong>
+                    <span>{card.summary}</span>
+                  </button>
+                ))}
+                {visibleStorylinePrompts.map((storyline) => (
+                  <button
+                    key={storyline.id}
+                    className="inspiration-card-button"
+                    type="button"
+                    onClick={() => setPrompt(storyline.prompt)}
+                  >
+                    <strong>{storyline.title}</strong>
+                    <span>{storyline.summary}</span>
+                  </button>
+                ))}
+              </div>
+
+              {visibleAtlasInspiration.length === 0 && visibleStorylinePrompts.length === 0 ? (
+                <p className="inline-note">Ideas appear after your private memory map is ready.</p>
+              ) : null}
+
+              {visibleSuggestedQueries.length > 0 ? (
+                <div className="composer-suggestions compact-suggestions">
+                  {visibleSuggestedQueries.map((query) => (
+                    <button
+                      key={query}
+                      className="chip-button"
+                      type="button"
+                      onClick={() => setPrompt(query)}
+                    >
+                      {query}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </details>
 
           {health.state === "offline" ? (
             <p className="inline-error" role="alert">
@@ -2177,15 +2256,9 @@ function App() {
             </p>
           ) : null}
 
-          <div className="signal-row">
-            {previewAnalysis.tokens.slice(0, 4).map((token) => (
-              <span className="status-pill" key={token}>
-                {token}
-              </span>
-            ))}
-          </div>
         </section>
 
+        {isGenerating ? (
         <section id="process" className="section-block process-panel">
           <div className="section-heading compact-heading">
             <p className="eyebrow">Process</p>
@@ -2279,7 +2352,9 @@ function App() {
             })}
           </div>
         </section>
+        ) : null}
 
+        {activeResultDraft ? (
         <section id="result" className="section-block curated-stage">
           <div className="section-heading">
             <p className="eyebrow">Result</p>
@@ -2386,26 +2461,20 @@ function App() {
             </div>
           )}
         </section>
+        ) : null}
+          </>
+        ) : null}
+          </div>
+        ) : null}
       </main>
 
-      {(isGenerating || isIndexing) && (
+      {isIndexing && (
         <div className="floating-state" role="status" aria-live="polite">
-          <span>
-            {isIndexing
-              ? "indexing local library..."
-              : generationProgress.percent === null
-                ? generationProgress.title
-                : `${generationProgress.title} · ${generationProgress.percent}%`}
-          </span>
-          {isGenerating ? (
-            <button type="button" onClick={handleCancelGeneration}>
-              Cancel
-            </button>
-          ) : null}
+          <span>Indexing local library…</span>
         </div>
       )}
 
-      {basketItems.length > 0 ? (
+      {basketItems.length > 0 && !isGenerating && !isIndexing ? (
         <div className={`floating-basket${isBasketOpen ? " open" : ""}`}>
           <button
             type="button"

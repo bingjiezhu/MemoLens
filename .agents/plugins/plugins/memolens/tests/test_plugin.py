@@ -555,10 +555,19 @@ class PluginTests(unittest.TestCase):
             plugin_manifest["interface"]["composerIcon"], "./assets/memolens.svg"
         )
         self.assertEqual(plugin_manifest["interface"]["logo"], "./assets/memolens.svg")
+        self.assertEqual(
+            plugin_manifest["version"].split("+", maxsplit=1)[0],
+            PLUGIN_VERSION,
+        )
         self.assertTrue(
             plugin_manifest["version"].startswith(f"{release_version}+codex."),
             plugin_manifest["version"],
         )
+        prompts = plugin_manifest["interface"]["defaultPrompt"]
+        self.assertIsInstance(prompts, list)
+        self.assertEqual(len(prompts), 3)
+        self.assertTrue(all(isinstance(prompt, str) for prompt in prompts))
+        self.assertTrue(all(1 <= len(prompt) <= 128 for prompt in prompts))
         self.assertEqual(entry["policy"]["authentication"], "ON_USE")
         self.assertIn(
             release_version,

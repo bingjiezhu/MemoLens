@@ -666,7 +666,7 @@ function AtlasView({
           <button className="secondary-button" type="button" onClick={handleRebuild} disabled={!canUseBackend || isRebuilding}>
             {isRebuilding ? "Rebuilding" : "Rebuild Atlas"}
           </button>
-          {loadError ? (
+          {loadError && workbench ? (
             <button className="secondary-button" type="button" onClick={handleRetryLoad} disabled={isLoading}>
               Retry map
             </button>
@@ -698,10 +698,10 @@ function AtlasView({
         </div>
       ) : (
       <div className="workbench-grid">
-        <aside className="memory-rail">
+        <aside className="memory-rail" aria-label="Memory browsing controls">
           {librarySummary ? (
             <div className="rail-section library-snapshot">
-              <strong>Library Map</strong>
+              <h3>Library Map</h3>
               <div className="snapshot-grid">
                 <span>{formatCount(librarySummary.asset_count)} photos</span>
                 <span>{formatCount(librarySummary.memory_count)} memories</span>
@@ -719,13 +719,14 @@ function AtlasView({
           ) : null}
 
           <div className="rail-section">
-            <strong>Lenses</strong>
+            <h3>Lenses</h3>
             <div className="lens-list">
               {(workbench?.lenses ?? []).map((item) => (
                 <button
                   key={item.id}
                   type="button"
                   className={lens === item.id ? "active" : ""}
+                  aria-pressed={lens === item.id}
                   onClick={() => setLens(item.id)}
                 >
                   <span>{item.label}</span>
@@ -737,13 +738,14 @@ function AtlasView({
           </div>
 
           <div className="rail-section">
-            <strong>Memories</strong>
+            <h3>Memories</h3>
             <div className="memory-list">
               {(workbench?.memories ?? []).slice(0, 14).map((memory) => (
                 <button
                   key={memory.id}
                   type="button"
                   className={selectedMemoryId === memory.id ? "active" : ""}
+                  aria-pressed={selectedMemoryId === memory.id}
                   onClick={() => selectMemory(memory)}
                 >
                   {photoStrip(memory.representative_assets, apiBase, imageLibraryDir)}
@@ -755,7 +757,7 @@ function AtlasView({
           </div>
 
           <div className="rail-section">
-            <strong>Storylines</strong>
+            <h3>Storylines</h3>
             <div className="inspiration-list">
               {(workbench?.storylines ?? []).slice(0, 5).map((storyline) => (
                 <button
@@ -776,12 +778,12 @@ function AtlasView({
           </div>
         </aside>
 
-        <main className="memory-canvas">
+        <section className="memory-canvas" aria-label="Interactive memory map">
           <div className="keyword-galaxy">
             <svg
               className="keyword-galaxy-svg"
               viewBox={`0 0 ${GALAXY_WIDTH} ${GALAXY_HEIGHT}`}
-              role="img"
+              role="group"
               aria-label="Keyword galaxy showing concepts, memories, and semantic links in the local photo library"
             >
               <defs>
@@ -820,6 +822,8 @@ function AtlasView({
                       className={`galaxy-node concept-node${active ? " active" : " muted"}`}
                       role="button"
                       tabIndex={0}
+                      aria-pressed={activeGalaxyNodeId === node.id}
+                      aria-label={`${node.label}, ${formatCount(node.count)} photos`}
                       transform={`translate(${node.x} ${node.y})`}
                       onClick={() => selectGalaxyNode(node)}
                       onMouseEnter={() => setHoveredGalaxyNodeId(node.id)}
@@ -854,6 +858,8 @@ function AtlasView({
                       className={`galaxy-node memory-node${active ? " active" : " muted"}${selectedMemoryId === node.memory?.id ? " selected" : ""}`}
                       role="button"
                       tabIndex={0}
+                      aria-pressed={activeGalaxyNodeId === node.id}
+                      aria-label={`${node.label}, ${formatCount(node.count)} photos`}
                       transform={`translate(${node.x} ${node.y})`}
                       onClick={() => selectGalaxyNode(node)}
                       onMouseEnter={() => setHoveredGalaxyNodeId(node.id)}
@@ -985,11 +991,11 @@ function AtlasView({
             </div>
           ) : null}
 
-        </main>
+        </section>
       </div>
       )}
 
-      {message ? (
+      {message && !(loadError && !workbench) ? (
         <p
           className={messageIsError ? "inline-error" : "inline-note"}
           role={messageIsError ? "alert" : "status"}
