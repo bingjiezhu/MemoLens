@@ -1,0 +1,7 @@
+interface:
+  display_name: "Use MemoLens"
+  short_description: "Search and narrate your private local photos"
+  brand_color: "#6750A4"
+  default_prompt: "Search my local MemoLens library, inspect the strongest matching images with Codex vision, and create a grounded album or story without changing originals."
+policy:
+  allow_implicit_invocation: true

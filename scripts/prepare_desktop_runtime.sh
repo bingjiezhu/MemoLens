@@ -28,8 +28,18 @@ if [ "$(uname -s)" = "Darwin" ]; then
   fi
 fi
 
-if [ ! -f "dist/index.html" ] || [ ! -f "electron-dist/electron/main.js" ]; then
-  npm run build
+npm run build
+
+if [ ! -f "dist/index.html" ] \
+  || [ ! -f "electron-dist/electron/main.js" ] \
+  || [ ! -f "electron-dist/electron/preload.cjs" ]; then
+  echo "MemoLens desktop build is incomplete." >&2
+  exit 1
+fi
+
+if ! grep -q "Content-Security-Policy" "dist/index.html"; then
+  echo "MemoLens renderer build is missing its Content Security Policy." >&2
+  exit 1
 fi
 
 if [ "$(uname -s)" = "Darwin" ]; then

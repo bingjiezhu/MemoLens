@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hmac
+import re
+import sqlite3
+from ipaddress import ip_address
 from io import BytesIO
 from pathlib import Path
 
@@ -19,23 +23,31 @@ from core.photo_atlas import (
     parse_limit,
 )
 from core.schemas import RetrievedImageSummary, parse_indexing_request, parse_retrieval_request
-from backend.src import reload_runtime
+from backend.src import (
+    MEMOLENS_API_VERSION,
+    MEMOLENS_SERVICE_ID,
+    reload_runtime,
+)
 from indexing.files import ensure_heif_support
 
 
 ensure_heif_support()
 
 api_blueprint = Blueprint("api", __name__)
-LOCAL_CLIENT_ADDRESSES = {"127.0.0.1", "::1"}
 
 
 def _is_local_remote_addr(remote_addr: str | None) -> bool:
     normalized = str(remote_addr or "").strip()
     if not normalized:
+        return False
+    try:
+        address = ip_address(normalized)
+    except ValueError:
+        return False
+    if address.is_loopback:
         return True
-    if normalized in LOCAL_CLIENT_ADDRESSES:
-        return True
-    return normalized.startswith("::ffff:127.0.0.1")
+    ipv4_mapped = getattr(address, "ipv4_mapped", None)
+    return bool(ipv4_mapped and ipv4_mapped.is_loopback)
 
 
 def _request_is_local() -> bool:
@@ -256,26 +268,51 @@ def _string_list_from_payload(payload: dict[str, object], key: str) -> list[str]
 
 @api_blueprint.route("/healthz", methods=["GET"])
 def healthz():
-    settings = current_app.config["SETTINGS"]
-    repository = current_app.extensions["image_index_repository"]
-    local_model_runtime = detect_local_model_runtime(settings.vlm_profile_catalog)
+    expected_token = str(current_app.config.get("DESKTOP_SESSION_TOKEN") or "")
+    challenge = request.args.get("challenge", "")
+    proof = None
+    if expected_token and re.fullmatch(r"[0-9a-f]{64}", challenge):
+        proof = hmac.new(
+            expected_token.encode("utf-8"),
+            challenge.encode("ascii"),
+            "sha256",
+        ).hexdigest()
     return jsonify(
         {
             "status": "ok",
             "object": "health.check",
-            "image_library_dir": str(settings.image_library_dir),
-            "db_path": str(settings.db_path),
-            "app_state_dir": str(settings.app_state_dir),
-            "settings_path": str(settings.persisted_settings_path),
-            "vision_profile": settings.vision_profile_name,
-            "query_profile": settings.query_profile_name,
-            "embedding_backend": settings.embedding_backend,
-            "available_vlm_profiles": list(settings.available_vlm_profiles),
-            "vlm_profile_catalog": [
-                entry.to_dict() for entry in settings.vlm_profile_catalog
-            ],
-            "local_model_runtime": local_model_runtime.to_dict(),
-            "index_stats": repository.summarize_index_health(),
+            "service": MEMOLENS_SERVICE_ID,
+            "api_version": MEMOLENS_API_VERSION,
+            "challenge_proof": proof,
+        }
+    )
+
+
+@api_blueprint.route("/v1/index/status", methods=["GET"])
+def get_index_status():
+    raw_db_path = request.args.get("db_path")
+    if raw_db_path is None:
+        repository = current_app.extensions["image_index_repository"]
+        resolved_db_path = repository.db_path.resolve()
+    else:
+        if not raw_db_path.strip():
+            return _error_response("`db_path` must be a non-empty string when set.")
+        try:
+            resolved_db_path = _resolve_existing_db_path(raw_db_path)
+        except (FileNotFoundError, ValueError) as exc:
+            return _error_response(str(exc))
+        repository = ImageIndexRepository(resolved_db_path)
+
+    try:
+        index_stats = repository.summarize_index_health()
+    except sqlite3.DatabaseError:
+        return _error_response("`db_path` must point to a valid MemoLens SQLite database.")
+
+    return jsonify(
+        {
+            "object": "image_index.status",
+            "db_path": str(resolved_db_path),
+            "index_stats": index_stats,
         }
     )
 
@@ -304,6 +341,9 @@ def get_settings():
                 entry.to_dict() for entry in settings.vlm_profile_catalog
             ],
             "local_model_runtime": local_model_runtime.to_dict(),
+            "index_stats": current_app.extensions[
+                "image_index_repository"
+            ].summarize_index_health(),
         }
     )
 
@@ -399,7 +439,11 @@ def create_indexing_job():
     if not _request_is_local():
         return _local_only_error()
 
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return _error_response("Indexing payload must be a JSON object.")
     settings = current_app.config["SETTINGS"]
     include_records = payload.get("include_records", False)
     if not isinstance(include_records, bool):
@@ -460,12 +504,28 @@ def create_indexing_job():
             400,
         )
 
-    return jsonify(result.to_response(include_records=include_records))
+    response_body = result.to_response(include_records=include_records)
+    if not result.indexed and not result.skipped:
+        if result.failed:
+            response_body["status"] = "failed"
+            response_body["message"] = "All candidate images failed to index."
+        else:
+            response_body["status"] = "empty"
+            response_body["message"] = "No supported images were found to index."
+    elif result.failed:
+        response_body["status"] = "partial"
+        response_body["message"] = "Indexing completed with some failed images."
+
+    return jsonify(response_body)
 
 
 @api_blueprint.route("/v1/retrieval/query", methods=["POST"])
 def create_retrieval_query():
-    payload = request.get_json(silent=True) or {}
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        return _error_response("Retrieval payload must be a JSON object.")
     settings = current_app.config["SETTINGS"]
     include_copy = payload.get("include_copy", True)
 
@@ -520,7 +580,9 @@ def create_retrieval_query():
                 query_text=result.query_text,
                 retrieved_images=result.data,
                 image_library_dir=image_library_dir,
-                image_limit=min(6, len(result.data)),
+                # Compose from text already stored in the index. Retrieval
+                # must never upload original photo bytes to a copy provider.
+                image_limit=0,
             )
             body["generated_copy"] = generated_copy.to_dict()
             body["title"] = generated_copy.title
@@ -563,7 +625,9 @@ def create_retrieval_copy():
             query_text=query_text.strip(),
             retrieved_images=retrieved_images,
             image_library_dir=image_library_dir,
-            image_limit=min(6, len(retrieved_images)),
+            # This endpoint is a text-only composition boundary. Photo bytes
+            # may leave the device only during an explicit indexing request.
+            image_limit=0,
         )
     except Exception as exc:
         return (
@@ -832,6 +896,19 @@ def create_atlas_feedback():
             weight=float(payload.get("weight") or 1.0),
             note=payload.get("note") if isinstance(payload.get("note"), str) else None,
         )
+    except (FileNotFoundError, ValueError) as exc:
+        return _error_response(str(exc))
+    return jsonify(result)
+
+
+@api_blueprint.route("/v1/atlas/basket", methods=["GET"])
+def get_atlas_basket():
+    if not _request_is_local():
+        return _local_only_error()
+
+    try:
+        service = _atlas_service_for_db_path(request.args.get("db_path"))
+        result = service.load_basket()
     except (FileNotFoundError, ValueError) as exc:
         return _error_response(str(exc))
     return jsonify(result)

@@ -411,7 +411,7 @@ export interface DesktopIndexingProgress {
 }
 
 export interface DesktopIndexingResult {
-  status: "completed";
+  status: "completed" | "partial" | "failed" | "empty";
   folderPath: string;
   dbPath: string;
   total: number;
@@ -489,4 +489,20 @@ export interface BackendSettingsResponse {
   available_vlm_profiles: string[];
   vlm_profile_catalog: VlmProfileCatalogEntry[];
   local_model_runtime: LocalModelRuntimeSummary;
+  index_stats?: IndexStats;
+}
+
+export interface IndexStats {
+  total_records: number;
+  fallback_records: number;
+  fallback_ratio: number;
+  needs_reindex: boolean;
+  aesthetic_records?: number;
+  aesthetic_missing?: number;
+}
+
+export interface ScopedIndexStatusResponse {
+  object: string;
+  db_path: string;
+  index_stats: IndexStats;
 }
