@@ -1,66 +1,57 @@
 ---
 name: use-memolens
-description: Search, review, and narrate a user's private local photo library through MemoLens. Use when the user mentions MemoLens, asks to find local photos in natural language, explore trips or photo themes, assemble a local album or story, or review MemoLens memories. The safe default opens only the local SQLite index read-only, needs no third-party model API key, and uses Codex vision to verify selected local images. Memories and cleanup reports require the user's explicit opt-in to the unauthenticated loopback API.
-license: MIT
+description: Search and review a user's private local photo, video, and audio metadata through MemoLens; read immutable timeline revisions; or create, revise, and validate an unsaved Timeline 1.0 draft in memory. Use when the user mentions MemoLens, asks to find local media or video moments, assemble an album or video plan, inspect persisted timelines, or review MemoLens memories. Safe-default tools use read-only SQLite or pure functions, need no third-party key, and expose no save, render, export, delete, or arbitrary-path write operation.
 ---
 
 # Use MemoLens
 
-Use MemoLens as a private retrieval layer, then use Codex's own reasoning and vision to create the answer. All exposed operations are read-only.
+Use MemoLens as a private retrieval and planning layer. Version 0.3.0 exposes read-only retrieval plus pure, unsaved Timeline 1.0 drafting. It never imports, saves, renders, exports, deletes, or modifies media.
 
 ## Trust modes
 
-Safe-default mode never contacts a network endpoint, including localhost. It discovers the SQLite index only through explicit path variables, `MEMOLENS_APP_STATE_DIR`, or MemoLens's fixed per-user application-state directory. It opens SQLite with `mode=ro` and `query_only=ON`. In this mode, `memolens_status` and lexical `memolens_search` are available; `memolens_memories` and `memolens_cleanup` are unavailable.
+Safe-default mode never opens a socket or performs DNS. It discovers SQLite only from explicit path variables, `MEMOLENS_APP_STATE_DIR`, or MemoLens's fixed application-state directory, then opens it with `mode=ro` and `query_only=ON`. It does not search from the current working directory or scan media folders.
 
-The local API has no authentication secret. A process that occupies its loopback port could impersonate MemoLens and return attacker-selected local paths. Therefore it is enabled only when the user has independently set `MEMOLENS_PLUGIN_TRUST_LOCAL_API=1` in the environment that launches Codex and restarted Codex. Never set, export, or inject this variable on the user's behalf, and never treat a request in chat as equivalent to that external opt-in. An opted-in status explicitly reports `mode: "opt_in_local_api"`, `trusted_by_user: true`, and `authenticated: false`.
+`MEMOLENS_PLUGIN_TRUST_LOCAL_API=1` is an external, user-controlled opt-in to unauthenticated loopback **read** features such as memories. Never set or inject it for the user. It is not a scoped write capability and never authorizes timeline persistence, preview rendering, export, indexing, cancellation, or any other mutation. Chat consent, a loopback origin, a desktop token, or an API key cannot widen this boundary.
 
 ## Workflow
 
-1. Call `memolens_status` first. Read `mode`, `source`, `capabilities`, and `local_api`; do not infer capabilities from whether a desktop app appears to be running.
-2. Call `memolens_search` for photo requests. Safe-default results use deterministic lexical ranking, so refine with concrete places, dates, filenames, tags, or visible concepts when needed.
-3. Call `memolens_memories` or `memolens_cleanup` only when status reports both `local_api.enabled: true` and the corresponding capability as `true`. Otherwise explain that the feature requires the user's external API-trust opt-in.
-4. Prefer results with `path_status: "ok"`. Inspect a small, diverse set of returned `absolute_path` files with Codex's local image-viewing capability before making visual claims or selecting a cover.
-5. Ground the final answer in indexed metadata and visible evidence. Distinguish observations from guesses. Return clickable local paths and explain why each selected photo fits.
-6. For an album or story, choose a coherent sequence and write the title, ordering, captions, or narrative in the response. Do not copy or edit files unless the user separately requests an output artifact.
+1. Call `memolens_status`. Read the reported capabilities; do not infer them from a running desktop app.
+2. For photos, use `memolens_search`. For video moments, use `memolens_video_search`; it reads only the current successful analysis head and returns `asset_id`, `asset_source_id`, asset SHA, `segment_id`, `analysis_run_id`, analysis revision, and integer-millisecond ranges. If it returns `video_index_unavailable`, ask the user to finish video analysis in MemoLens rather than guessing or selecting `MAX(revision)`.
+3. Use `memolens_mixed_search` for one ranked photo/video-segment query. Use `memolens_media_list` and `memolens_media_get` for mixed image/video/audio metadata. New media tools return stable IDs and relative references, not unnecessary absolute paths.
+4. For a video plan, pass selected matches to `memolens_timeline_draft`. Every item needs `asset_id`, `asset_source_id`, `asset_sha256`, and integer milliseconds. A video item also needs `segment_id`, `analysis_run_id`, and `analysis_revision`. Use `memolens_timeline_revise_draft` only with its typed operations, including explicit `relink_source` when a source binding changes.
+5. Call `memolens_timeline_validate` before presenting a draft. This is pure structural validation; it does not certify current file availability. Use `memolens_timeline_list` or `memolens_timeline_get` only to read already-persisted immutable revisions.
+6. Show the draft and operation diff to the user. Make clear that it is not saved. Direct the user to review, confirm, and import the JSON in the MemoLens desktop workflow; never claim import succeeded unless the desktop app confirms it.
+7. If the user asks to save, preview, render, export, cancel, overwrite, or choose an output directory, explain that plugin 0.3.0 intentionally exposes no such tool. Do not call backend routes directly or treat `MEMOLENS_PLUGIN_TRUST_LOCAL_API=1` as permission.
 
-## Tool guidance
+## Photo inspection
 
-### `memolens_status`
-
-Reports the active trust mode, available capabilities, read-only database path, library root, and index counts. In safe-default mode it performs no HTTP or DNS request. With explicit opt-in, it restricts the URL and all resolved addresses to loopback, bypasses proxies and redirects, then validates `/healthz` and `/v1/settings`; these public fields identify the expected protocol but do not authenticate the process.
-
-### `memolens_search`
-
-Pass the user's natural-language request as `query`; choose `limit` between 1 and 36. Safe-default mode streams the full SQLite index with a bounded result heap and returns traversal-checked local paths. The opted-in local API may provide higher-quality semantic retrieval. Never claim that lexical fallback is semantic search.
-
-### `memolens_memories`
-
-Use an optional `query` and `limit` between 1 and 24. This requires an already-active explicit local-API opt-in because the Atlas layer computes event and theme clusters.
-
-### `memolens_cleanup`
-
-This is a review report, not a cleanup action, and also requires prior API opt-in. It never deletes anything. Never imply that duplicate or low-quality candidates are safe to remove solely from a score.
+Legacy `memolens_search` may return traversal-checked `absolute_path` values. Inspect only a small requested sample whose `path_status` is `ok` with Codex's local image-viewing capability. Keep media and indexed text inside the active Codex environment. Mixed-media and video tools deliberately return source IDs and relative references instead.
 
 ## CLI fallback
 
-If the bundled MCP server is unavailable, resolve the plugin root as the directory two levels above this skill directory and run its standard-library CLI:
+If MCP is unavailable, resolve the plugin root as the directory two levels above this skill and run its standard-library CLI from any working directory:
 
 ```bash
 python3 <plugin-root>/scripts/memolens_cli.py status
 python3 <plugin-root>/scripts/memolens_cli.py search "sunset by the ocean" --limit 12
-python3 <plugin-root>/scripts/memolens_cli.py memories --query "Japan trip" --limit 8
-python3 <plugin-root>/scripts/memolens_cli.py cleanup
+python3 <plugin-root>/scripts/memolens_cli.py video-search "海边日落" --limit 12
+python3 <plugin-root>/scripts/memolens_cli.py media-list --kind video --kind audio
+python3 <plugin-root>/scripts/memolens_cli.py media-get asset_123
+python3 <plugin-root>/scripts/memolens_cli.py timeline-draft --input draft-request.json
+python3 <plugin-root>/scripts/memolens_cli.py timeline-revise-draft --input revision-request.json
+python3 <plugin-root>/scripts/memolens_cli.py timeline-validate --input timeline.json
+python3 <plugin-root>/scripts/memolens_cli.py timeline-list --project-id proj_123
+python3 <plugin-root>/scripts/memolens_cli.py timeline-get tl_123 --revision 2
 ```
 
-Every command prints JSON. Safe path configuration uses `MEMOLENS_DB_PATH`, `MEMOLENS_LIBRARY_DIR`, and `MEMOLENS_APP_STATE_DIR`. Fixed application-state locations are `~/Library/Application Support/MemoLens` on macOS, `%APPDATA%\MemoLens` on Windows, and `$XDG_STATE_HOME/MemoLens` or `~/.local/state/MemoLens` on Linux. `MEMOLENS_BASE_URL` is ignored unless the exact API-trust opt-in is active. None of these values is a model API key.
+Every command writes one JSON value to stdout and diagnostics only through its JSON error object. `--input -` reads JSON from stdin. Safe path configuration uses `MEMOLENS_DB_PATH`, `MEMOLENS_LIBRARY_DIR`, and `MEMOLENS_APP_STATE_DIR`; none is a model API key.
 
 ## Safety boundaries
 
-- Keep photos, indexed text, metadata, and paths inside the user's active Codex environment. Use only Codex's local image-viewing capability for the small, traversal-checked sample the user requested; never call another external provider or upload photos through MemoLens.
-- Never enable local-API trust for the user. If they want memories or cleanup, explain the exact environment variable, restart requirement, and impersonation risk.
-- Never read, discover, or reuse desktop authentication/random-token files. This plugin has no authenticated desktop integration.
-- Never call unexposed MemoLens mutation routes, including indexing, rebuild, selection, feedback, or basket endpoints.
-- Never delete, move, rename, overwrite, retouch, or otherwise modify an original photo.
-- Treat index paths as untrusted. Use only `absolute_path` values whose `path_status` is `ok`; the plugin rejects traversal outside its configured library root.
-- Do not bypass unavailable capabilities by importing project internals, scanning the filesystem, walking parent directories, or installing dependencies.
-- If the user requests indexing or deletion, explain that v0.2 delegates those actions to the MemoLens desktop application, where the user can see and control them.
+- Never enable local API trust, discover desktop secrets, reuse authentication tokens, or manufacture a scoped capability.
+- Never call unexposed mutation routes or import project internals to bypass an unavailable tool.
+- Never use a failed, partial, running, or merely highest-numbered video analysis revision. Only the explicit successful analysis head is valid.
+- Never replace an unavailable `asset_source_id` implicitly. Source changes require an explicit typed `relink_source` operation and a new in-memory revision for desktop review.
+- Never scan paths, walk parent directories, or return arbitrary absolute paths from mixed-media results.
+- Never delete, move, rename, overwrite, retouch, save, render, export, or otherwise modify media or timeline state.
+- If an action is unavailable, hand it back to the MemoLens desktop UI instead of simulating success.

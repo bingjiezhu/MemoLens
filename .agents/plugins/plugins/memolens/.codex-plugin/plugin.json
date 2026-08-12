@@ -1,7 +1,7 @@
 {
   "name": "memolens",
-  "version": "0.2.0",
-  "description": "Private local photo search for Codex through read-only SQLite, with optional user-trusted MemoLens loopback features.",
+  "version": "0.3.0+codex.20260812161521",
+  "description": "Private local photo/video-segment search and unsaved hard-cut timeline drafting for Codex, with safe-default read-only SQLite access.",
   "author": {
     "name": "MemoLens contributors",
     "url": "https://github.com/bingjiezhu/MemoLens"
@@ -11,6 +11,8 @@
   "license": "MIT",
   "keywords": [
     "photos",
+    "video",
+    "timeline",
     "local-first",
     "search",
     "memories",
@@ -20,20 +22,25 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "MemoLens",
-    "shortDescription": "Search and narrate your private local photos.",
-    "longDescription": "MemoLens lets Codex search a local photo index through SQLite opened read-only, inspect traversal-checked matches with Codex vision, and create grounded albums or narratives. No third-party model API key is required. The unauthenticated loopback API is disabled by default and requires explicit user opt-in for memories and cleanup reports.",
+    "shortDescription": "Search private media and draft unsaved hard-cut timelines.",
+    "longDescription": "MemoLens lets Codex search local photo and video metadata through SQLite opened read-only, read immutable timeline revisions, and draft or structurally validate Timeline 1.0 JSON entirely in memory. No third-party model API key is required. The plugin exposes no save, render, export, delete, or arbitrary-path write tool; the unauthenticated loopback API opt-in grants read features only.",
     "developerName": "MemoLens contributors",
     "category": "Productivity",
     "capabilities": [
       "Local photo search",
       "Memory discovery",
       "Read-only cleanup review",
-      "Offline SQLite search"
+      "Offline SQLite search",
+      "Unified photo and video-segment search",
+      "Current video-segment search",
+      "Mixed-media metadata read",
+      "In-memory timeline drafting and validation",
+      "Persisted timeline read"
     ],
     "websiteURL": "https://github.com/bingjiezhu/MemoLens",
     "brandColor": "#6750A4",
     "composerIcon": "./assets/memolens.svg",
     "logo": "./assets/memolens.svg",
-    "defaultPrompt": "Search my local MemoLens library, inspect the strongest matching photos with Codex vision, and create a grounded album or narrative without changing my originals."
+    "defaultPrompt": "Search my local MemoLens media library, ground selections in current analysis provenance, and draft an unsaved Timeline 1.0 plan for me to review in the desktop app."
   }
 }

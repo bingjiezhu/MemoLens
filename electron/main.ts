@@ -1,12 +1,16 @@
-import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { createWriteStream, existsSync } from "node:fs";
+import { link, readdir, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { Readable, Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
 
 import {
-  DESKTOP_SESSION_TOKEN,
   ensureBackendReady,
+  getDesktopSessionToken,
+  isBackendIdentityVerified,
   stopManagedBackend,
 } from "./backendManager.js";
 import {
@@ -15,6 +19,11 @@ import {
   resolveLibraryDbPath,
   saveDesktopSettings,
 } from "./desktopSettings.js";
+import {
+  ArtifactIntegrityTracker,
+  normalizeSha256Etag,
+  parseArtifactIntegrityProof,
+} from "./artifactIntegrity.js";
 
 import type {
   DesktopSettings,
@@ -24,6 +33,10 @@ import type {
   DesktopIndexingResult,
   DesktopIndexingStartOptions,
 } from "../src/query/types.js";
+import type {
+  DesktopArtifactSaveRequest,
+  DesktopArtifactSaveResult,
+} from "../src/video/types.js";
 
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog, ipcMain } =
@@ -120,7 +133,11 @@ function configureDesktopSessionAuthentication(): void {
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: [`${DEFAULT_BACKEND_URL}/*`] },
     (details, callback) => {
-      details.requestHeaders["X-MemoLens-Desktop-Token"] = DESKTOP_SESSION_TOKEN;
+      if (isBackendIdentityVerified()) {
+        details.requestHeaders["X-MemoLens-Desktop-Token"] = getDesktopSessionToken();
+      } else {
+        delete details.requestHeaders["X-MemoLens-Desktop-Token"];
+      }
       callback({ requestHeaders: details.requestHeaders });
     },
   );
@@ -248,6 +265,160 @@ function resolveSelectedDbPath(folderPath: string): string {
   return resolveLibraryDbPath(folderPath);
 }
 
+function sanitizeVideoExportFilename(value: string): string {
+  const cleaned = value
+    .normalize("NFKC")
+    .replace(/[\\/\u0000-\u001f\u007f<>:"|?*]+/g, "-")
+    .replace(/^\.+/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 116);
+  const stem = cleaned.replace(/\.mp4$/i, "").replace(/\.[^.]+$/, "").trim();
+  return `${stem || "memolens-export"}.mp4`;
+}
+
+function isTrustedRenderArtifactUrl(rawUrl: string): boolean {
+  try {
+    const artifactUrl = new URL(rawUrl);
+    const backendUrl = new URL(DEFAULT_BACKEND_URL);
+    return artifactUrl.origin === backendUrl.origin
+      && artifactUrl.username === ""
+      && artifactUrl.password === ""
+      && artifactUrl.search === ""
+      && artifactUrl.hash === ""
+      && /^\/v1\/renders\/[A-Za-z0-9_-]+\/download$/.test(artifactUrl.pathname);
+  } catch {
+    return false;
+  }
+}
+
+async function saveCompletedRenderArtifact(
+  request: DesktopArtifactSaveRequest,
+): Promise<DesktopArtifactSaveResult> {
+  const maximumBytes = 100 * 1024 * 1024 * 1024;
+  const integrityProof = parseArtifactIntegrityProof(
+    request?.expectedSha256,
+    request?.expectedSizeBytes,
+    maximumBytes,
+  );
+  if (
+    !request
+    || !isTrustedRenderArtifactUrl(request.artifactUrl)
+    || integrityProof === null
+  ) {
+    return {
+      status: "failed",
+      filename: null,
+      message: "MemoLens rejected an incomplete or untrusted render artifact proof.",
+    };
+  }
+
+  const settings = await loadDesktopSettings(PROJECT_ROOT);
+  const backendStatus = await ensureBackendReady(PROJECT_ROOT, settings);
+  if (backendStatus.state !== "connected" && backendStatus.state !== "started") {
+    return {
+      status: "failed",
+      filename: null,
+      message: "MemoLens could not verify the local render service. Reconnect and try again.",
+    };
+  }
+
+  const suggestedFilename = sanitizeVideoExportFilename(request.suggestedFilename);
+  const selection = await dialog.showSaveDialog({
+    title: "Save MemoLens video",
+    defaultPath: suggestedFilename,
+    buttonLabel: "Save video",
+    filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+    properties: ["createDirectory", "showOverwriteConfirmation"],
+  });
+  if (selection.canceled || !selection.filePath) {
+    return { status: "cancelled", filename: null, message: "Video save was cancelled." };
+  }
+
+  const destinationPath = selection.filePath.toLowerCase().endsWith(".mp4")
+    ? selection.filePath
+    : `${selection.filePath}.mp4`;
+  if (existsSync(destinationPath)) {
+    return {
+      status: "exists",
+      filename: sanitizeVideoExportFilename(destinationPath.split(sep).pop() ?? suggestedFilename),
+      message: "That file already exists. Choose a new filename; MemoLens never overwrites by default.",
+    };
+  }
+
+  const temporaryPath = `${destinationPath}.memolens-${randomUUID()}.part`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30 * 60 * 1000);
+  try {
+    const response = await fetch(request.artifactUrl, {
+      headers: { "X-MemoLens-Desktop-Token": getDesktopSessionToken() },
+      redirect: "error",
+      signal: controller.signal,
+    });
+    if (response.url !== request.artifactUrl || !response.ok || response.body === null) {
+      throw new Error(`Render download failed with status ${response.status}.`);
+    }
+    const declaredSize = Number(response.headers.get("content-length"));
+    if (!Number.isSafeInteger(declaredSize) || declaredSize !== integrityProof.sizeBytes) {
+      throw new Error("Render artifact size proof did not match the download response.");
+    }
+    if (normalizeSha256Etag(response.headers.get("etag")) !== integrityProof.sha256) {
+      throw new Error("Render artifact ETag did not match its integrity proof.");
+    }
+
+    const integrityTracker = new ArtifactIntegrityTracker(integrityProof, maximumBytes);
+    const byteLimit = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        try {
+          integrityTracker.update(chunk);
+        } catch (error) {
+          controller.abort();
+          callback(error instanceof Error ? error : new Error("Artifact verification failed."));
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
+
+    await pipeline(
+      Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
+      byteLimit,
+      createWriteStream(temporaryPath, { flags: "wx" }),
+    );
+    if (!integrityTracker.verify()) {
+      throw new Error("Render artifact bytes did not match their integrity proof.");
+    }
+    // A hard link publishes the fully downloaded file atomically and fails if
+    // another process created the destination after the save dialog closed.
+    await link(temporaryPath, destinationPath);
+    await unlink(temporaryPath);
+    return {
+      status: "saved",
+      filename: destinationPath.split(sep).pop() ?? suggestedFilename,
+      message: "Video saved without changing any source media.",
+    };
+  } catch (error) {
+    await unlink(temporaryPath).catch(() => {});
+    const rawMessage = error instanceof Error ? error.message : "";
+    const safeMessage = rawMessage.includes("100 GB desktop safety limit")
+      ? "Render artifact exceeds the 100 GB desktop safety limit."
+      : rawMessage.includes("integrity proof") || rawMessage.includes("size proof") || rawMessage.includes("ETag")
+        ? "Video integrity verification failed; no destination file was published."
+      : controller.signal.aborted
+        ? "Video save timed out before the artifact finished downloading."
+        : /^Render download failed with status \d+\.$/.test(rawMessage)
+          ? rawMessage
+          : "Video could not be saved. Choose a new filename and try again.";
+    return {
+      status: "failed",
+      filename: null,
+      message: safeMessage,
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function emitProgress(sender: Electron.WebContents, progress: DesktopIndexingProgress): void {
   if (sender.isDestroyed()) {
     return;
@@ -328,7 +499,7 @@ async function analyzeImageBatch({
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-MemoLens-Desktop-Token": DESKTOP_SESSION_TOKEN,
+      "X-MemoLens-Desktop-Token": getDesktopSessionToken(),
     },
     body: JSON.stringify(payload),
   });
@@ -424,6 +595,17 @@ ipcMain.handle("memolens:get-settings", async (event): Promise<DesktopSettings> 
   assertTrustedIpcSender(event);
   return loadDesktopSettings(PROJECT_ROOT);
 });
+
+ipcMain.handle(
+  "memolens:save-video-artifact",
+  async (
+    event,
+    request: DesktopArtifactSaveRequest,
+  ): Promise<DesktopArtifactSaveResult> => {
+    assertTrustedIpcSender(event);
+    return saveCompletedRenderArtifact(request);
+  },
+);
 
 ipcMain.handle(
   "memolens:save-settings",

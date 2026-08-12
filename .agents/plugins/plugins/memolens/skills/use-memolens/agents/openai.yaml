@@ -1,7 +1,5 @@
 interface:
   display_name: "Use MemoLens"
-  short_description: "Search and narrate your private local photos"
+  short_description: "Search private media and draft unsaved timelines"
   brand_color: "#6750A4"
-  default_prompt: "Search my local MemoLens library, inspect the strongest matching images with Codex vision, and create a grounded album or story without changing originals."
-policy:
-  allow_implicit_invocation: true
+  default_prompt: "Use $use-memolens to search my local media with current provenance and draft an unsaved Timeline 1.0 plan for desktop review."
