@@ -7,10 +7,11 @@ import json
 import sys
 from typing import Any
 
+from memolens_contracts import PLUGIN_VERSION
 from memolens_core import MemoLensError, MemoLensGateway, json_ready
 
 
-SERVER_INFO = {"name": "memolens-local", "version": "0.3.0"}
+SERVER_INFO = {"name": "memolens-local", "version": PLUGIN_VERSION}
 PROTOCOL_VERSION = "2025-06-18"
 
 

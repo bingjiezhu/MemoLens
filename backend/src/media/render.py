@@ -9,69 +9,46 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PIL import Image, ImageOps
-
 from core.media_db import MediaRepository, sha256_path
 
-from .timeline import TimelineService, clips_in_render_order
+from . import render_plan as _render_plan
+from .render_plan import (
+    RenderPlan,
+    build_assemble_command,
+    build_clip_command,
+    build_render_plan,
+    concat_manifest,
+    ensure_supported_features,
+    validate_render_duration,
+)
+from .render_publish import (
+    OutputTarget,
+    publish_render,
+    reconcile_interrupted_storage,
+    validate_output_target,
+)
+from .render_sources import SourceVerifier, freeze_still_image
+from .timeline import TimelineService
 from .video import (
     MediaCancelled,
     MediaCapabilityError,
     binary_capability,
     ffprobe,
     resolve_binary,
-    resolve_inside_root,
     terminate_process,
 )
 
-
-def _seconds(milliseconds: int) -> str:
-    return f"{milliseconds / 1000:.3f}"
-
-
-def _even(value: int) -> int:
-    return max(2, value if value % 2 == 0 else value - 1)
-
-
-def _dimensions(fmt: dict[str, object], profile: str) -> tuple[int, int]:
-    width, height = int(fmt["width"]), int(fmt["height"])
-    if profile == "preview-low":
-        target_width, target_height = (1280, 720) if width > height else (720, 1280) if height > width else (720, 720)
-    else:
-        target_width, target_height = 1920, 1920
-    scale = min(1.0, target_width / width, target_height / height)
-    return _even(round(width * scale)), _even(round(height * scale))
-
-
-def _rotation_filters(rotation: object) -> list[str]:
-    return {
-        90: ["transpose=cclock"],
-        180: ["hflip", "vflip"],
-        270: ["transpose=clock"],
-    }.get(rotation, [])
-
-
-def _redact_command(argv: list[str], replacements: dict[str, str]) -> list[str]:
-    redacted: list[str] = []
-    for value in argv:
-        normalized = value
-        for path, label in replacements.items():
-            normalized = normalized.replace(path, label)
-        redacted.append(normalized)
-    if redacted:
-        redacted[0] = Path(redacted[0]).name
-    return redacted
-
-
-def _concat_line(path: Path) -> str:
-    escaped = str(path).replace("'", "'\\''")
-    return f"file '{escaped}'\n"
-
+MIN_RENDER_FREE_BYTES = _render_plan.MIN_RENDER_FREE_BYTES
+ESTIMATED_RENDER_BYTES_PER_SECOND_720P = _render_plan.ESTIMATED_RENDER_BYTES_PER_SECOND_720P
+_seconds = _render_plan.seconds
+_even = _render_plan.even
+_dimensions = _render_plan.dimensions
+_rotation_filters = _render_plan.rotation_filters
+_redact_command = _render_plan.redact_command
+_concat_line = _render_plan.concat_line
 
 _probe_lock = threading.Lock()
 _probe_result: dict[str, object] | None = None
-MIN_RENDER_FREE_BYTES = 256 * 1024 * 1024
-ESTIMATED_RENDER_BYTES_PER_SECOND_720P = 3 * 1024 * 1024
 
 
 def ffmpeg_encode_capability() -> dict[str, object]:
@@ -162,36 +139,7 @@ class RenderJobRunner:
         self._reconcile_interrupted_storage()
 
     def _reconcile_interrupted_storage(self) -> None:
-        """Remove only DB-owned leftovers for jobs that cannot be successful."""
-        jobs = self.repository.render_storage_records()
-        by_id = {str(job["id"]): job for job in jobs}
-        for job in jobs:
-            if job["status"] == "succeeded":
-                continue
-            filename = str(job["output_relative_path"])
-            if not filename or filename in {".", ".."} or Path(filename).name != filename:
-                continue
-            try:
-                _, _, descriptor = self.repository.open_output_root_fd(str(job["output_root_id"]))
-            except ValueError:
-                continue
-            try:
-                metadata = os.stat(filename, dir_fd=descriptor, follow_symlinks=False)
-                if metadata.st_mode & 0o170000 == 0o100000:
-                    os.unlink(filename, dir_fd=descriptor)
-            except FileNotFoundError:
-                pass
-            finally:
-                os.close(descriptor)
-        jobs_root = self.cache_root / "render-jobs"
-        if not jobs_root.is_dir() or jobs_root.is_symlink():
-            return
-        for entry in jobs_root.iterdir():
-            if entry.is_symlink() or not entry.is_dir():
-                continue
-            job_id = next((identifier for identifier in by_id if entry.name.startswith(f"{identifier}-")), None)
-            if job_id is not None:
-                shutil.rmtree(entry, ignore_errors=True)
+        reconcile_interrupted_storage(self.repository, self.cache_root)
 
     def shutdown(self) -> None:
         with self._lock:
@@ -278,10 +226,11 @@ class RenderJobRunner:
             raise MediaCapabilityError("ffmpeg_failed", "FFmpeg could not render the validated timeline.")
         return b""
 
-    def _run(self, job_id: str) -> None:
-        job = self.repository.get_render_job(job_id)
-        if not job or job.get("status") not in {"queued", "interrupted"}:
-            return
+    def _load_validated_timeline(
+        self,
+        job_id: str,
+        job: dict[str, object],
+    ) -> dict[str, object] | None:
         timeline_row = self.repository.get_timeline(str(job["timeline_id"]), int(job["timeline_revision"]))
         if not timeline_row or timeline_row["content_sha256"] != job["timeline_content_sha256"]:
             self.repository.update_render_job(
@@ -291,7 +240,7 @@ class RenderJobRunner:
                 error={"code": "timeline_hash_mismatch", "message": "Timeline revision changed."},
                 finished=True,
             )
-            return
+            return None
         validation = TimelineService(self.repository).validate(timeline_row["timeline"])
         if not validation["valid"]:
             self.repository.update_render_job(
@@ -305,292 +254,131 @@ class RenderJobRunner:
                 },
                 finished=True,
             )
-            return
-        workspace: Path | None = None
-        temporary: Path | None = None
-        try:
-            capability = ffmpeg_encode_capability()
-            if not capability.get("available"):
-                raise MediaCapabilityError(str(capability.get("code")), str(capability.get("message")))
-            ffmpeg_binary = resolve_binary("ffmpeg")
-            assert ffmpeg_binary
-            try:
-                root, output_root = self.repository.validate_output_root(str(job["output_root_id"]))
-            except ValueError as exc:
-                raise MediaCapabilityError("output_root_changed", "The app preview root identity changed.") from exc
-            if root["kind"] != "app_preview":
-                raise MediaCapabilityError("output_root_unavailable", "Preview requires the app output root.")
-            filename = str(job["output_relative_path"])
-            if not filename or filename in {".", ".."} or any(value in filename for value in ("/", "\\", "\x00")):
-                raise MediaCapabilityError("invalid_output_name", "Output must be one safe filename.")
-            final_output = output_root / filename
-            if final_output.exists() or final_output.is_symlink():
-                raise MediaCapabilityError("output_exists", "The app artifact filename already exists.")
-            jobs_root = self.cache_root / "render-jobs"
-            jobs_root.mkdir(parents=True, exist_ok=True)
-            fmt = timeline_row["timeline"]["format"]
-            width, height = _dimensions(fmt, str(job["profile"]))
-            fps = int(fmt["fps"])
-            background_color = "0x" + str(fmt["background_color"]).removeprefix("#")
-            duration_seconds = int(fmt["duration_ms"]) / 1000
-            pixel_ratio = max(0.25, width * height / (1280 * 720))
-            estimated_bytes = int(
-                duration_seconds * ESTIMATED_RENDER_BYTES_PER_SECOND_720P * pixel_ratio * 2
+            return None
+        return timeline_row["timeline"]
+
+    def _prepare_render(
+        self,
+        job_id: str,
+        job: dict[str, object],
+        timeline: dict[str, object],
+    ) -> tuple[str, OutputTarget, RenderPlan, Path, Path]:
+        capability = ffmpeg_encode_capability()
+        if not capability.get("available"):
+            raise MediaCapabilityError(str(capability.get("code")), str(capability.get("message")))
+        ffmpeg_binary = resolve_binary("ffmpeg")
+        assert ffmpeg_binary
+        target = validate_output_target(self.repository, job)
+        jobs_root = self.cache_root / "render-jobs"
+        jobs_root.mkdir(parents=True, exist_ok=True)
+        plan = build_render_plan(timeline, str(job["profile"]))
+        if shutil.disk_usage(jobs_root).free < plan.required_free_bytes:
+            raise MediaCapabilityError(
+                "insufficient_storage",
+                "The app-managed cache does not have enough free space for this render.",
             )
-            required_free = MIN_RENDER_FREE_BYTES + estimated_bytes
-            if shutil.disk_usage(jobs_root).free < required_free:
-                raise MediaCapabilityError(
-                    "insufficient_storage",
-                    "The app-managed cache does not have enough free space for this render.",
-                )
-            workspace = Path(tempfile.mkdtemp(prefix=f"{job_id}-", dir=jobs_root))
-            clips = list(clips_in_render_order(timeline_row["timeline"]))
-            if timeline_row["timeline"].get("transitions"):
-                raise MediaCapabilityError(
-                    "unsupported_render_transition",
-                    "This renderer does not yet support transitions; remove them before rendering.",
-                )
-            normalized: list[Path] = []
-            replacements = {str(workspace): "$JOB_DIR"}
-            verified_sources: dict[tuple[str, str], tuple[Path, tuple[int, int, int, int]]] = {}
-            self.repository.update_render_job(job_id, status="running", stage="verify_sources", progress=0.02)
-            for index, clip in enumerate(clips):
-                source = self.repository.get_asset_source(str(clip["asset_source_id"]))
-                if not source or source.get("availability") != "available":
-                    raise MediaCapabilityError("source_unavailable", "A timeline source is unavailable.")
-                source_path = resolve_inside_root(Path(str(source["root_path"])), str(source["relative_path"]))
-                replacements[str(source_path)] = f"$SOURCE_{source['asset_id']}"
-                metadata = source_path.stat(follow_symlinks=False)
-                identity = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
-                verification_key = (str(source["id"]), str(source["sha256"]))
-                prior_verification = verified_sources.get(verification_key)
-                if prior_verification is not None and prior_verification != (source_path, identity):
-                    self.repository.mark_source_availability(str(source["id"]), "changed")
-                    raise MediaCapabilityError("source_changed", "A timeline source changed during rendering.")
-                if prior_verification is None and sha256_path(source_path) != source["sha256"]:
-                    self.repository.mark_source_availability(str(source["id"]), "changed")
-                    raise MediaCapabilityError("source_changed", "A timeline source changed after import.")
-                verified_sources[verification_key] = (source_path, identity)
-                duration_ms = int(clip["timeline_duration_ms"])
-                output = workspace / f"clip-{index:04d}.mp4"
-                source_codec = source.get("codec", {})
-                selected_video_index = source_codec.get("video_stream_index")
-                selected_audio_index = source_codec.get("audio_stream_index")
-                has_audio = selected_audio_index is not None and bool(clip.get("audio_enabled", True))
-                argv = [
-                    ffmpeg_binary,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-nostdin",
-                    "-protocol_whitelist",
-                    "file,pipe,fd",
-                    "-n",
-                ]
-                if clip["kind"] == "video":
-                    argv += [
-                        "-noautorotate",
-                        "-ss",
-                        _seconds(int(clip["source_in_ms"])),
-                        "-t",
-                        _seconds(duration_ms),
-                        "-f",
-                        "mov",
-                        "-enable_drefs",
-                        "0",
-                        "-use_absolute_path",
-                        "0",
-                        "-i",
-                        str(source_path),
-                    ]
-                else:
-                    # Freeze a verified still image to a normalized first-frame PNG.
-                    # This gives GIF/HEIC/TIFF and ordinary photos one deterministic
-                    # render contract instead of depending on demuxer-specific loop flags.
-                    frozen = workspace / f"source-{index:04d}.png"
-                    with Image.open(source_path) as image:
-                        try:
-                            image.seek(0)
-                        except EOFError:
-                            pass
-                        ImageOps.exif_transpose(image).convert("RGB").save(frozen, "PNG")
-                    argv += [
-                        "-loop",
-                        "1",
-                        "-framerate",
-                        str(fps),
-                        "-t",
-                        _seconds(duration_ms),
-                        "-i",
-                        str(frozen),
-                    ]
-                if not has_audio:
-                    argv += ["-f", "lavfi", "-t", _seconds(duration_ms), "-i", "anullsrc=r=48000:cl=stereo"]
-                filters = _rotation_filters(source.get("rotation_degrees"))
-                crop = clip.get("crop")
-                if not isinstance(crop, dict):
-                    raise MediaCapabilityError("invalid_crop", "Clip crop is invalid.")
-                if crop != {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}:
-                    filters.append(
-                        "crop="
-                        f"iw*{float(crop['width']):.8f}:ih*{float(crop['height']):.8f}:"
-                        f"iw*{float(crop['x']):.8f}:ih*{float(crop['y']):.8f}"
-                    )
-                fit = clip.get("fit")
-                if fit == "cover":
-                    filters += [
-                        f"scale={width}:{height}:force_original_aspect_ratio=increase",
-                        f"crop={width}:{height}",
-                    ]
-                elif fit == "contain":
-                    filters += [
-                        f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-                        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color={background_color}",
-                    ]
-                elif fit == "stretch":
-                    filters.append(f"scale={width}:{height}")
-                else:
-                    raise MediaCapabilityError("unsupported_fit", "Clip fit is unsupported.")
-                filters += [f"fps={fps}", "setsar=1", "format=yuv420p"]
-                argv += [
-                    "-map",
-                    f"0:{int(selected_video_index)}" if clip["kind"] == "video" else "0:v:0",
-                    "-map",
-                    f"0:{int(selected_audio_index)}" if has_audio else "1:a:0",
-                    "-vf",
-                    ",".join(filters),
-                ]
-                if has_audio:
-                    argv += [
-                        "-af",
-                        f"volume={float(clip.get('volume_db', 0.0))}dB,"
-                        f"aresample=48000,apad,atrim=0:{_seconds(duration_ms)}",
-                    ]
-                argv += [
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "fast" if job["profile"] == "preview-low" else "medium",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    "128k" if job["profile"] == "preview-low" else "192k",
-                    "-ar",
-                    "48000",
-                    "-ac",
-                    "2",
-                    "-movflags",
-                    "+faststart",
-                    "-t",
-                    _seconds(duration_ms),
-                    str(output),
-                ]
-                self.repository.update_render_job(
-                    job_id, stage="normalize_clips", progress=0.05 + 0.7 * index / max(len(clips), 1)
-                )
-                self._command(
-                    job_id,
-                    argv,
-                    replacements=replacements,
-                    timeout_seconds=max(60, duration_ms / 1000 * 8),
-                    storage_path=workspace,
-                )
-                normalized.append(output)
-            concat_file = workspace / "concat.txt"
-            concat_file.write_text(
-                "".join(_concat_line(path) for path in normalized),
-                encoding="utf-8",
+        workspace = Path(tempfile.mkdtemp(prefix=f"{job_id}-", dir=jobs_root))
+        return ffmpeg_binary, target, plan, workspace, workspace / "assembled.part.mp4"
+
+    def _execute_render_plan(
+        self,
+        job_id: str,
+        *,
+        ffmpeg_binary: str,
+        target: OutputTarget,
+        plan: RenderPlan,
+        workspace: Path,
+        temporary: Path,
+    ) -> None:
+        ensure_supported_features(plan)
+        replacements = {str(workspace): "$JOB_DIR"}
+        verifier = SourceVerifier(self.repository, hash_path=sha256_path)
+        normalized: list[Path] = []
+        self.repository.update_render_job(job_id, status="running", stage="verify_sources", progress=0.02)
+        for index, clip in enumerate(plan.clips):
+            verified = verifier.verify(clip)
+            source = verified.record
+            source_path = verified.path
+            replacements[str(source_path)] = f"$SOURCE_{source['asset_id']}"
+            duration_ms = int(clip["timeline_duration_ms"])
+            output = workspace / f"clip-{index:04d}.mp4"
+            input_path = source_path
+            if clip["kind"] != "video":
+                input_path = workspace / f"source-{index:04d}.png"
+                freeze_still_image(source_path, input_path)
+            argv = build_clip_command(
+                plan,
+                clip,
+                source=source,
+                source_path=source_path,
+                input_path=input_path,
+                output_path=output,
+                ffmpeg_binary=ffmpeg_binary,
             )
-            replacements[str(concat_file)] = "$JOB_DIR/concat.txt"
-            temporary = workspace / "assembled.part.mp4"
-            replacements[str(temporary)] = "$OUTPUT_PART"
-            argv = [
-                ffmpeg_binary,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-n",
-                "-protocol_whitelist",
-                "file,pipe,fd",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(concat_file),
-                "-c",
-                "copy",
-                "-movflags",
-                "+faststart",
-                str(temporary),
-            ]
-            self.repository.update_render_job(job_id, stage="assemble", progress=0.8)
+            self.repository.update_render_job(
+                job_id,
+                stage="normalize_clips",
+                progress=0.05 + 0.7 * index / max(len(plan.clips), 1),
+            )
             self._command(
                 job_id,
                 argv,
                 replacements=replacements,
-                timeout_seconds=max(60, int(fmt["duration_ms"]) / 1000 * 4),
+                timeout_seconds=max(60, duration_ms / 1000 * 8),
                 storage_path=workspace,
             )
-            probe = ffprobe(temporary)
-            expected_duration_ms = int(fmt["duration_ms"])
-            frame_tolerance_ms = max(50, int(2000 / max(fps, 1)))
-            if abs(int(probe["duration_ms"]) - expected_duration_ms) > frame_tolerance_ms:
-                raise MediaCapabilityError(
-                    "render_duration_mismatch",
-                    "Rendered duration differs from the validated timeline.",
-                )
-            if self._cancelled(job_id):
-                raise MediaCancelled("Render was cancelled before publication.")
-            # Revalidate immediately before publication, then atomically link without overwrite.
-            _, verified_root, directory_fd = self.repository.open_output_root_fd(str(job["output_root_id"]))
-            output_sha256 = sha256_path(temporary)
-            output_size = temporary.stat().st_size
-            linked = False
-            committed = False
-            try:
-                if self._cancelled(job_id):
-                    raise MediaCancelled("Render was cancelled before publication.")
-                os.link(temporary, filename, dst_dir_fd=directory_fd, follow_symlinks=False)
-                linked = True
-            except FileExistsError as exc:
-                raise MediaCapabilityError("output_exists", "The app artifact filename already exists.") from exc
-            try:
-                version = str(binary_capability("ffmpeg").get("version") or "")[:240]
-                if not self.repository.complete_render_job_success(
-                    job_id,
-                    ffmpeg_version=version,
-                    output_sha256=output_sha256,
-                    size_bytes=output_size,
-                    duration_ms=int(probe["duration_ms"]),
-                ):
-                    if linked:
-                        os.unlink(filename, dir_fd=directory_fd)
-                        linked = False
-                    raise MediaCancelled("Render was cancelled during publication.")
-                committed = True
-            except BaseException:
-                if linked and not committed:
-                    try:
-                        os.unlink(filename, dir_fd=directory_fd)
-                    except FileNotFoundError:
-                        pass
-                raise
-            finally:
-                try:
-                    os.close(directory_fd)
-                except OSError:
-                    if not committed:
-                        raise
-            # Publication is committed. Cleanup failures must never downgrade a
-            # verified succeeded job; startup reconciliation removes the workspace.
-            try:
-                temporary.unlink()
-            except OSError:
-                pass
+            normalized.append(output)
+
+        concat_file = workspace / "concat.txt"
+        concat_file.write_text(concat_manifest(normalized), encoding="utf-8")
+        replacements[str(concat_file)] = "$JOB_DIR/concat.txt"
+        replacements[str(temporary)] = "$OUTPUT_PART"
+        argv = build_assemble_command(
+            concat_file=concat_file,
+            output_path=temporary,
+            ffmpeg_binary=ffmpeg_binary,
+        )
+        self.repository.update_render_job(job_id, stage="assemble", progress=0.8)
+        self._command(
+            job_id,
+            argv,
+            replacements=replacements,
+            timeout_seconds=max(60, plan.duration_ms / 1000 * 4),
+            storage_path=workspace,
+        )
+        probe = ffprobe(temporary)
+        validate_render_duration(plan, probe)
+        publish_render(
+            self.repository,
+            job_id=job_id,
+            target=target,
+            temporary=temporary,
+            duration_ms=int(probe["duration_ms"]),
+            ffmpeg_version=lambda: str(binary_capability("ffmpeg").get("version") or "")[:240],
+            cancelled=lambda: self._cancelled(job_id),
+            hash_path=sha256_path,
+        )
+
+    def _run(self, job_id: str) -> None:
+        job = self.repository.get_render_job(job_id)
+        if not job or job.get("status") not in {"queued", "interrupted"}:
+            return
+        timeline = self._load_validated_timeline(job_id, job)
+        if timeline is None:
+            return
+
+        workspace: Path | None = None
+        temporary: Path | None = None
+        try:
+            ffmpeg_binary, target, plan, workspace, temporary = self._prepare_render(job_id, job, timeline)
+            self._execute_render_plan(
+                job_id,
+                ffmpeg_binary=ffmpeg_binary,
+                target=target,
+                plan=plan,
+                workspace=workspace,
+                temporary=temporary,
+            )
             temporary = None
         except MediaCancelled as exc:
             self.repository.update_render_job(

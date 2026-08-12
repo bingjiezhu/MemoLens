@@ -88,61 +88,68 @@ def _parse_rotation(stream: dict[str, object]) -> int:
     return normalized if normalized in {0, 90, 180, 270} else 0
 
 
-def parse_ffprobe_payload(payload: object) -> dict[str, object]:
-    if not isinstance(payload, dict):
-        raise MediaCapabilityError("invalid_media", "ffprobe returned an invalid JSON object.")
-    streams = payload.get("streams")
-    if not isinstance(streams, list):
-        streams = []
-    format_info = payload.get("format") if isinstance(payload.get("format"), dict) else {}
-    video_candidates = [
-        item for item in streams if isinstance(item, dict) and item.get("codec_type") == "video"
+def _stream_sort_key(stream: dict[str, object]) -> tuple[int, int]:
+    disposition = stream.get("disposition")
+    is_default = isinstance(disposition, dict) and disposition.get("default") == 1
+    return (0 if is_default else 1, int(stream.get("index") or 0))
+
+
+def _streams_of_type(streams: list[object], codec_type: str) -> list[dict[str, object]]:
+    return [
+        stream
+        for stream in streams
+        if isinstance(stream, dict) and stream.get("codec_type") == codec_type
     ]
-    video_stream = min(
-        video_candidates,
-        key=lambda item: (
-            0 if isinstance(item.get("disposition"), dict) and item["disposition"].get("default") == 1 else 1,
-            int(item.get("index") or 0),
-        ),
-        default=None,
-    )
-    if not isinstance(video_stream, dict):
-        raise MediaCapabilityError("missing_video_stream", "The file has no supported video stream.")
+
+
+def _selected_stream(streams: list[dict[str, object]]) -> dict[str, object] | None:
+    return min(streams, key=_stream_sort_key, default=None)
+
+
+def _duration_ms(format_info: dict[str, object], video_stream: dict[str, object]) -> int:
     duration_seconds = _finite_float(format_info.get("duration"))
     if duration_seconds is None:
         duration_seconds = _finite_float(video_stream.get("duration"))
     if duration_seconds is None or duration_seconds <= 0:
         raise MediaCapabilityError("invalid_duration", "The video duration is missing or invalid.")
-    duration_ms = int(round(duration_seconds * 1000))
-    if duration_ms > MAX_VIDEO_DURATION_MS:
+    duration = int(round(duration_seconds * 1000))
+    if duration > MAX_VIDEO_DURATION_MS:
         raise MediaCapabilityError("media_too_long", "The video exceeds the eight-hour safety limit.")
+    return duration
+
+
+def _dimensions(video_stream: dict[str, object]) -> tuple[int, int]:
     width = video_stream.get("width")
     height = video_stream.get("height")
     if not isinstance(width, int) or width <= 0 or not isinstance(height, int) or height <= 0:
         raise MediaCapabilityError("invalid_dimensions", "The video dimensions are invalid.")
     if width > MAX_SOURCE_DIMENSION or height > MAX_SOURCE_DIMENSION or width * height > MAX_SOURCE_PIXELS:
         raise MediaCapabilityError("dimensions_too_large", "Video dimensions exceed local decode limits.")
+    return width, height
+
+
+def _container_name(format_info: dict[str, object]) -> object:
     format_name = format_info.get("format_name")
-    demuxers = {value.strip().casefold() for value in str(format_name or "").split(",") if value.strip()}
+    demuxers = {
+        value.strip().casefold()
+        for value in str(format_name or "").split(",")
+        if value.strip()
+    }
     if not demuxers or not demuxers.issubset(ALLOWED_VIDEO_DEMUXERS):
         raise MediaCapabilityError(
             "unsupported_container",
             "Only native QuickTime/MOV/MP4-family containers are accepted.",
         )
-    audio_streams = [item for item in streams if isinstance(item, dict) and item.get("codec_type") == "audio"]
-    selected_audio = min(
-        audio_streams,
-        key=lambda item: (
-            0 if isinstance(item.get("disposition"), dict) and item["disposition"].get("default") == 1 else 1,
-            int(item.get("index") or 0),
-        ),
-        default=None,
-    )
-    tags = format_info.get("tags") if isinstance(format_info.get("tags"), dict) else {}
-    captured_at = None
-    if isinstance(tags, dict):
-        captured_at = tags.get("creation_time")
-    codec = {
+    return format_name
+
+
+def _codec_manifest(
+    format_name: object,
+    video_stream: dict[str, object],
+    audio_streams: list[dict[str, object]],
+    selected_audio: dict[str, object] | None,
+) -> dict[str, object]:
+    return {
         "format_name": format_name,
         "video_codec": video_stream.get("codec_name"),
         "pixel_format": video_stream.get("pix_fmt"),
@@ -153,21 +160,40 @@ def parse_ffprobe_payload(payload: object) -> dict[str, object]:
         "stream_selection": "default_disposition_then_lowest_index",
         "audio_streams": [
             {
-                "index": item.get("index"),
-                "codec": item.get("codec_name"),
-                "sample_rate": item.get("sample_rate"),
-                "channels": item.get("channels"),
+                "index": stream.get("index"),
+                "codec": stream.get("codec_name"),
+                "sample_rate": stream.get("sample_rate"),
+                "channels": stream.get("channels"),
             }
-            for item in audio_streams
+            for stream in audio_streams
         ],
     }
+
+
+def parse_ffprobe_payload(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        raise MediaCapabilityError("invalid_media", "ffprobe returned an invalid JSON object.")
+    streams = payload.get("streams")
+    if not isinstance(streams, list):
+        streams = []
+    format_info = payload.get("format") if isinstance(payload.get("format"), dict) else {}
+    video_stream = _selected_stream(_streams_of_type(streams, "video"))
+    if video_stream is None:
+        raise MediaCapabilityError("missing_video_stream", "The file has no supported video stream.")
+    duration_ms = _duration_ms(format_info, video_stream)
+    width, height = _dimensions(video_stream)
+    format_name = _container_name(format_info)
+    audio_streams = _streams_of_type(streams, "audio")
+    selected_audio = _selected_stream(audio_streams)
+    tags = format_info.get("tags") if isinstance(format_info.get("tags"), dict) else {}
+    captured_at = tags.get("creation_time") if isinstance(tags, dict) else None
     return {
         "duration_ms": duration_ms,
         "width": width,
         "height": height,
         "rotation_degrees": _parse_rotation(video_stream),
         "captured_at": captured_at if isinstance(captured_at, str) else None,
-        "codec": codec,
+        "codec": _codec_manifest(format_name, video_stream, audio_streams, selected_audio),
     }
 
 

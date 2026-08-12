@@ -302,76 +302,91 @@ class GeneratedCopy:
         }
 
 
+def _nonempty_string(value: object, field: str, *, optional: bool = False) -> str | None:
+    if value is None and optional:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        suffix = " when set" if optional else ""
+        raise ValueError(f"`{field}` must be a non-empty string{suffix}.")
+    return value.strip()
+
+
+def _file_paths(value: object) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError("`files` must be a list of file paths.")
+    normalized: list[str] = []
+    for file_path in value:
+        if not isinstance(file_path, str) or not file_path.strip():
+            raise ValueError("Every `files` entry must be a non-empty string.")
+        normalized.append(file_path)
+    return normalized
+
+
+def _uploaded_image(value: object) -> UploadedImageInput | None:
+    if not isinstance(value, dict):
+        return None
+    filename = _nonempty_string(value.get("filename"), "input.image.filename")
+    encoded = _nonempty_string(value.get("b64"), "input.image.b64")
+    relative_path = _nonempty_string(
+        value.get("relative_path"),
+        "input.image.relative_path",
+        optional=True,
+    )
+    mime_type = _nonempty_string(
+        value.get("mime_type"),
+        "input.image.mime_type",
+        optional=True,
+    )
+    return UploadedImageInput(
+        filename=filename or "",
+        b64=encoded or "",
+        relative_path=relative_path,
+        mime_type=mime_type,
+    )
+
+
+def _positive_limit(value: object) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, int):
+        raise ValueError("`limit` must be an integer.")
+    if value <= 0:
+        raise ValueError("`limit` must be greater than 0.")
+    return value
+
+
+def _boolean(value: object, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"`{field}` must be a boolean.")
+    return value
+
+
 def parse_indexing_request(
     payload: dict[str, object],
     default_image_dir: str,
     default_model: str,
 ) -> IndexingRequest:
     input_payload = payload.get("input") if isinstance(payload.get("input"), dict) else {}
-    image_payload = input_payload.get("image") if isinstance(input_payload.get("image"), dict) else None
+    image_payload = input_payload.get("image")
     image_dir = input_payload.get("image_dir") or payload.get("image_dir") or default_image_dir
     files = input_payload.get("files") or payload.get("files") or []
     recursive = input_payload.get("recursive")
     db_path = payload.get("db_path")
-
     if recursive is None:
         recursive = payload.get("recursive", True)
 
     if not isinstance(image_dir, str) or not image_dir.strip():
         raise ValueError("`image_dir` must be a non-empty string.")
-    if not isinstance(files, list):
-        raise ValueError("`files` must be a list of file paths.")
-    if db_path is not None and (not isinstance(db_path, str) or not db_path.strip()):
-        raise ValueError("`db_path` must be a non-empty string when set.")
-
-    normalized_files = []
-    for file_path in files:
-        if not isinstance(file_path, str) or not file_path.strip():
-            raise ValueError("Every `files` entry must be a non-empty string.")
-        normalized_files.append(file_path)
-
-    uploaded_image = None
-    if image_payload is not None:
-        filename = image_payload.get("filename")
-        b64 = image_payload.get("b64")
-        relative_path = image_payload.get("relative_path")
-        mime_type = image_payload.get("mime_type")
-
-        if not isinstance(filename, str) or not filename.strip():
-            raise ValueError("`input.image.filename` must be a non-empty string.")
-        if not isinstance(b64, str) or not b64.strip():
-            raise ValueError("`input.image.b64` must be a non-empty string.")
-        if relative_path is not None and (
-            not isinstance(relative_path, str) or not relative_path.strip()
-        ):
-            raise ValueError("`input.image.relative_path` must be a non-empty string when set.")
-        if mime_type is not None and (not isinstance(mime_type, str) or not mime_type.strip()):
-            raise ValueError("`input.image.mime_type` must be a non-empty string when set.")
-
-        uploaded_image = UploadedImageInput(
-            filename=filename.strip(),
-            b64=b64.strip(),
-            relative_path=relative_path.strip() if isinstance(relative_path, str) else None,
-            mime_type=mime_type.strip() if isinstance(mime_type, str) else None,
-        )
-
-    limit = payload.get("limit")
-    if limit is not None:
-        if not isinstance(limit, int):
-            raise ValueError("`limit` must be an integer.")
-        if limit <= 0:
-            raise ValueError("`limit` must be greater than 0.")
-
-    reindex = payload.get("reindex", False)
-    if not isinstance(reindex, bool):
-        raise ValueError("`reindex` must be a boolean.")
-    if not isinstance(recursive, bool):
-        raise ValueError("`recursive` must be a boolean.")
+    normalized_files = _file_paths(files)
+    normalized_db_path = _nonempty_string(db_path, "db_path", optional=True)
+    uploaded_image = _uploaded_image(image_payload)
+    limit = _positive_limit(payload.get("limit"))
+    reindex = _boolean(payload.get("reindex", False), "reindex")
+    recursive = _boolean(recursive, "recursive")
     persist_to_server = payload.get("persist_to_server")
     if persist_to_server is None:
-        persist_to_server = image_payload is None
-    if not isinstance(persist_to_server, bool):
-        raise ValueError("`persist_to_server` must be a boolean.")
+        persist_to_server = uploaded_image is None
+    persist_to_server = _boolean(persist_to_server, "persist_to_server")
 
     return IndexingRequest(
         model=payload.get("model") if isinstance(payload.get("model"), str) else default_model,
@@ -381,7 +396,7 @@ def parse_indexing_request(
             recursive=recursive,
             image=uploaded_image,
         ),
-        db_path=db_path.strip() if isinstance(db_path, str) else None,
+        db_path=normalized_db_path,
         reindex=reindex,
         limit=limit,
         persist_to_server=persist_to_server,

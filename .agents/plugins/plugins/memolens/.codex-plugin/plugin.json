@@ -1,6 +1,6 @@
 {
   "name": "memolens",
-  "version": "0.3.0+codex.20260812161521",
+  "version": "0.3.1+codex.20260812175905",
   "description": "Private local photo/video-segment search and unsaved hard-cut timeline drafting for Codex, with safe-default read-only SQLite access.",
   "author": {
     "name": "MemoLens contributors",

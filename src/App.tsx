@@ -1,15 +1,17 @@
-import { Suspense, lazy, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useDeferredValue, useEffect, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 
+import { usePersistedAtlasBasket } from "./basket/usePersistedAtlasBasket";
 import {
-  atlasAssetToPhotoAsset,
+  DRAFT_PIPELINE_LENGTH,
+  applyDraftCopyUpdate,
+  getDraftGenerationPhaseLabel,
+} from "./generation/model";
+import { useDraftGeneration } from "./generation/useDraftGeneration";
+import {
   fetchAiInspirations,
-  fetchAtlasBasket,
   fetchScopedIndexStatus,
-  fetchAtlasDraftFromBackend,
   fetchBackendSettings,
-  fetchDraftFromBackend,
-  saveAtlasBasket,
   saveBackendSettings,
   startBackendIndexing,
 } from "./query/api";
@@ -36,50 +38,17 @@ import type {
   DesktopIndexingResult,
   DesktopSettings,
   DraftResult,
-  AtlasAsset,
   AtlasInspirationCard,
   AtlasStoryline,
   ScopedIndexStatusResponse,
   LocalModelRuntimeSummary,
-  PhotoAsset,
-  PipelineStep,
-  ToneVariant,
   VlmProfileCatalogEntry,
 } from "./query/types";
 
 const AtlasView = lazy(() => import("./AtlasView"));
 const VideoWorkbench = lazy(() => import("./VideoWorkbench"));
 
-const PIPELINE_LENGTH = 4;
 const LOCAL_BACKEND_URL = "http://127.0.0.1:5519";
-const GENERATION_TIMEOUT_MS = 90_000;
-
-type DraftGenerationPhase = "idle" | "running" | "completed" | "cancelled" | "timed_out";
-
-interface DraftGenerationProgressState {
-  phase: DraftGenerationPhase;
-  percent: number | null;
-  stepIndex: number;
-  title: string;
-  detail: string;
-}
-
-type BasketPersistencePhase = "waiting" | "idle" | "saving" | "saved" | "error";
-
-interface BasketItem {
-  id: string;
-  title: string;
-  subtitle: string;
-  imageUrl: string;
-}
-
-const IDLE_GENERATION_PROGRESS: DraftGenerationProgressState = {
-  phase: "idle",
-  percent: 0,
-  stepIndex: 0,
-  title: "Waiting to start",
-  detail: "Enter a prompt and MemoLens will interpret it, search the library, curate the set, and prepare a ready-to-use draft.",
-};
 
 function normalizeUiText(value: string | null | undefined, fallback: string): string {
   const cleaned = String(value ?? "").replace(/\s+/g, " ").trim();
@@ -97,10 +66,6 @@ function normalizeScopePath(value: string | null | undefined): string | null {
 
 function preferredScrollBehavior(): ScrollBehavior {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
-}
-
-function basketSignature(items: BasketItem[]): string {
-  return items.map((item) => item.id).join("\u001f");
 }
 
 function getIndexingPhaseLabel(phase: DesktopIndexingPhase): string {
@@ -129,22 +94,6 @@ function getIndexingPhaseMessage(progress: DesktopIndexingProgress): string | nu
       return "All images are processed. Writing the final result now.";
     default:
       return null;
-  }
-}
-
-function getGenerationPhaseLabel(phase: DraftGenerationPhase): string {
-  switch (phase) {
-    case "completed":
-      return "Completed";
-    case "running":
-      return "Generating";
-    case "cancelled":
-      return "Cancelled";
-    case "timed_out":
-      return "Timed out";
-    case "idle":
-    default:
-      return "Idle";
   }
 }
 
@@ -270,25 +219,6 @@ function downloadDraft(draft: DraftResult): void {
   URL.revokeObjectURL(url);
 }
 
-function basketItemFromPhotoAsset(photo: PhotoAsset): BasketItem {
-  return {
-    id: photo.id,
-    title: photo.title,
-    subtitle: [photo.location, photo.takenAt].filter(Boolean).join(" · "),
-    imageUrl: photo.imageUrl,
-  };
-}
-
-function basketItemFromAtlasAsset(
-  asset: AtlasAsset,
-  index: number,
-  apiBase: string,
-  imageLibraryDir: string | null | undefined,
-): BasketItem {
-  const photo = atlasAssetToPhotoAsset(asset, index, apiBase, imageLibraryDir);
-  return basketItemFromPhotoAsset(photo);
-}
-
 function App() {
   const desktopRuntime = isDesktopRuntime();
   const electronShell = isElectronShell();
@@ -299,15 +229,9 @@ function App() {
   const [aiSuggestions, setAiSuggestions] = useState<string[]>([]);
   const [isGeneratingInspirations, setIsGeneratingInspirations] = useState(false);
   const [aiInspirationError, setAiInspirationError] = useState<string | null>(null);
-  const [basketItems, setBasketItems] = useState<BasketItem[]>([]);
   const [isBasketOpen, setIsBasketOpen] = useState(false);
   const apiBase = import.meta.env.VITE_BACKEND_BASE_URL ?? LOCAL_BACKEND_URL;
   const [draft, setDraft] = useState<DraftResult>(() => createDraft(INITIAL_PROMPT));
-  const [pipeline, setPipeline] = useState<PipelineStep[]>(() =>
-    createPipelineSteps(null, 0),
-  );
-  const [activeVariant, setActiveVariant] = useState<ToneVariant>("balanced");
-  const [isGenerating, setIsGenerating] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [activePhotoId, setActivePhotoId] = useState<string | null>(draft.selected[0]?.id ?? null);
   const [health, setHealth] = useState<BackendHealth>({
@@ -332,30 +256,69 @@ function App() {
   const [indexingProgress, setIndexingProgress] = useState<DesktopIndexingProgress | null>(null);
   const [indexingResult, setIndexingResult] = useState<DesktopIndexingResult | null>(null);
   const [indexingError, setIndexingError] = useState<string | null>(null);
-  const [generationError, setGenerationError] = useState<string | null>(null);
   const [hasCompletedGeneration, setHasCompletedGeneration] = useState(false);
-  const [generationProgress, setGenerationProgress] = useState<DraftGenerationProgressState>(
-    IDLE_GENERATION_PROGRESS,
-  );
   const [isIndexingControlPending, setIsIndexingControlPending] = useState(false);
-  const [isBasketHydrated, setIsBasketHydrated] = useState(false);
-  const [basketPersistencePhase, setBasketPersistencePhase] =
-    useState<BasketPersistencePhase>("waiting");
-  const [basketPersistenceError, setBasketPersistenceError] = useState<string | null>(null);
-  const [basketLoadRetryKey, setBasketLoadRetryKey] = useState(0);
-  const [basketSaveRetryKey, setBasketSaveRetryKey] = useState(0);
-  const runIdRef = useRef(0);
   const seedRef = useRef(1);
-  const generationAbortControllerRef = useRef<AbortController | null>(null);
-  const generationRequestKeyRef = useRef<string | null>(null);
-  const generationAbortReasonRef = useRef<"cancelled" | "timed_out" | null>(null);
   const hasUserNavigatedRef = useRef(false);
-  const basketScopeRef = useRef<string | null>(null);
-  const lastPersistedBasketSignatureRef = useRef("");
-  const desiredBasketSignatureRef = useRef("");
-  const desiredBasketAssetIdsRef = useRef<string[]>([]);
-  const basketSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const basketSaveAbortControllerRef = useRef<AbortController | null>(null);
+  const basketScope = normalizeScopePath(selectedDbPath ?? health.dbPath);
+  const {
+    items: basketItems,
+    assetIds: basketAssetIds,
+    toggle: toggleBasketItem,
+    addMany: addBasketItems,
+    remove: removeBasketItem,
+    clear: clearBasketItems,
+    retry: retryBasketPersistence,
+    persistence: {
+      phase: basketPersistencePhase,
+      error: basketPersistenceError,
+      isHydrated: isBasketHydrated,
+    },
+  } = usePersistedAtlasBasket({
+    apiBase,
+    scope: basketScope,
+    selectedImageLibraryDir: selectedFolderPath,
+    fallbackImageLibraryDir: health.imageLibraryDir,
+    connectionState: health.state,
+  });
+  const {
+    activeVariant,
+    isGenerating,
+    error: generationError,
+    progress: generationProgress,
+    run: runGeneration,
+    cancel: handleCancelGeneration,
+    reset: resetGeneration,
+  } = useDraftGeneration({
+    apiBase,
+    prompt,
+    contextAssetIds: basketAssetIds,
+    health,
+    selectedImageLibraryDir: selectedFolderPath,
+    selectedDbPath,
+    desktopRuntime,
+    onStarted: () => {
+      seedRef.current += 1;
+      setCopyState("idle");
+    },
+    onCopyUpdate: (copyUpdate) => {
+      setDraft((currentDraft) => applyDraftCopyUpdate(currentDraft, copyUpdate));
+    },
+    onResult: (nextDraft) => {
+      setHasCompletedGeneration(true);
+      setDraft(nextDraft);
+      setActivePhotoId(nextDraft.selected[0]?.id ?? null);
+    },
+    onBackendRestarted: (status) => {
+      setBackendStatus(status);
+      setHealth((currentHealth) => ({
+        ...currentHealth,
+        state: "connected",
+        message: status.message,
+      }));
+      setHealthRefreshKey((current) => current + 1);
+    },
+  });
   const deferredPrompt = useDeferredValue(prompt);
   const previewAnalysis = analyzePrompt(deferredPrompt || INITIAL_PROMPT);
   const canUseMockMode = health.state === "mock";
@@ -375,8 +338,10 @@ function App() {
   const runtimeLabel = desktopRuntime ? "Desktop" : electronShell ? "Shell" : "Browser";
   const heroSignals = [previewAnalysis.focus, previewAnalysis.toneLabel, previewAnalysis.timeHint];
   const canGenerateDraft = health.state === "connected" || canUseMockMode;
-  const basketAssetIds = useMemo(() => basketItems.map((item) => item.id), [basketItems]);
-  const basketScope = normalizeScopePath(selectedDbPath ?? health.dbPath);
+  const pipeline = createPipelineSteps(
+    null,
+    generationProgress.phase === "completed" ? DRAFT_PIPELINE_LENGTH : 0,
+  );
   const currentDbScope = normalizeScopePath(selectedDbPath ?? health.dbPath);
   const parsedQueryChips = buildParsedQueryChips(activeResultDraft?.parsedQuery ?? null);
   const scopedIndexStatusMatchesCurrent = Boolean(
@@ -602,14 +567,6 @@ function App() {
     };
   }, []);
 
-  useEffect(
-    () => () => {
-      generationAbortControllerRef.current?.abort();
-      basketSaveAbortControllerRef.current?.abort();
-    },
-    [],
-  );
-
   useEffect(() => {
     setScopedIndexStatus(null);
     setScopedIndexStatusError(null);
@@ -669,209 +626,15 @@ function App() {
     });
   }, [activeResultDraft?.id, activeResultDraft?.selected.length]);
 
-  useEffect(() => {
-    if (basketScopeRef.current === basketScope) {
-      return;
-    }
-    basketScopeRef.current = basketScope;
-    lastPersistedBasketSignatureRef.current = "";
-    desiredBasketSignatureRef.current = "";
-    desiredBasketAssetIdsRef.current = [];
-    basketSaveAbortControllerRef.current?.abort();
-    basketSaveQueueRef.current = Promise.resolve();
-    setBasketItems([]);
-    setIsBasketHydrated(false);
-    setBasketPersistencePhase("waiting");
-    setBasketPersistenceError(null);
-  }, [basketScope]);
-
-  useEffect(() => {
-    if (health.state !== "connected" || !basketScope) {
-      return;
-    }
-
-    const controller = new AbortController();
-    let disposed = false;
-    const timeoutId = window.setTimeout(() => controller.abort(), 5000);
-    const scope = basketScope;
-    const imageLibraryDir = selectedFolderPath ?? health.imageLibraryDir ?? null;
-    setBasketPersistencePhase("waiting");
-    setBasketPersistenceError(null);
-
-    void fetchAtlasBasket({
-      apiBase,
-      dbPath: scope,
-      signal: controller.signal,
-    })
-      .then((basket) => {
-        if (disposed || basketScopeRef.current !== scope) {
-          return;
-        }
-        const restoredItems = basket.assets.map((asset, index) =>
-          basketItemFromAtlasAsset(asset, index, apiBase, imageLibraryDir),
-        );
-        lastPersistedBasketSignatureRef.current = basketSignature(restoredItems);
-        setBasketItems((currentItems) => mergeBasketItems(restoredItems, currentItems));
-        setIsBasketHydrated(true);
-        setBasketPersistencePhase("idle");
-      })
-      .catch((error) => {
-        if (disposed || basketScopeRef.current !== scope) {
-          return;
-        }
-        setBasketPersistencePhase("error");
-        setBasketPersistenceError(
-          isAbortError(error)
-            ? "Selection sync timed out. Retry before editing this library selection."
-            : `Selection sync is paused: ${error instanceof Error ? error.message : "basket could not be loaded"}`,
-        );
-      })
-      .finally(() => window.clearTimeout(timeoutId));
-
-    return () => {
-      disposed = true;
-      window.clearTimeout(timeoutId);
-      controller.abort();
-    };
-  }, [apiBase, basketLoadRetryKey, basketScope, health.imageLibraryDir, health.state, selectedFolderPath]);
-
-  useEffect(() => {
-    if (!isBasketHydrated || health.state !== "connected") {
-      return;
-    }
-
-    const signature = basketAssetIds.join("\u001f");
-    desiredBasketSignatureRef.current = signature;
-    desiredBasketAssetIdsRef.current = [...basketAssetIds];
-    if (signature === lastPersistedBasketSignatureRef.current) {
-      setBasketPersistencePhase("idle");
-      setBasketPersistenceError(null);
-      return;
-    }
-
-    setBasketPersistencePhase("saving");
-    setBasketPersistenceError(null);
-
-    const timer = window.setTimeout(() => {
-      basketSaveQueueRef.current = basketSaveQueueRef.current
-        .catch(() => undefined)
-        .then(async () => {
-          const scope = basketScope;
-          while (
-            basketScopeRef.current === scope
-            && desiredBasketSignatureRef.current !== lastPersistedBasketSignatureRef.current
-          ) {
-            const queuedSignature = desiredBasketSignatureRef.current;
-            const queuedAssetIds = [...desiredBasketAssetIdsRef.current];
-            const controller = new AbortController();
-            basketSaveAbortControllerRef.current = controller;
-            const timeoutId = window.setTimeout(() => controller.abort(), 10_000);
-            try {
-              await saveAtlasBasket({
-                apiBase,
-                dbPath: scope,
-                assetIds: queuedAssetIds,
-                name: "Current selection",
-                signal: controller.signal,
-              });
-              if (basketScopeRef.current !== scope) {
-                return;
-              }
-              lastPersistedBasketSignatureRef.current = queuedSignature;
-              if (desiredBasketSignatureRef.current === queuedSignature) {
-                setBasketPersistencePhase("saved");
-                setBasketPersistenceError(null);
-              }
-            } catch (error) {
-              if (basketScopeRef.current !== scope) {
-                return;
-              }
-              setBasketPersistencePhase("error");
-              setBasketPersistenceError(
-                isAbortError(error)
-                  ? "Saving the selection timed out. Retry to save the latest selection."
-                  : error instanceof Error
-                    ? error.message
-                    : "The current selection could not be saved.",
-              );
-              return;
-            } finally {
-              window.clearTimeout(timeoutId);
-              if (basketSaveAbortControllerRef.current === controller) {
-                basketSaveAbortControllerRef.current = null;
-              }
-            }
-          }
-        });
-    }, 400);
-
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [
-    apiBase,
-    basketAssetIds,
-    basketSaveRetryKey,
-    basketScope,
-    health.state,
-    isBasketHydrated,
-  ]);
-
-  function mergeBasketItems(currentItems: BasketItem[], nextItems: BasketItem[]): BasketItem[] {
-    const byId = new Map(currentItems.map((item) => [item.id, item]));
-    for (const item of nextItems) {
-      byId.set(item.id, item);
-    }
-    return [...byId.values()].slice(0, 240);
-  }
-
-  function handleToggleAtlasBasketAsset(asset: AtlasAsset): void {
-    const imageLibraryDir = selectedFolderPath ?? health.imageLibraryDir ?? null;
-    const nextItem = basketItemFromAtlasAsset(asset, basketItems.length, apiBase, imageLibraryDir);
-    setBasketItems((currentItems) => {
-      if (currentItems.some((item) => item.id === asset.id)) {
-        return currentItems.filter((item) => item.id !== asset.id);
-      }
-      return mergeBasketItems(currentItems, [nextItem]);
-    });
-  }
-
-  function handleAddAtlasBasketAssets(assets: AtlasAsset[]): void {
-    if (assets.length === 0) {
-      return;
-    }
-    const imageLibraryDir = selectedFolderPath ?? health.imageLibraryDir ?? null;
-    setBasketItems((currentItems) =>
-      mergeBasketItems(
-        currentItems,
-        assets.map((asset, index) =>
-          basketItemFromAtlasAsset(asset, currentItems.length + index, apiBase, imageLibraryDir),
-        ),
-      ),
-    );
-  }
-
-  function handleAddPhotoToBasket(photo: PhotoAsset): void {
-    setBasketItems((currentItems) =>
-      mergeBasketItems(currentItems, [basketItemFromPhotoAsset(photo)]),
-    );
-  }
-
   function handleAddAllResultsToBasket(): void {
     if (!activeResultDraft) {
       return;
     }
-    setBasketItems((currentItems) =>
-      mergeBasketItems(currentItems, activeResultDraft.selected.map(basketItemFromPhotoAsset)),
-    );
-  }
-
-  function handleRemoveBasketItem(assetId: string): void {
-    setBasketItems((currentItems) => currentItems.filter((item) => item.id !== assetId));
+    addBasketItems(activeResultDraft.selected);
   }
 
   function handleClearBasket(): void {
-    setBasketItems([]);
+    clearBasketItems();
     setIsBasketOpen(false);
   }
 
@@ -907,274 +670,6 @@ function App() {
     setPrompt(nextPrompt);
     handleAddAllResultsToBasket();
     scrollToSection("compose");
-  }
-
-  function handleCancelGeneration(): void {
-    const controller = generationAbortControllerRef.current;
-    if (!controller || controller.signal.aborted) {
-      return;
-    }
-    generationAbortReasonRef.current = "cancelled";
-    controller.abort();
-  }
-
-  async function runGeneration(variant: ToneVariant): Promise<void> {
-    if (!canGenerateDraft) {
-      setGenerationError("Start or reconnect the local service before generating a draft.");
-      return;
-    }
-
-    const normalizedPrompt = prompt.trim() || INITIAL_PROMPT;
-    const contextAssetIds = [...basketAssetIds];
-    const requestKey = `${variant}\u001f${normalizedPrompt}\u001f${contextAssetIds.join("\u001f")}`;
-    if (
-      generationAbortControllerRef.current
-      && !generationAbortControllerRef.current.signal.aborted
-      && generationRequestKeyRef.current === requestKey
-    ) {
-      return;
-    }
-
-    generationAbortControllerRef.current?.abort();
-    const controller = new AbortController();
-    generationAbortReasonRef.current = null;
-    generationAbortControllerRef.current = controller;
-    generationRequestKeyRef.current = requestKey;
-    const runId = runIdRef.current + 1;
-    runIdRef.current = runId;
-
-    setIsGenerating(true);
-    setActiveVariant(variant);
-    setCopyState("idle");
-    setGenerationError(null);
-    setPipeline(createPipelineSteps(null, 0));
-    setGenerationProgress({
-      phase: "running",
-      percent: null,
-      stepIndex: 0,
-      title: "Searching and curating",
-      detail: "MemoLens is interpreting the request and retrieving a diverse set from the local library.",
-    });
-    seedRef.current += 1;
-    let nextDraft: DraftResult | null = null;
-    const timeoutId = window.setTimeout(() => {
-      if (generationAbortControllerRef.current === controller && !controller.signal.aborted) {
-        generationAbortReasonRef.current = "timed_out";
-        controller.abort();
-      }
-    }, GENERATION_TIMEOUT_MS);
-
-    try {
-      if (health.state === "connected") {
-        const makeDraftFetchOptions = () => ({
-          apiBase,
-          imageLibraryDir: selectedFolderPath ?? health.imageLibraryDir ?? null,
-          dbPath: selectedDbPath ?? health.dbPath ?? null,
-          contextAssetIds,
-          signal: controller.signal,
-          shouldApplyCopyUpdate: () => runIdRef.current === runId && !controller.signal.aborted,
-          onCopyUpdate: (copyUpdate: {
-            title?: string | null;
-            caption?: string | null;
-            notes?: string[] | null;
-          }) => {
-            if (runIdRef.current !== runId || controller.signal.aborted) {
-              return;
-            }
-            setDraft((currentDraft) => ({
-              ...currentDraft,
-              title:
-                typeof copyUpdate.title === "string" && hasVisibleText(copyUpdate.title)
-                  ? copyUpdate.title
-                  : currentDraft.title,
-              caption:
-                typeof copyUpdate.caption === "string" && hasVisibleText(copyUpdate.caption)
-                  ? copyUpdate.caption
-                  : currentDraft.caption,
-              notes:
-                Array.isArray(copyUpdate.notes) && copyUpdate.notes.length > 0
-                  ? copyUpdate.notes
-                  : currentDraft.notes,
-            }));
-          },
-        });
-        const fetchCurrentDraft = () =>
-          contextAssetIds.length > 0
-            ? fetchAtlasDraftFromBackend(normalizedPrompt, variant, {
-                apiBase,
-                imageLibraryDir: selectedFolderPath ?? health.imageLibraryDir ?? null,
-                dbPath: selectedDbPath ?? health.dbPath ?? null,
-                assetIds: contextAssetIds,
-                showDuplicates: false,
-                signal: controller.signal,
-              })
-            : fetchDraftFromBackend(normalizedPrompt, variant, makeDraftFetchOptions());
-
-        try {
-          nextDraft = await fetchCurrentDraft();
-          if (nextDraft === null) {
-            setGenerationError(
-              "No visible retrieval result came back from the local library. Make sure indexing has finished.",
-            );
-          }
-        } catch (error) {
-          if (isAbortError(error) || controller.signal.aborted) {
-            if (runIdRef.current === runId) {
-              const timedOut = generationAbortReasonRef.current === "timed_out";
-              setGenerationError(
-                timedOut
-                  ? "Draft generation timed out after 90 seconds. The local service may still be busy; retry when ready."
-                  : "Draft generation cancelled. You can adjust the prompt and retry.",
-              );
-              setGenerationProgress({
-                phase: timedOut ? "timed_out" : "cancelled",
-                percent: 0,
-                stepIndex: 0,
-                title: timedOut ? "Generation timed out" : "Generation cancelled",
-                detail: timedOut
-                  ? "No result was replaced. Retry when the local service is responsive."
-                  : "No result was replaced. Start again whenever you are ready.",
-              });
-              setPipeline(createPipelineSteps(null, 0));
-            }
-            return;
-          }
-          const isNetworkError = error instanceof TypeError && /fetch/i.test(error.message);
-
-          // If it's a network error, try to restart the backend and retry once.
-          if (isNetworkError && desktopRuntime) {
-            setGenerationProgress((current) => ({
-              ...current,
-              title: "Reconnecting to backend",
-              detail: "Network error detected. Attempting to restart the local service.",
-            }));
-            const retryStatus = await ensureDesktopBackend().catch(() => null);
-            if (controller.signal.aborted) {
-              return;
-            }
-            if (
-              retryStatus !== null
-              && (retryStatus.state === "connected" || retryStatus.state === "started")
-            ) {
-              setBackendStatus(retryStatus);
-              setHealth((currentHealth) => ({
-                ...currentHealth,
-                state: "connected",
-                message: retryStatus.message,
-              }));
-              setHealthRefreshKey((current) => current + 1);
-
-              try {
-                nextDraft = await fetchCurrentDraft();
-                if (nextDraft === null) {
-                  setGenerationError(
-                    "No visible retrieval result came back from the local library. Make sure indexing has finished.",
-                  );
-                }
-              } catch (retryError) {
-                if (isAbortError(retryError) || controller.signal.aborted) {
-                  if (runIdRef.current === runId) {
-                    const timedOut = generationAbortReasonRef.current === "timed_out";
-                    setGenerationError(
-                      timedOut
-                        ? "Draft generation timed out after 90 seconds. Retry when the local service is responsive."
-                        : "Draft generation cancelled. You can retry when ready.",
-                    );
-                    setGenerationProgress({
-                      phase: timedOut ? "timed_out" : "cancelled",
-                      percent: 0,
-                      stepIndex: 0,
-                      title: timedOut ? "Generation timed out" : "Generation cancelled",
-                      detail: "No result was replaced.",
-                    });
-                    setPipeline(createPipelineSteps(null, 0));
-                  }
-                  return;
-                }
-                setGenerationError(
-                  retryError instanceof Error
-                    ? retryError.message
-                    : "Draft generation failed after retry.",
-                );
-                nextDraft = null;
-              }
-            } else {
-              setGenerationError(
-                "Failed to fetch: the local backend is offline and could not be restarted. Check Python environment in settings.",
-              );
-              nextDraft = null;
-            }
-          } else {
-            setGenerationError(
-              error instanceof Error
-                ? error.message
-                : "Draft generation failed and no result could be loaded from the local library.",
-            );
-            nextDraft = null;
-          }
-        }
-      } else if (canUseMockMode) {
-        nextDraft = createDraft(normalizedPrompt, variant, seedRef.current);
-      }
-
-      if (runIdRef.current !== runId || controller.signal.aborted) {
-        return;
-      }
-
-      if (nextDraft === null && canUseMockMode) {
-        nextDraft = createDraft(normalizedPrompt, variant, seedRef.current);
-      }
-
-      if (nextDraft === null) {
-        setGenerationProgress({
-          phase: "idle",
-          percent: 0,
-          stepIndex: 0,
-          title: "No result available",
-          detail: "Check whether local indexing has finished, or review the error message above.",
-        });
-        setPipeline(createPipelineSteps(null, 0));
-        return;
-      }
-
-      setGenerationProgress({
-        phase: "completed",
-        percent: 100,
-        stepIndex: PIPELINE_LENGTH,
-        title: "Draft ready",
-        detail: "Your result is ready to review, copy, or refine again.",
-      });
-      setHasCompletedGeneration(true);
-      setDraft(nextDraft);
-      setActivePhotoId(nextDraft.selected[0]?.id ?? null);
-      setPipeline(createPipelineSteps(null));
-    } finally {
-      window.clearTimeout(timeoutId);
-      if (controller.signal.aborted && runIdRef.current === runId) {
-        const timedOut = generationAbortReasonRef.current === "timed_out";
-        setGenerationError(
-          timedOut
-            ? "Draft generation timed out after 90 seconds. The local service may still be busy; retry when ready."
-            : "Draft generation cancelled. You can adjust the prompt and retry.",
-        );
-        setGenerationProgress({
-          phase: timedOut ? "timed_out" : "cancelled",
-          percent: 0,
-          stepIndex: 0,
-          title: timedOut ? "Generation timed out" : "Generation cancelled",
-          detail: timedOut
-            ? "No result was replaced. Retry when the local service is responsive."
-            : "No result was replaced. Start again whenever you are ready.",
-        });
-        setPipeline(createPipelineSteps(null, 0));
-      }
-      if (generationAbortControllerRef.current === controller) {
-        generationAbortControllerRef.current = null;
-        generationRequestKeyRef.current = null;
-        generationAbortReasonRef.current = null;
-        setIsGenerating(false);
-      }
-    }
   }
 
   async function handleCopyCaption(): Promise<void> {
@@ -1442,7 +937,7 @@ function App() {
       setSettingsMessage("Using the local library path.");
       setIndexingResult(null);
       setIndexingProgress(null);
-      setGenerationError(null);
+      resetGeneration();
       setHasCompletedGeneration(false);
       return;
     }
@@ -1463,7 +958,7 @@ function App() {
     }));
     setIndexingResult(null);
     setIndexingProgress(null);
-    setGenerationError(null);
+    resetGeneration();
     setHasCompletedGeneration(false);
   }
 
@@ -1482,7 +977,7 @@ function App() {
     setIndexingError(null);
     setIndexingProgress(null);
     setIndexingResult(null);
-    setGenerationError(null);
+    resetGeneration();
     setHasCompletedGeneration(false);
 
     try {
@@ -2415,8 +1910,8 @@ function App() {
             refreshKey={atlasRefreshKey}
             onInspirationChange={handleAtlasInspirationChange}
             basketAssetIds={basketAssetIds}
-            onBasketToggle={handleToggleAtlasBasketAsset}
-            onBasketAddMany={handleAddAtlasBasketAssets}
+            onBasketToggle={toggleBasketItem}
+            onBasketAddMany={addBasketItems}
           />
         </Suspense>
 
@@ -2535,13 +2030,7 @@ function App() {
               <button
                 type="button"
                 className="inline-action-button"
-                onClick={() => {
-                  if (isBasketHydrated) {
-                    setBasketSaveRetryKey((current) => current + 1);
-                  } else {
-                    setBasketLoadRetryKey((current) => current + 1);
-                  }
-                }}
+                onClick={retryBasketPersistence}
               >
                 {isBasketHydrated ? "Retry save" : "Retry sync"}
               </button>
@@ -2710,7 +2199,7 @@ function App() {
                 <h3>{generationProgress.title}</h3>
               </div>
               <div className="meta-pills">
-                <span className="status-pill">{getGenerationPhaseLabel(generationProgress.phase)}</span>
+                <span className="status-pill">{getDraftGenerationPhaseLabel(generationProgress.phase)}</span>
                 <span className="status-pill">
                   {generationProgress.percent === null
                     ? "In progress"
@@ -2748,7 +2237,7 @@ function App() {
               {generationProgress.phase === "running"
                 ? generationProgress.detail
                 : generationProgress.stepIndex > 0
-                ? `Step ${generationProgress.stepIndex} / ${PIPELINE_LENGTH}`
+                ? `Step ${generationProgress.stepIndex} / ${DRAFT_PIPELINE_LENGTH}`
                 : "Waiting to start"}
             </p>
           </section>
@@ -2824,7 +2313,7 @@ function App() {
                   <p className="story-body">{activeResultDraft.caption}</p>
 
                   <div className="action-row">
-                    <button className="secondary-button" type="button" onClick={() => handleAddPhotoToBasket(activePhoto)}>
+                    <button className="secondary-button" type="button" onClick={() => addBasketItems([activePhoto])}>
                       Add active
                     </button>
                     <button className="secondary-button" type="button" onClick={handleAddAllResultsToBasket}>
@@ -2882,7 +2371,7 @@ function App() {
                     <button
                       type="button"
                       className="thumbnail-add-button"
-                      onClick={() => handleAddPhotoToBasket(photo)}
+                      onClick={() => addBasketItems([photo])}
                     >
                       Add
                     </button>
@@ -2965,7 +2454,7 @@ function App() {
                       <strong>{item.title}</strong>
                       <span>{item.subtitle}</span>
                     </div>
-                    <button type="button" onClick={() => handleRemoveBasketItem(item.id)}>
+                    <button type="button" onClick={() => removeBasketItem(item.id)}>
                       Remove
                     </button>
                   </article>
