@@ -249,7 +249,7 @@ class PluginTests(unittest.TestCase):
         )
 
         status = gateway.status()
-        self.assertEqual(status["mode"], "safe_default")
+        self.assertEqual(status["mode"], "safe_default_read_only")
         self.assertEqual(status["source"], "sqlite_read_only")
         self.assertFalse(status["local_api"]["enabled"])
         self.assertFalse(status["local_api"]["authenticated"])
@@ -290,7 +290,7 @@ class PluginTests(unittest.TestCase):
         self.assertTrue(status["local_api"]["trusted_by_user"])
         self.assertFalse(status["local_api"]["authenticated"])
         self.assertEqual(status["library_dir"], str(self.library))
-        self.assertEqual(status["database"]["path"], str(self.db))
+        self.assertEqual(status["database"]["path"], str(self.db.resolve()))
         self.assertEqual(status["database"]["index_stats"]["asset_count"], 2)
         self.assertEqual(gateway.library_dir, self.library.resolve())
         self.assertEqual(gateway.db_path, self.db.resolve())
@@ -474,6 +474,15 @@ class PluginTests(unittest.TestCase):
             plugin_manifest["interface"]["composerIcon"], "./assets/memolens.svg"
         )
         self.assertEqual(plugin_manifest["interface"]["logo"], "./assets/memolens.svg")
+        self.assertTrue(
+            plugin_manifest["version"].startswith("0.3.0+codex."),
+            plugin_manifest["version"],
+        )
+        self.assertEqual(entry["policy"]["authentication"], "ON_USE")
+        self.assertIn(
+            "0.3.0",
+            (resolved_plugin / "README.md").read_text(encoding="utf-8"),
+        )
 
     def test_cli_and_configured_mcp_start_from_non_repo_cwd_with_clean_stdout(self) -> None:
         cli_env = os.environ.copy()
@@ -556,7 +565,7 @@ class PluginTests(unittest.TestCase):
         responses = [json.loads(line) for line in stdout_lines]
         self.assertEqual(len(responses), 3)
         self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-06-18")
-        self.assertEqual(len(responses[1]["result"]["tools"]), 4)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 13)
         self.assertEqual(
             responses[2]["result"]["structuredContent"]["source"],
             "sqlite_read_only",

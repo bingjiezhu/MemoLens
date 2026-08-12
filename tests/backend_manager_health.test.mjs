@@ -6,7 +6,10 @@ import { basename, dirname, join } from "node:path";
 import test from "node:test";
 
 import {
-  DESKTOP_SESSION_TOKEN,
+  getDesktopSessionToken,
+  isBackendIdentityVerified,
+  markBackendTrustVerified,
+  revokeBackendTrust,
   verifyBackendHealthPayload,
 } from "../electron-dist/electron/backendManager.js";
 import {
@@ -31,7 +34,7 @@ test("rejects arbitrary 2xx and spoofed MemoLens identity", () => {
 });
 
 test("accepts only a valid session-token challenge proof", () => {
-  const challengeProof = createHmac("sha256", DESKTOP_SESSION_TOKEN)
+  const challengeProof = createHmac("sha256", getDesktopSessionToken())
     .update(challenge)
     .digest("hex");
   assert.equal(
@@ -42,6 +45,17 @@ test("accepts only a valid session-token challenge proof", () => {
     verifyBackendHealthPayload({ ...identity, challenge_proof: `${challengeProof}junk` }, challenge),
     false,
   );
+});
+
+test("revokes trust and rotates the bearer when backend identity is lost", () => {
+  const priorToken = getDesktopSessionToken();
+  markBackendTrustVerified();
+  assert.equal(isBackendIdentityVerified(), true);
+
+  revokeBackendTrust();
+
+  assert.equal(isBackendIdentityVerified(), false);
+  assert.notEqual(getDesktopSessionToken(), priorToken);
 });
 
 test("uses an opaque stable app-state database and persists the selected library", async () => {

@@ -8,6 +8,7 @@ from flask import Flask, jsonify, request
 
 from core.config import Settings
 from core.db import ImageIndexRepository
+from core.media_db import MediaRepository
 from core.photo_atlas import PhotoAtlasService
 from core.text_embeddings import TextEmbeddingService
 from .retrieval import (
@@ -53,16 +54,18 @@ def _resolve_allowed_origin(origin: str | None) -> str | None:
 
 
 def _append_vary_header(response, value: str) -> None:
-    existing = {
-        item.strip().lower()
-        for item in response.headers.get("Vary", "").split(",")
-        if item.strip()
-    }
+    existing = {item.strip().lower() for item in response.headers.get("Vary", "").split(",") if item.strip()}
     if value.lower() not in existing:
         response.headers.add("Vary", value)
 
 
 def configure_runtime(app: Flask, settings: Settings) -> None:
+    previous_media_runner = app.extensions.get("media_job_runner")
+    previous_render_runner = app.extensions.get("render_job_runner")
+    if previous_media_runner is not None:
+        previous_media_runner.shutdown()
+    if previous_render_runner is not None:
+        previous_render_runner.shutdown()
     resolved_settings = settings
     resolved_settings.ensure_directories()
     app.config["SETTINGS"] = resolved_settings
@@ -78,6 +81,33 @@ def configure_runtime(app: Flask, settings: Settings) -> None:
     app.extensions["geocoder"] = ReverseGeocoder(resolved_settings)
     app.extensions["query_planner"] = OpenAICompatibleQueryPlanner(resolved_settings)
     app.extensions["retrieval_copywriter"] = RetrievalCopywriter(resolved_settings)
+    app.extensions["retrieval_service"] = RetrievalService(
+        settings=resolved_settings,
+        repository=repository,
+        planner=app.extensions["query_planner"],
+        text_embedding_service=app.extensions["text_embedding_service"],
+    )
+
+    # Media jobs remain permanently bound to this repository/database UUID.
+    from .media.director import CreativeDirector
+    from .media.render import RenderJobRunner
+    from .media.retrieval import MixedRetrievalService
+    from .media.timeline import TimelineService
+    from .media.video import MediaJobRunner
+
+    media_repository = MediaRepository(resolved_settings.db_path)
+    media_repository.ensure_schema(resolved_settings.image_library_dir)
+    media_repository.mark_running_jobs_interrupted()
+    media_cache_root = resolved_settings.app_state_dir / "media-cache"
+    preview_root = media_repository.register_preview_root(media_cache_root / "previews")
+    mixed_retrieval = MixedRetrievalService(media_repository)
+    app.extensions["media_repository"] = media_repository
+    app.extensions["mixed_retrieval_service"] = mixed_retrieval
+    app.extensions["creative_director"] = CreativeDirector(media_repository, mixed_retrieval)
+    app.extensions["timeline_service"] = TimelineService(media_repository)
+    app.extensions["media_job_runner"] = MediaJobRunner(media_repository, media_cache_root)
+    app.extensions["render_job_runner"] = RenderJobRunner(media_repository, media_cache_root)
+    app.extensions["app_preview_root_id"] = preview_root["id"]
     app.extensions["indexing_service"] = IndexingService(
         settings=resolved_settings,
         repository=repository,
@@ -85,12 +115,7 @@ def configure_runtime(app: Flask, settings: Settings) -> None:
         embedding_service=app.extensions["embedding_service"],
         text_embedding_service=app.extensions["text_embedding_service"],
         geocoder=app.extensions["geocoder"],
-    )
-    app.extensions["retrieval_service"] = RetrievalService(
-        settings=resolved_settings,
-        repository=repository,
-        planner=app.extensions["query_planner"],
-        text_embedding_service=app.extensions["text_embedding_service"],
+        media_repository=media_repository,
     )
 
 
@@ -104,9 +129,7 @@ def create_app(settings: Settings | None = None) -> Flask:
     from .api import api_blueprint
 
     app = Flask(__name__)
-    app.config["DESKTOP_SESSION_TOKEN"] = os.environ.get(
-        "MEMOLENS_DESKTOP_SESSION_TOKEN", ""
-    ).strip()
+    app.config["DESKTOP_SESSION_TOKEN"] = os.environ.get("MEMOLENS_DESKTOP_SESSION_TOKEN", "").strip()
     configure_runtime(app, settings or Settings.from_env())
 
     @app.before_request
@@ -118,20 +141,18 @@ def create_app(settings: Settings | None = None) -> Flask:
         try:
             address = ip_address(remote_addr)
             ipv4_mapped = getattr(address, "ipv4_mapped", None)
-            is_loopback = address.is_loopback or bool(
-                ipv4_mapped and ipv4_mapped.is_loopback
-            )
+            is_loopback = address.is_loopback or bool(ipv4_mapped and ipv4_mapped.is_loopback)
         except ValueError:
             is_loopback = False
         if not is_loopback:
-            return jsonify({"object": "error", "type": "permission_error", "message": "MemoLens API is loopback-only."}), 403
+            return jsonify(
+                {"object": "error", "type": "permission_error", "message": "MemoLens API is loopback-only."}
+            ), 403
 
         raw_origin = request.headers.get("Origin")
         expected = str(app.config.get("DESKTOP_SESSION_TOKEN") or "")
         supplied = request.headers.get(DESKTOP_TOKEN_HEADER, "")
-        token_authenticated = bool(
-            expected and supplied and hmac.compare_digest(supplied, expected)
-        )
+        token_authenticated = bool(expected and supplied and hmac.compare_digest(supplied, expected))
 
         # Native loopback callers (curl, the CLI, and the Photon bot) do not
         # send a browser Origin. Preserve that local API contract; the desktop
@@ -142,7 +163,9 @@ def create_app(settings: Settings | None = None) -> Flask:
             return None
         allowed_origin = _resolve_allowed_origin(raw_origin)
         if allowed_origin is None:
-            return jsonify({"object": "error", "type": "permission_error", "message": "Request origin is not trusted."}), 403
+            return jsonify(
+                {"object": "error", "type": "permission_error", "message": "Request origin is not trusted."}
+            ), 403
 
         if allowed_origin in {"null", "file://"}:
             # Let browser preflight discover the token header; the following
@@ -150,7 +173,9 @@ def create_app(settings: Settings | None = None) -> Flask:
             if request.method == "OPTIONS":
                 return None
             if not token_authenticated:
-                return jsonify({"object": "error", "type": "permission_error", "message": "Desktop session authentication failed."}), 403
+                return jsonify(
+                    {"object": "error", "type": "permission_error", "message": "Desktop session authentication failed."}
+                ), 403
         return None
 
     @app.after_request
@@ -161,14 +186,14 @@ def create_app(settings: Settings | None = None) -> Flask:
             _append_vary_header(response, "Origin")
         if allowed_origin is not None:
             response.headers["Access-Control-Allow-Origin"] = allowed_origin
-            response.headers["Access-Control-Allow-Headers"] = (
-                f"Content-Type, Authorization, {DESKTOP_TOKEN_HEADER}"
-            )
+            response.headers["Access-Control-Allow-Headers"] = f"Content-Type, Authorization, {DESKTOP_TOKEN_HEADER}"
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, OPTIONS"
             response.headers["Access-Control-Max-Age"] = "600"
 
         response.headers.setdefault("Cache-Control", "no-store")
-        response.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+        response.headers.setdefault(
+            "Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+        )
         response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Content-Type-Options", "nosniff")

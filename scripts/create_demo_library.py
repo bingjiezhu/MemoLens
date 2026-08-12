@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import math
 import random
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +39,21 @@ SCENES = (
     Scene("2024-03-09_red_rock_road.jpg", "2024:03:09 15:32:00", (75, 132, 168), (221, 188, 149), (130, 64, 46), (221, 175, 97), "road"),
     Scene("2024-06-21_ocean_cliff.jpg", "2024:06:21 18:44:00", (51, 105, 145), (181, 206, 204), (55, 77, 62), (238, 192, 114), "cliff"),
     Scene("2024-11-16_moonlit_beach.jpg", "2024:11:16 22:10:00", (12, 22, 48), (53, 70, 94), (24, 55, 70), (221, 226, 205), "moon"),
+)
+
+
+@dataclass(frozen=True)
+class DemoVideo:
+    filename: str
+    scene_indexes: tuple[int, ...]
+    width: int
+    height: int
+    with_audio: bool
+
+
+DEMO_VIDEOS = (
+    DemoVideo("demo_mountain_to_coast.mp4", (0, 2, 6), 1280, 720, True),
+    DemoVideo("demo_vertical_city_story.mp4", (8, 9, 11), 720, 1280, False),
 )
 
 
@@ -153,7 +170,86 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create a privacy-safe synthetic library for MemoLens demos and QA.")
     parser.add_argument("--output", type=Path, default=Path("demo-photo-library"), help="Output directory (default: ./demo-photo-library).")
     parser.add_argument("--force", action="store_true", help="Overwrite generated files with matching names.")
+    parser.add_argument("--photos-only", action="store_true", help="Skip the synthetic MP4 clips (FFmpeg is not required).")
     return parser.parse_args()
+
+
+def create_demo_video(output: Path, video: DemoVideo, *, ffmpeg: str) -> None:
+    seconds_per_scene = 3
+    final_path = output / video.filename
+    partial_path = output / f".{Path(video.filename).stem}.part.mp4"
+    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y"]
+    for scene_index in video.scene_indexes:
+        command.extend(
+            [
+                "-loop",
+                "1",
+                "-t",
+                str(seconds_per_scene),
+                "-i",
+                str(output / SCENES[scene_index].filename),
+            ]
+        )
+
+    total_duration = seconds_per_scene * len(video.scene_indexes)
+    if video.with_audio:
+        command.extend(
+            [
+                "-f",
+                "lavfi",
+                "-t",
+                str(total_duration),
+                "-i",
+                "sine=frequency=330:sample_rate=48000",
+            ]
+        )
+
+    video_filters = []
+    video_labels = []
+    for input_index in range(len(video.scene_indexes)):
+        label = f"v{input_index}"
+        video_labels.append(f"[{label}]")
+        video_filters.append(
+            f"[{input_index}:v]"
+            f"scale={video.width}:{video.height}:force_original_aspect_ratio=increase,"
+            f"crop={video.width}:{video.height},fps=24,"
+            f"trim=duration={seconds_per_scene},setpts=PTS-STARTPTS[{label}]"
+        )
+    video_filters.append(
+        f"{''.join(video_labels)}concat=n={len(video_labels)}:v=1:a=0[outv]"
+    )
+    command.extend(["-filter_complex", ";".join(video_filters), "-map", "[outv]"])
+
+    if video.with_audio:
+        command.extend(
+            [
+                "-map",
+                f"{len(video.scene_indexes)}:a:0",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-shortest",
+            ]
+        )
+    command.extend(
+        [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            str(partial_path),
+        ]
+    )
+    try:
+        subprocess.run(command, check=True, timeout=90)
+        partial_path.replace(final_path)
+    finally:
+        partial_path.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -161,7 +257,17 @@ def main() -> int:
     output = args.output.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
 
-    existing = [output / scene.filename for scene in SCENES if (output / scene.filename).exists()]
+    ffmpeg = None
+    if not args.photos_only:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            print("FFmpeg was not found. Run `npm run setup:mac`, or retry with --photos-only.")
+            return 3
+
+    generated_paths = [output / scene.filename for scene in SCENES]
+    if not args.photos_only:
+        generated_paths.extend(output / video.filename for video in DEMO_VIDEOS)
+    existing = [path for path in generated_paths if path.exists()]
     if existing and not args.force:
         print(f"Refusing to overwrite {len(existing)} existing demo image(s). Re-run with --force.")
         return 2
@@ -173,7 +279,14 @@ def main() -> int:
         exif[270] = f"MemoLens privacy-safe demo scene: {scene.filename}"
         image.save(output / scene.filename, format="JPEG", quality=91, optimize=True, exif=exif)
 
-    print(f"Created {len(SCENES)} synthetic photos in {output}")
+    video_count = 0
+    if not args.photos_only:
+        assert ffmpeg is not None
+        for video in DEMO_VIDEOS:
+            create_demo_video(output, video, ffmpeg=ffmpeg)
+            video_count += 1
+
+    print(f"Created {len(SCENES)} synthetic photos and {video_count} synthetic videos in {output}")
     return 0
 
 

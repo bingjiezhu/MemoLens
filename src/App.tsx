@@ -48,6 +48,7 @@ import type {
 } from "./query/types";
 
 const AtlasView = lazy(() => import("./AtlasView"));
+const VideoWorkbench = lazy(() => import("./VideoWorkbench"));
 
 const PIPELINE_LENGTH = 4;
 const LOCAL_BACKEND_URL = "http://127.0.0.1:5519";
@@ -1585,7 +1586,7 @@ function App() {
       complete: health.state === "connected",
     },
     {
-      label: "Photo library",
+      label: "Media library",
       detail: selectedFolderPath ? "Folder selected" : "Choose a folder",
       complete: Boolean(selectedFolderPath),
     },
@@ -1715,7 +1716,7 @@ function App() {
         : "Retry connection"
       : !selectedFolderPath
         ? desktopRuntime
-          ? "Choose photo folder"
+          ? "Choose media folder"
           : "Set library path"
         : !hasIndexedLibrary
           ? scopedIndexStatusError
@@ -1739,23 +1740,26 @@ function App() {
           <span className="brand-mark">M</span>
           <span className="brand-text">
             MemoLens
-            <small>Local Photo Agent</small>
+            <small>Local Media Agent</small>
           </span>
         </a>
 
         <div className="nav-links-shell">
         <nav className="nav-links" aria-label="Primary">
+          <a href="#control" onClick={(event) => handleSectionNav(event, "control")}>
+            Setup
+          </a>
           <a href="#library" onClick={(event) => handleSectionNav(event, "library")}>
             Library
           </a>
           <a href="#atlas" onClick={(event) => handleSectionNav(event, "atlas")}>
             Workbench
           </a>
-          <a href="#compose" onClick={(event) => handleSectionNav(event, "compose")}>
-            Compose
+          <a href="#video-studio" onClick={(event) => handleSectionNav(event, "video-studio")}>
+            Create video
           </a>
-          <a href="#control" onClick={(event) => handleSectionNav(event, "control")}>
-            Setup
+          <a href="#compose" onClick={(event) => handleSectionNav(event, "compose")}>
+            Photo compose
           </a>
           <a href="#result" onClick={(event) => handleSectionNav(event, "result")}>
             Result
@@ -1775,14 +1779,14 @@ function App() {
       <main className="page-shell">
         <section className="hero-section" id="hero">
           <div className="hero-copy">
-            <p className="eyebrow">Local Photo Agent</p>
+            <p className="eyebrow">Local Media Agent</p>
             <h1>
-              Ask your photo library
-              <span> to find, filter, and shape a set.</span>
+              Ask your media library
+              <span> to find, shape, and cut a story.</span>
             </h1>
             <p className="hero-lede">
               Keep the originals on your machine. MemoLens builds a searchable memory layer,
-              explains the selection, and turns an idea into a coherent photo story.
+              explains every selection, and turns an idea into a grounded photo story or video first cut.
             </p>
             <div className="action-row hero-actions">
               <button
@@ -2413,6 +2417,24 @@ function App() {
             basketAssetIds={basketAssetIds}
             onBasketToggle={handleToggleAtlasBasketAsset}
             onBasketAddMany={handleAddAtlasBasketAssets}
+          />
+        </Suspense>
+
+        <Suspense
+          fallback={
+            <section className="section-block video-workbench" id="video-studio" aria-labelledby="video-studio-loading-title">
+              <p className="eyebrow">Video Creative Workbench</p>
+              <h2 id="video-studio-loading-title">Loading the local editing workspace…</h2>
+            </section>
+          }
+        >
+          <VideoWorkbench
+            apiBase={apiBase}
+            imageLibraryDir={selectedFolderPath ?? health.imageLibraryDir ?? null}
+            dbPath={selectedDbPath ?? health.dbPath ?? null}
+            canUseBackend={health.state === "connected"}
+            desktopRuntime={desktopRuntime}
+            indexedAssetCount={scopedIndexCount}
           />
         </Suspense>
 
