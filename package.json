@@ -1,5 +1,5 @@
 {
-  "name": "memolens-frontend",
+  "name": "memolens",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -16,7 +16,7 @@
     "electron:open": "bash ./scripts/prepare_desktop_runtime.sh && bash ./scripts/run_desktop_runtime.sh",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
-    "verify:local": "python3 scripts/verify_local_deployment.py && npm run typecheck"
+    "verify:local": "bash ./scripts/verify_local.sh"
   },
   "dependencies": {
     "react": "^19.1.0",

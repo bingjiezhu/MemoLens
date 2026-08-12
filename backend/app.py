@@ -3,9 +3,15 @@ from pathlib import Path
 import sys
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BACKEND_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BACKEND_DIR.parent
+
+# Prefer backend/ on sys.path so `import src` resolves to backend/src,
+# not the React renderer folder at repo-root src/.
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 from src import create_app
 

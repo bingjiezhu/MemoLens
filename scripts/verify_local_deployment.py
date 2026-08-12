@@ -111,6 +111,16 @@ def main() -> int:
             "db_path": str(state_dir / "storage" / "photo_index.db"),
         },
     )
+    chinese_query_response = client.post(
+        "/v1/retrieval/query",
+        json={
+            "text": "安静的海边日落",
+            "top_k": 3,
+            "include_copy": False,
+            "image_library_dir": str(photos_dir),
+            "db_path": str(state_dir / "storage" / "photo_index.db"),
+        },
+    )
     missing_db_query_response = client.post(
         "/v1/retrieval/query",
         json={
@@ -409,6 +419,9 @@ def main() -> int:
         "no_people_beach_query_status": no_people_beach_query_response.status_code,
         "no_people_beach_query_result_status": no_people_beach_query_response.json["status"],
         "no_people_beach_query_candidate_count": len(no_people_beach_query_response.json["data"]),
+        "chinese_query_status": chinese_query_response.status_code,
+        "chinese_query_result_status": chinese_query_response.json["status"],
+        "chinese_query_candidate_count": len(chinese_query_response.json["data"]),
         "missing_db_query_status": missing_db_query_response.status_code,
         "atlas_status_status": atlas_status_response.status_code,
         "atlas_status_needs_rebuild": (
