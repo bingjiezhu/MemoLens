@@ -3,6 +3,23 @@
 All notable changes to MemoLens are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-08-12
+
+### Changed
+
+- Split the largest mixed-responsibility paths into focused domain services, pure contracts, and thin facades across Flask media import/search/timeline/rendering, React draft and basket state, Electron process/index coordination, and the Codex plugin transport/read store.
+- Reduced the main renderer, retrieval, timeline, desktop, frontend API, and plugin entry points while preserving their public requests, responses, error codes, ordering, timeouts, cancellation, and privacy boundaries.
+- Added an enforced McCabe complexity ceiling for new or substantially changed Python code, documented architecture boundaries, and made the canonical Node test command cover every Electron and renderer model suite.
+
+### Fixed
+
+- Kept render source inspection compatible with supported Python runtimes by using the portable no-follow `os.stat` form.
+- Made injected Electron indexing batch sizes total and safe instead of allowing a non-positive value to stall iteration.
+
+### Tests
+
+- Added direct characterization coverage for media imports, mixed ranking, render planning/source verification/publication, draft generation, basket persistence models, video API adapters, video sessions and job summaries, Electron backend/indexing lifecycles, and Codex plugin transport/read-only storage.
+
 ## [0.3.0] - 2026-08-12
 
 ### Added
@@ -55,5 +72,6 @@ All notable changes to MemoLens are documented here. The project follows
 - Hardened the loopback API, backend identity checks, Electron sandbox/navigation/IPC boundaries, local file serving, and release build freshness.
 - Distinguished empty, partial, and failed indexing outcomes instead of presenting them as successful work.
 
+[0.3.1]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.3.1
 [0.3.0]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.3.0
 [0.2.0]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.2.0

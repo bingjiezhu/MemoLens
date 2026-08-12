@@ -7,9 +7,7 @@ import os
 import re
 import sqlite3
 import stat
-import time
 import uuid
-from ipaddress import ip_address
 from io import BytesIO
 from pathlib import Path
 
@@ -36,6 +34,7 @@ from backend.src import (
     reload_runtime,
 )
 from indexing.files import ensure_heif_support
+from backend.src.media.importing import MediaImportService
 from backend.src.media.render import ffmpeg_encode_capability
 from backend.src.media.director import CreativeBriefError
 from backend.src.media.timeline import TimelineValidationError
@@ -43,29 +42,14 @@ from backend.src.media.video import (
     IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
     binary_capability,
-    discover_media,
-    mime_type_for,
     sha256_file,
 )
+from backend.src.security import is_local_remote_addr as _is_local_remote_addr
 
 
 ensure_heif_support()
 
 api_blueprint = Blueprint("api", __name__)
-
-
-def _is_local_remote_addr(remote_addr: str | None) -> bool:
-    normalized = str(remote_addr or "").strip()
-    if not normalized:
-        return False
-    try:
-        address = ip_address(normalized)
-    except ValueError:
-        return False
-    if address.is_loopback:
-        return True
-    ipv4_mapped = getattr(address, "ipv4_mapped", None)
-    return bool(ipv4_mapped and ipv4_mapped.is_loopback)
 
 
 def _request_is_local() -> bool:
@@ -1420,21 +1404,6 @@ def _import_root(payload: dict[str, object]) -> tuple[str, Path]:
     return str(registered["id"]), configured
 
 
-def _hash_for_import(path: Path, deadline: float) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while True:
-            if time.monotonic() > deadline:
-                raise ValueError(
-                    "import_manifest_timeout: synchronous import exceeded 30 seconds; use smaller relative_paths batches."
-                )
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 @api_blueprint.route("/v1/assets/import", methods=["POST"])
 def import_media_assets():
     denied = _require_media_desktop_token()
@@ -1448,149 +1417,26 @@ def import_media_assets():
         if existing:
             return _replay_idempotency(existing)
         root_id, root = _import_root(payload)
-        recursive = payload.get("recursive", True)
-        dry_run = payload.get("dry_run", False)
-        if not isinstance(recursive, bool) or not isinstance(dry_run, bool):
-            raise ValueError("`recursive` and `dry_run` must be booleans.")
-        raw_paths = payload.get("relative_paths")
-        if raw_paths is not None and (
-            not isinstance(raw_paths, list)
-            or not raw_paths
-            or any(not isinstance(value, str) or not value.strip() for value in raw_paths)
-        ):
-            raise ValueError("`relative_paths` must be a non-empty string array when set.")
-        raw_kinds = payload.get("kinds", ["image", "video"])
-        if (
-            not isinstance(raw_kinds, list)
-            or not raw_kinds
-            or any(value not in {"image", "video"} for value in raw_kinds)
-        ):
-            raise ValueError("`kinds` must be a non-empty array containing only image and/or video.")
-        kinds = list(dict.fromkeys(str(value) for value in raw_kinds))
-        extensions: set[str] = set()
-        if "image" in kinds:
-            extensions.update(IMAGE_EXTENSIONS)
-        if "video" in kinds:
-            extensions.update(VIDEO_EXTENSIONS)
-        max_manifest_files = 500
-        max_manifest_bytes = 20 * 1024 * 1024 * 1024
-        import_deadline = time.monotonic() + 30.0
-        paths = discover_media(
-            root,
-            recursive=recursive,
-            files=raw_paths,
-            extensions=extensions,
-            max_files=max_manifest_files,
-            max_total_bytes=max_manifest_bytes,
-            deadline=import_deadline,
-        )
-        assets: list[dict[str, object]] = []
-        jobs: list[dict[str, object]] = []
-        rejected: list[dict[str, object]] = []
-        imported_count = 0
-        skipped_count = 0
-        for path in paths:
-            if time.monotonic() > import_deadline:
-                raise ValueError(
-                    "import_manifest_timeout: synchronous import exceeded 30 seconds; use smaller relative_paths batches."
-                )
-            relative = path.relative_to(root).as_posix()
-            try:
-                metadata = path.lstat()
-                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-                    raise ValueError("Media source must be a regular non-symlink file.")
-                kind = "video" if path.suffix.casefold() in VIDEO_EXTENSIONS else "image"
-                digest = _hash_for_import(path, import_deadline)
-                source_id = _media_repository().source_id(root_id, relative)
-                existing_source = _media_repository().get_asset_source(source_id)
-                if existing_source and existing_source.get("sha256") == digest:
-                    action = "unchanged"
-                    skipped_count += 1
-                else:
-                    action = "rebound" if existing_source else "imported"
-                    imported_count += 1
-                if dry_run:
-                    assets.append(
-                        {
-                            "kind": kind,
-                            "filename": path.name,
-                            "relative_path": relative,
-                            "sha256": digest,
-                            "action": action,
-                        }
-                    )
-                    continue
-                asset = _media_repository().upsert_asset_source(
-                    root_id=root_id,
-                    relative_path=relative,
-                    filename=path.name,
-                    kind=kind,
-                    sha256=digest,
-                    mime_type=mime_type_for(path, kind),
-                    file_size=metadata.st_size,
-                    mtime_ns=metadata.st_mtime_ns,
-                    source_file_id=str(metadata.st_ino),
-                )
-                asset["action"] = action
-                assets.append(asset)
-                if kind == "image":
-                    try:
-                        with Image.open(path) as source_image:
-                            width, height = ImageOps.exif_transpose(source_image).size
-                        _media_repository().update_image_probe(str(asset["id"]), width=width, height=height)
-                        asset["probe_status"] = "ready"
-                    except (OSError, UnidentifiedImageError) as exc:
-                        _media_repository().mark_asset_failed(str(asset["id"]), "invalid_image")
-                        rejected.append(
-                            {
-                                "relative_path": relative,
-                                "code": "invalid_image",
-                                "message": str(exc),
-                                "retryable": False,
-                            }
-                        )
-                else:
-                    current = _media_repository().get_asset(str(asset["id"]))
-                    if current and current.get("probe_status") == "ready" and current.get("id"):
-                        # Existing successful content keeps its immutable current analysis.
-                        with _media_repository()._connect() as connection:
-                            has_head = connection.execute(
-                                "SELECT 1 FROM asset_analysis_heads WHERE asset_id=?", (asset["id"],)
-                            ).fetchone()
-                    else:
-                        has_head = None
-                    if not has_head:
-                        prior_job = _media_repository().latest_media_job_for_asset(str(asset["id"]))
-                        if action != "unchanged" or prior_job is None or prior_job.get("status") in {
-                            "queued",
-                            "running",
-                            "cancelling",
-                        }:
-                            job = _media_repository().create_analysis_job(
-                                asset_id=str(asset["id"]), reuse_active=True
-                            )
-                            jobs.append(_public_job(job))
-                            current_app.extensions["media_job_runner"].submit(str(job["id"]))
-            except (OSError, ValueError) as exc:
-                rejected.append(
-                    {"relative_path": relative, "code": "import_rejected", "message": str(exc), "retryable": False}
-                )
-        status = "dry_run" if dry_run else ("partial" if rejected else "succeeded" if not jobs else "queued")
+        result = MediaImportService(
+            _media_repository(),
+            current_app.extensions["media_job_runner"],
+        ).import_assets(root_id=root_id, root=root, payload=payload)
+        jobs = [_public_job(job) for job in result.jobs]
         body: dict[str, object] = {
             "object": "asset.import",
             "schema_version": "1",
             "id": f"import_{uuid.uuid4().hex}",
-            "status": status,
-            "dry_run": dry_run,
-            "kinds": kinds,
-            "assets": assets,
-            "asset_ids": [str(value.get("id")) for value in assets if value.get("id")],
+            "status": result.status,
+            "dry_run": result.dry_run,
+            "kinds": result.kinds,
+            "assets": result.assets,
+            "asset_ids": [str(value.get("id")) for value in result.assets if value.get("id")],
             "jobs": jobs,
             "job": jobs[0] if jobs else None,
             "job_id": jobs[0]["id"] if jobs else None,
-            "imported": imported_count,
-            "skipped": skipped_count,
-            "rejected": rejected,
+            "imported": result.imported,
+            "skipped": result.skipped,
+            "rejected": result.rejected,
             "external_analysis": False,
         }
         _idempotency_finish(scope, idempotency_key, body, 202 if jobs else 200)

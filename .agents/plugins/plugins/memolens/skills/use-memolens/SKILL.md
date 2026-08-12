@@ -5,7 +5,7 @@ description: Search and review a user's private local photo, video, and audio me
 
 # Use MemoLens
 
-Use MemoLens as a private retrieval and planning layer. Version 0.3.0 exposes read-only retrieval plus pure, unsaved Timeline 1.0 drafting. It never imports, saves, renders, exports, deletes, or modifies media.
+Use MemoLens as a private retrieval and planning layer. Version 0.3.1 exposes read-only retrieval plus pure, unsaved Timeline 1.0 drafting. It never imports, saves, renders, exports, deletes, or modifies media.
 
 ## Trust modes
 
@@ -21,7 +21,7 @@ Safe-default mode never opens a socket or performs DNS. It discovers SQLite only
 4. For a video plan, pass selected matches to `memolens_timeline_draft`. Every item needs `asset_id`, `asset_source_id`, `asset_sha256`, and integer milliseconds. A video item also needs `segment_id`, `analysis_run_id`, and `analysis_revision`. Use `memolens_timeline_revise_draft` only with its typed operations, including explicit `relink_source` when a source binding changes.
 5. Call `memolens_timeline_validate` before presenting a draft. This is pure structural validation; it does not certify current file availability. Use `memolens_timeline_list` or `memolens_timeline_get` only to read already-persisted immutable revisions.
 6. Show the draft and operation diff to the user. Make clear that it is not saved. Direct the user to review, confirm, and import the JSON in the MemoLens desktop workflow; never claim import succeeded unless the desktop app confirms it.
-7. If the user asks to save, preview, render, export, cancel, overwrite, or choose an output directory, explain that plugin 0.3.0 intentionally exposes no such tool. Do not call backend routes directly or treat `MEMOLENS_PLUGIN_TRUST_LOCAL_API=1` as permission.
+7. If the user asks to save, preview, render, export, cancel, overwrite, or choose an output directory, explain that plugin 0.3.1 intentionally exposes no such tool. Do not call backend routes directly or treat `MEMOLENS_PLUGIN_TRUST_LOCAL_API=1` as permission.
 
 ## Photo inspection
 
