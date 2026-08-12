@@ -59,6 +59,10 @@ import {
   persistVideoSession,
   readPersistedVideoSession,
 } from "./video/session";
+import {
+  deriveVideoWorkflow,
+  type VideoWorkflowId,
+} from "./video/workflow";
 import type {
   CreativeBriefInput,
   CreativeTimeline,
@@ -141,6 +145,10 @@ function VideoWorkbench({
   const [importSummary, setImportSummary] = useState<string | null>(null);
   const [isWriting, setIsWriting] = useState(false);
   const [isSavingArtifact, setIsSavingArtifact] = useState(false);
+  const [artifactSaved, setArtifactSaved] = useState(false);
+  const [ideaConfirmed, setIdeaConfirmed] = useState(false);
+  const [materialsConfirmed, setMaterialsConfirmed] = useState(false);
+  const [expandedStep, setExpandedStep] = useState<VideoWorkflowId>("idea");
   const [recoveredRenderJobs, setRecoveredRenderJobs] = useState<RenderJob[]>([]);
   const scopeRef = useRef(scopeKey);
   const requestControllersRef = useRef(new Set<AbortController>());
@@ -176,6 +184,21 @@ function VideoWorkbench({
     desktopRuntime
     && state.capabilities?.verified_preview_save_as,
   );
+  const workflow = useMemo(() => deriveVideoWorkflow({
+    idea: ideaConfirmed || Boolean(state.project),
+    materials: materialsConfirmed || Boolean(state.project),
+    brief: Boolean(state.project),
+    timeline: Boolean(state.timeline),
+    preview: renderCompleted,
+    save: artifactSaved,
+  }), [
+    artifactSaved,
+    ideaConfirmed,
+    materialsConfirmed,
+    renderCompleted,
+    state.project,
+    state.timeline,
+  ]);
   const renderMediaUrl = state.renderJob
     ? resolveVideoResourceUrl(apiBase, state.renderJob.media_url ?? state.renderJob.output?.media_url ?? state.renderJob.download_url)
     : null;
@@ -317,8 +340,20 @@ function VideoWorkbench({
     setSelectedRefs([]);
     setPendingInstruction(null);
     setImportSummary(null);
+    setArtifactSaved(false);
+    setIdeaConfirmed(false);
+    setMaterialsConfirmed(false);
+    setExpandedStep("idea");
     setRecoveredRenderJobs([]);
   }, [scopeKey]);
+
+  useEffect(() => {
+    setExpandedStep(workflow.currentId);
+  }, [workflow.currentId]);
+
+  useEffect(() => {
+    setArtifactSaved(false);
+  }, [state.renderJob?.id]);
 
   useEffect(() => () => {
     for (const controller of requestControllersRef.current) controller.abort();
@@ -1058,8 +1093,10 @@ function VideoWorkbench({
         expectedSha256,
         expectedSizeBytes,
       });
+      setArtifactSaved(result?.status === "saved");
       dispatch({ type: "save_message", message: result?.message ?? "Desktop save bridge is unavailable." });
     } catch (error) {
+      setArtifactSaved(false);
       dispatch({ type: "save_message", message: humanError(error, "Video could not be saved.") });
     } finally {
       setIsSavingArtifact(false);
@@ -1093,6 +1130,14 @@ function VideoWorkbench({
   const selectedVideoSrc = selectedSegmentMedia && selectedMatch?.start_ms !== null && selectedMatch?.end_ms !== null
     ? `${selectedSegmentMedia}#t=${Math.max(0, (selectedMatch?.start_ms ?? 0) / 1000)},${Math.max(0, (selectedMatch?.end_ms ?? 0) / 1000)}`
     : selectedSegmentMedia;
+  const workflowSummaries: Record<VideoWorkflowId, string> = {
+    idea: brief.goal.length > 38 ? `${brief.goal.slice(0, 38)}…` : brief.goal,
+    materials: `${selectedRefs.length || state.project?.candidates.length || indexedAssetCount} grounded asset${(selectedRefs.length || state.project?.candidates.length || indexedAssetCount) === 1 ? "" : "s"}`,
+    brief: state.project ? `${state.project.title} · r${state.project.brief.revision}` : "Creative constraints",
+    timeline: state.timeline ? `r${state.timeline.revision} · ${timelineClips.length} clips · ${formatMilliseconds(state.timeline.format.duration_ms)}` : "Immutable first cut",
+    preview: state.renderJob ? state.renderJob.filename ?? state.renderJob.output?.filename ?? "Rendered preview" : "Bounded local render",
+    save: artifactSaved ? "Verified copy saved" : "Verified Save As",
+  };
 
   return (
     <section className="section-block video-workbench" id="video-studio" aria-labelledby="video-studio-title">
@@ -1113,37 +1158,106 @@ function VideoWorkbench({
       </div>
 
       <ol className="video-stepper" aria-label="Video creation progress">
-        {[
-          ["Setup", previewCapabilityReady],
-          ["Library", state.indexJobs.some((job) => isUsableJobStatus(job.status)) || indexedAssetCount > 0],
-          ["Create", Boolean(state.project)],
-          ["Storyboard", Boolean(state.timeline)],
-          ["Preview / Save", renderCompleted],
-        ].map(([label, complete], index) => (
-          <li key={String(label)} className={complete ? "complete" : "pending"}>
-            <span aria-hidden="true">{complete ? "✓" : index + 1}</span>
-            <strong>{label}</strong>
+        {workflow.steps.map((step) => (
+          <li key={step.id} className={`video-step-${step.status}`}>
+            <button
+              type="button"
+              aria-controls={expandedStep === step.id ? `video-step-${step.id}-panel` : undefined}
+              aria-current={step.id === workflow.currentId ? "step" : undefined}
+              aria-expanded={expandedStep === step.id}
+              disabled={!step.canOpen}
+              onClick={() => setExpandedStep(step.id)}
+            >
+              <span aria-hidden="true">{step.status === "complete" ? "✓" : step.number}</span>
+              <span>
+                <strong>{step.label}</strong>
+                <small>{step.status === "complete" ? workflowSummaries[step.id] : step.status === "current" ? "Next action" : "Locked"}</small>
+              </span>
+            </button>
           </li>
         ))}
       </ol>
 
+      <p className="video-workflow-status" role="status" aria-live="polite">
+        Step {workflow.steps.find((step) => step.id === workflow.currentId)?.number} of {workflow.steps.length}: {workflow.steps.find((step) => step.id === workflow.currentId)?.label}
+      </p>
+
       <div className="video-workspace-stack">
-        <section className="video-panel" aria-labelledby="video-setup-title">
+        {expandedStep === "idea" ? (
+          <section
+            className="video-panel video-step-panel"
+            id="video-step-idea-panel"
+            aria-labelledby="video-idea-title"
+          >
+            <div className="video-panel-head">
+              <div>
+                <p className="eyebrow">01 · Idea</p>
+                <h3 id="video-idea-title">Start with the film you want to make</h3>
+                <p className="video-muted">Describe the outcome first. MemoLens will find evidence in your own library next.</p>
+              </div>
+              {state.project ? <span className="meta-pill">Saved in brief r{state.project.brief.revision}</span> : null}
+            </div>
+            <div className="video-idea-form">
+              <label className="video-field video-field-wide">
+                <span>What should this video become?</span>
+                <textarea
+                  value={brief.goal}
+                  onChange={(event) => setBrief({ ...brief, goal: event.target.value })}
+                  placeholder="A concise memory film with a calm opening and a stronger finish"
+                  required
+                />
+              </label>
+              <label className="video-field video-field-wide">
+                <span>Story direction</span>
+                <input
+                  value={brief.narrative_arc}
+                  onChange={(event) => setBrief({ ...brief, narrative_arc: event.target.value })}
+                  placeholder="Establish the place, reveal the human moment, finish with motion"
+                />
+              </label>
+              <div className="video-form-actions video-field-wide">
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={!brief.goal.trim()}
+                  onClick={() => setIdeaConfirmed(true)}
+                >
+                  Find material for this idea
+                </button>
+                <span>You can revise this direction later without touching original media.</span>
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        {expandedStep === "materials" ? (
+        <section
+          className="video-panel video-step-panel"
+          id="video-step-materials-panel"
+          aria-labelledby="video-materials-title"
+        >
           <div className="video-panel-head">
             <div>
-              <p className="eyebrow">01 · Setup</p>
-              <h3 id="video-setup-title">Runtime capability</h3>
+              <p className="eyebrow">02 · Material</p>
+              <h3 id="video-materials-title">Choose grounded images and video moments</h3>
+              <p className="video-muted">Index once, search naturally, then keep only the evidence that supports your idea.</p>
             </div>
-            <button
-              type="button"
-              className="secondary-button compact-button"
-              onClick={() => void handleRefreshCapabilities()}
-              disabled={!canUseBackend || state.capabilitiesPhase === "loading"}
-            >
-              {state.capabilitiesPhase === "loading" ? "Checking…" : "Check again"}
-            </button>
+            <span className="meta-pill">{selectedRefs.length} selected</span>
           </div>
 
+          <details className="video-setup-disclosure">
+            <summary>Local media readiness</summary>
+            <div className="video-panel-head">
+              <p className="video-muted">FFmpeg, source probing, local analysis, and verified Save As</p>
+              <button
+                type="button"
+                className="secondary-button compact-button"
+                onClick={() => void handleRefreshCapabilities()}
+                disabled={!canUseBackend || state.capabilitiesPhase === "loading"}
+              >
+                {state.capabilitiesPhase === "loading" ? "Checking…" : "Check again"}
+              </button>
+            </div>
           {state.capabilitiesPhase === "loading" ? (
             <div className="video-state-card" role="status">Checking FFmpeg, ffprobe, and local analysis modes…</div>
           ) : state.capabilitiesError ? (
@@ -1193,9 +1307,9 @@ function VideoWorkbench({
               Browser mode can search metadata and inspect available thumbnails. Source-video playback, import, revisions, rendering, and secure Save As require MemoLens Desktop.
             </p>
           ) : null}
-        </section>
+          </details>
 
-        <section className="video-panel" aria-labelledby="video-library-title">
+        <div className="video-material-section" aria-labelledby="video-library-title">
           <div className="video-panel-head">
             <div>
               <p className="eyebrow">02 · Library</p>
@@ -1272,9 +1386,9 @@ function VideoWorkbench({
           )}
           {importSummary ? <p className="video-inline-note" role="status">{importSummary}</p> : null}
           {state.indexError ? <p className="video-inline-error" role="alert">{state.indexError}</p> : null}
-        </section>
+        </div>
 
-        <section className="video-panel" aria-labelledby="video-search-title">
+        <div className="video-material-section" aria-labelledby="video-search-title">
           <div className="video-panel-head">
             <div>
               <p className="eyebrow">03 · Find material</p>
@@ -1317,7 +1431,12 @@ function VideoWorkbench({
                   const referenced = selectedRefs.includes(match.id);
                   return (
                     <article key={match.id} className={`video-source-card${selected ? " active" : ""}`}>
-                      <button type="button" className="video-source-open" onClick={() => dispatch({ type: "select_match", matchId: match.id })}>
+                      <button
+                        type="button"
+                        className="video-source-open"
+                        aria-pressed={selected}
+                        onClick={() => dispatch({ type: "select_match", matchId: match.id })}
+                      >
                         <span className="video-source-art">
                           {thumb ? <img src={thumb} alt="" loading="lazy" decoding="async" /> : <span className="video-source-placeholder">{match.result_type === "video_segment" ? "VIDEO" : "IMAGE"}</span>}
                           <em>{match.result_type === "video_segment" ? "Video segment" : "Image"}</em>
@@ -1342,7 +1461,7 @@ function VideoWorkbench({
                 })}
               </div>
 
-              <aside className="video-segment-inspector" aria-live="polite">
+              <aside className="video-segment-inspector">
                 {selectedMatch ? (
                   <>
                     <div className="video-preview-frame">
@@ -1354,7 +1473,12 @@ function VideoWorkbench({
                         ) : selectedThumb ? (
                           <img src={selectedThumb} alt={selectedMatch.title ?? "Selected video segment"} />
                         ) : (
-                          <div className="video-state-card">{state.segmentPhase === "loading" ? "Loading timestamp preview…" : "No playable proxy is available for this codec yet."}</div>
+                          <div
+                            className="video-state-card"
+                            role={state.segmentPhase === "loading" ? "status" : undefined}
+                          >
+                            {state.segmentPhase === "loading" ? "Loading timestamp preview…" : "No playable proxy is available for this codec yet."}
+                          </div>
                         )
                       ) : selectedThumb ? (
                         <img src={selectedThumb} alt={selectedMatch.title ?? "Selected image"} />
@@ -1380,7 +1504,7 @@ function VideoWorkbench({
                     ) : selectedMatch.result_type === "video_segment" ? (
                       <p className="video-muted">No transcript is available; this result relies on indexed metadata and technical evidence.</p>
                     ) : null}
-                    {state.segmentError ? <p className="video-inline-error">{state.segmentError}</p> : null}
+                    {state.segmentError ? <p className="video-inline-error" role="alert">{state.segmentError}</p> : null}
                   </>
                 ) : (
                   <div className="video-state-card">Choose a result to inspect its source range and evidence.</div>
@@ -1388,12 +1512,40 @@ function VideoWorkbench({
               </aside>
             </div>
           ) : null}
-        </section>
+        </div>
 
-        <section className="video-panel" aria-labelledby="video-create-title">
+        <div className="video-step-actions">
+          <button
+            type="button"
+            className="primary-button"
+            disabled={
+              !hasLibrary
+              || !canUseBackend
+              || !dbPath
+              || (
+                indexedAssetCount <= 0
+                && state.searchResults.length === 0
+                && !state.indexJobs.some((job) => isUsableJobStatus(job.status))
+              )
+            }
+            onClick={() => setMaterialsConfirmed(true)}
+          >
+            Use these materials
+          </button>
+          <span>Selected references will remain traceable through the brief and timeline.</span>
+        </div>
+        </section>
+        ) : null}
+
+        {expandedStep === "brief" ? (
+        <section
+          className="video-panel video-step-panel"
+          id="video-step-brief-panel"
+          aria-labelledby="video-create-title"
+        >
           <div className="video-panel-head">
             <div>
-              <p className="eyebrow">04 · Create</p>
+              <p className="eyebrow">03 · Brief</p>
               <h3 id="video-create-title">Write an explicit creative brief</h3>
               <p className="video-muted">The Director can suggest structure, but these visible constraints remain authoritative.</p>
             </div>
@@ -1487,17 +1639,20 @@ function VideoWorkbench({
                   <ul>{state.project.brief.missing_assets.map((item) => <li key={item}>{item}</li>)}</ul>
                 </div>
               ) : null}
-              <button type="button" className="primary-button" onClick={() => void handleCreateTimeline()} disabled={!canWrite || isWriting}>
-                {state.timelinePhase === "loading" ? "Building storyboard…" : "Build grounded storyboard"}
-              </button>
             </article>
           ) : null}
         </section>
+        ) : null}
 
-        <section className="video-panel" aria-labelledby="video-timeline-title">
+        {expandedStep === "timeline" ? (
+        <section
+          className="video-panel video-step-panel"
+          id="video-step-timeline-panel"
+          aria-labelledby="video-timeline-title"
+        >
           <div className="video-panel-head">
             <div>
-              <p className="eyebrow">05 · Storyboard + Timeline</p>
+              <p className="eyebrow">04 · Storyboard + Timeline</p>
               <h3 id="video-timeline-title">One immutable revision at a time</h3>
             </div>
             {state.timeline ? (
@@ -1512,15 +1667,23 @@ function VideoWorkbench({
           {!state.timeline ? (
             <div className="video-state-card">
               <strong>No storyboard yet.</strong>
-              <span>Create a grounded brief above, then build revision 1.</span>
+              <span>Your saved brief is ready. Build revision 1 from its grounded candidates.</span>
+              <button
+                type="button"
+                className="primary-button compact-button"
+                onClick={() => void handleCreateTimeline()}
+                disabled={!canWrite || !state.project || isWriting}
+              >
+                {state.timelinePhase === "loading" ? "Building storyboard…" : "Build grounded storyboard"}
+              </button>
             </div>
           ) : (
             <>
-              <div className="video-format-toolbar" aria-label="Timeline format">
+              <div className="video-format-toolbar" role="group" aria-label="Timeline format">
                 <span>Canvas</span>
-                <button type="button" disabled={isWriting} onClick={() => void applyTimelineOperations([{ op: "set_format", width: 1080, height: 1920, fps: state.timeline!.format.fps }])}>9:16</button>
-                <button type="button" disabled={isWriting} onClick={() => void applyTimelineOperations([{ op: "set_format", width: 1920, height: 1080, fps: state.timeline!.format.fps }])}>16:9</button>
-                <button type="button" disabled={isWriting} onClick={() => void applyTimelineOperations([{ op: "set_format", width: 1080, height: 1080, fps: state.timeline!.format.fps }])}>1:1</button>
+                <button type="button" aria-pressed={state.timeline.format.width === 1080 && state.timeline.format.height === 1920} disabled={isWriting} onClick={() => void applyTimelineOperations([{ op: "set_format", width: 1080, height: 1920, fps: state.timeline!.format.fps }])}>9:16</button>
+                <button type="button" aria-pressed={state.timeline.format.width === 1920 && state.timeline.format.height === 1080} disabled={isWriting} onClick={() => void applyTimelineOperations([{ op: "set_format", width: 1920, height: 1080, fps: state.timeline!.format.fps }])}>16:9</button>
+                <button type="button" aria-pressed={state.timeline.format.width === 1080 && state.timeline.format.height === 1080} disabled={isWriting} onClick={() => void applyTimelineOperations([{ op: "set_format", width: 1080, height: 1080, fps: state.timeline!.format.fps }])}>1:1</button>
               </div>
 
               <div className="video-storyboard" aria-label="Editable storyboard">
@@ -1613,12 +1776,18 @@ function VideoWorkbench({
           )}
           {state.timelineError ? <p className="video-inline-error" role="alert">{state.timelineError}</p> : null}
         </section>
+        ) : null}
 
-        <section className="video-panel" aria-labelledby="video-render-title">
+        {expandedStep === "preview" ? (
+        <section
+          className="video-panel video-step-panel"
+          id="video-step-preview-panel"
+          aria-labelledby="video-render-title"
+        >
           <div className="video-panel-head">
             <div>
-              <p className="eyebrow">06 · Preview + Save</p>
-              <h3 id="video-render-title">Validate, render a bounded preview, then save it.</h3>
+              <p className="eyebrow">05 · Preview</p>
+              <h3 id="video-render-title">Validate and render a bounded preview.</h3>
             </div>
             <div className="action-row">
               <button type="button" className="secondary-button compact-button" onClick={() => void handleValidate()} disabled={!state.timeline || state.validationPhase === "loading" || isWriting}>
@@ -1629,6 +1798,7 @@ function VideoWorkbench({
                 className="secondary-button compact-button"
                 onClick={() => void handleRender("preview")}
                 disabled={!canPreviewRender || !state.timeline || renderActive || isWriting}
+                aria-describedby={!canPreviewRender ? "video-preview-requirements" : undefined}
                 title={canPreviewRender ? "Render this immutable revision" : "FFmpeg, ffprobe, a verified encoder, preview-low, and app-managed preview storage are required"}
               >
                 Render 720p preview
@@ -1638,6 +1808,12 @@ function VideoWorkbench({
               </span>
             </div>
           </div>
+
+          {!canPreviewRender ? (
+            <p className="video-inline-warning" id="video-preview-requirements" role="note">
+              Preview requires MemoLens Desktop, the local service, FFmpeg, ffprobe, a verified encoder, and app-managed preview storage.
+            </p>
+          ) : null}
 
           {state.validation ? (
             <div className={`video-validation-card${state.validation.valid ? " valid" : " invalid"}`}>
@@ -1676,11 +1852,9 @@ function VideoWorkbench({
                 <p>{state.renderJob.message ?? (renderCompleted ? "Artifact verified and ready." : `FFmpeg stage: ${formatJobStage(state.renderJob.stage)}`)}</p>
                 <div className="action-row">
                   {renderCancellable ? <button type="button" className="secondary-button compact-button danger-button" onClick={() => void handleCancelRender()}>Cancel render</button> : null}
-                  {renderCompleted ? <button type="button" className="primary-button compact-button" onClick={() => void handleSaveArtifact()} disabled={isSavingArtifact || isWriting || !canVerifiedPreviewSaveAs}>{isSavingArtifact ? "Saving…" : canVerifiedPreviewSaveAs ? "Verify + save preview as…" : desktopRuntime ? "Verified Save As unavailable" : "Open Desktop to save"}</button> : null}
                   {["failed", "cancelled", "interrupted"].includes(state.renderJob.status) ? <button type="button" className="secondary-button compact-button" onClick={() => void handleRender(state.renderJob!.kind)}>Retry same revision</button> : null}
                 </div>
                 {state.renderJob.error ? <p className="video-inline-error">{state.renderJob.error.message}</p> : null}
-                {state.saveMessage ? <p className="video-inline-note" role="status">{state.saveMessage}</p> : null}
               </div>
             </div>
           ) : (
@@ -1691,6 +1865,66 @@ function VideoWorkbench({
           )}
           {state.renderError ? <p className="video-inline-error" role="alert">{state.renderError}</p> : null}
         </section>
+        ) : null}
+
+        {expandedStep === "save" ? (
+        <section
+          className="video-panel video-step-panel"
+          id="video-step-save-panel"
+          aria-labelledby="video-save-title"
+        >
+          <div className="video-panel-head">
+            <div>
+              <p className="eyebrow">06 · Save</p>
+              <h3 id="video-save-title">Keep a verified copy</h3>
+              <p className="video-muted">MemoLens verifies the preview digest and byte size before it writes a new MP4. Existing files are never overwritten.</p>
+            </div>
+            {state.timeline ? <span className="meta-pill">revision {state.timeline.revision}</span> : null}
+          </div>
+
+          {renderCompleted && state.renderJob ? (
+            <div className="video-render-layout">
+              <div className="video-render-player">
+                {renderMediaUrl ? (
+                  <video key={renderMediaUrl} controls preload="metadata" src={renderMediaUrl}>
+                    Your browser cannot play the rendered MP4.
+                  </video>
+                ) : (
+                  <div className="video-render-placeholder">
+                    <strong>Verified preview ready</strong>
+                    <span>{state.renderJob.filename ?? state.renderJob.output?.filename ?? "MemoLens preview"}</span>
+                  </div>
+                )}
+              </div>
+              <div className="video-render-status" aria-live="polite">
+                <div>
+                  <span>Preview artifact</span>
+                  <strong>{artifactSaved ? "Saved" : "Ready"}</strong>
+                </div>
+                <p>{state.renderJob.message ?? "The immutable preview revision passed rendering."}</p>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => void handleSaveArtifact()}
+                  disabled={isSavingArtifact || isWriting || !canVerifiedPreviewSaveAs}
+                >
+                  {isSavingArtifact
+                    ? "Verifying and saving…"
+                    : canVerifiedPreviewSaveAs
+                      ? artifactSaved ? "Save another verified copy…" : "Verify and save as…"
+                      : desktopRuntime ? "Verified Save As unavailable" : "Open Desktop to save"}
+                </button>
+                {state.saveMessage ? <p className="video-inline-note" role="status">{state.saveMessage}</p> : null}
+              </div>
+            </div>
+          ) : (
+            <div className="video-state-card">
+              <strong>No verified preview is ready.</strong>
+              <span>Return to Preview and finish a successful render before saving.</span>
+            </div>
+          )}
+        </section>
+        ) : null}
       </div>
     </section>
   );
