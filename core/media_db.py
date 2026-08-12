@@ -873,6 +873,14 @@ class MediaRepository:
             ).fetchone()
         return self._job_dict(row) if row else None
 
+    def has_analysis_head(self, asset_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM asset_analysis_heads WHERE asset_id=?",
+                (asset_id,),
+            ).fetchone()
+        return row is not None
+
     def update_media_job(
         self,
         job_id: str,

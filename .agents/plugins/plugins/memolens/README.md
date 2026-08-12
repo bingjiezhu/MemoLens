@@ -1,4 +1,4 @@
-# MemoLens Codex plugin 0.3.0
+# MemoLens Codex plugin 0.3.1
 
 MemoLens provides local, safe-default access to indexed photo, video, and audio metadata plus pure Timeline 1.0 planning. It uses only the Python standard library.
 

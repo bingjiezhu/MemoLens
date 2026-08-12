@@ -41,13 +41,27 @@ import {
   type MutationOutcome,
 } from "./video/mutationLedger";
 import {
+  defaultPreviewFilename,
+  formatJobStage,
+  formatMediaScore,
+  isActiveJobStatus,
+  isCancellableJobStatus,
+  isSuccessfulRenderStatus,
+  isUsableJobStatus,
+  summarizeMediaJobs,
+} from "./video/jobModel";
+import {
   initialVideoWorkbenchState,
   videoWorkbenchReducer,
 } from "./video/projectReducer";
+import {
+  createVideoScopeKey,
+  persistVideoSession,
+  readPersistedVideoSession,
+} from "./video/session";
 import type {
   CreativeBriefInput,
   CreativeTimeline,
-  MediaJob,
   RenderJob,
   RenderKind,
   TimelineClip,
@@ -66,12 +80,6 @@ interface VideoWorkbenchProps {
   indexedAssetCount?: number;
 }
 
-interface PersistedVideoSession {
-  projectId: string;
-  timelineId: string | null;
-  timelineRevision: number | null;
-}
-
 interface PendingInstruction {
   instruction: string;
   operations: TimelineOperation[];
@@ -80,11 +88,6 @@ interface PendingInstruction {
   unrecognized: string[];
   mode: "server" | "local";
 }
-
-const ACTIVE_JOB_STATES = new Set(["queued", "running", "cancelling"]);
-const CANCELLABLE_JOB_STATES = new Set(["queued", "running"]);
-const USABLE_JOB_STATES = new Set(["succeeded", "completed", "partial"]);
-const RENDER_SUCCESS_STATES = new Set(["succeeded", "completed"]);
 
 const INITIAL_BRIEF: CreativeBriefInput = {
   goal: "Create a concise memory film with a calm opening and a stronger finish.",
@@ -114,65 +117,6 @@ function splitTerms(value: string): string[] {
     .filter((term, index, terms) => term.length > 0 && terms.indexOf(term) === index);
 }
 
-function formatJobStage(value: string): string {
-  return value.replace(/[_-]+/g, " ").replace(/^./, (letter) => letter.toUpperCase());
-}
-
-function formatScore(value: number): string {
-  return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
-}
-
-function jobSummary(jobs: MediaJob[]): { progress: number; active: number; failed: number; completed: number } {
-  if (jobs.length === 0) return { progress: 0, active: 0, failed: 0, completed: 0 };
-  return {
-    progress: Math.round(jobs.reduce((total, job) => total + job.progress, 0) / jobs.length),
-    active: jobs.filter((job) => ACTIVE_JOB_STATES.has(job.status)).length,
-    failed: jobs.filter((job) => job.status === "failed").length,
-    completed: jobs.filter((job) => USABLE_JOB_STATES.has(job.status)).length,
-  };
-}
-
-function scopeFingerprint(value: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
-}
-
-function sessionStorageKey(scopeKey: string): string {
-  return `memolens.video.session.${scopeFingerprint(scopeKey)}`;
-}
-
-function readPersistedSession(scopeKey: string): PersistedVideoSession | null {
-  if (!scopeKey.replace("\u001f", "").trim()) return null;
-  try {
-    const parsed = JSON.parse(localStorage.getItem(sessionStorageKey(scopeKey)) ?? "null") as Partial<PersistedVideoSession> | null;
-    if (!parsed || typeof parsed.projectId !== "string" || !parsed.projectId) return null;
-    return {
-      projectId: parsed.projectId,
-      timelineId: typeof parsed.timelineId === "string" ? parsed.timelineId : null,
-      timelineRevision: typeof parsed.timelineRevision === "number" ? parsed.timelineRevision : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function persistSession(scopeKey: string, session: PersistedVideoSession): void {
-  try {
-    localStorage.setItem(sessionStorageKey(scopeKey), JSON.stringify(session));
-  } catch {
-    // Project persistence remains authoritative in SQLite. A blocked browser
-    // storage area should not prevent editing or rendering.
-  }
-}
-
-function defaultExportFilename(timeline: CreativeTimeline): string {
-  return `memolens-${timeline.project_id}-r${timeline.revision}.mp4`;
-}
-
 function VideoWorkbench({
   apiBase,
   imageLibraryDir,
@@ -181,7 +125,7 @@ function VideoWorkbench({
   desktopRuntime,
   indexedAssetCount = 0,
 }: VideoWorkbenchProps) {
-  const scopeKey = `${imageLibraryDir?.trim() ?? ""}\u001f${dbPath?.trim() ?? ""}`;
+  const scopeKey = createVideoScopeKey(imageLibraryDir, dbPath);
   const [state, dispatch] = useReducer(
     videoWorkbenchReducer,
     scopeKey,
@@ -210,13 +154,13 @@ function VideoWorkbench({
     [state.timeline],
   );
   const timelineTrack = state.timeline ? editableTimelineTrack(state.timeline) : null;
-  const indexRollup = useMemo(() => jobSummary(state.indexJobs), [state.indexJobs]);
-  const activeIndexJobs = state.indexJobs.filter((job) => ACTIVE_JOB_STATES.has(job.status));
-  const cancellableIndexJobs = state.indexJobs.filter((job) => CANCELLABLE_JOB_STATES.has(job.status));
+  const indexRollup = useMemo(() => summarizeMediaJobs(state.indexJobs), [state.indexJobs]);
+  const activeIndexJobs = state.indexJobs.filter((job) => isActiveJobStatus(job.status));
+  const cancellableIndexJobs = state.indexJobs.filter((job) => isCancellableJobStatus(job.status));
   const interruptedIndexJobs = state.indexJobs.filter((job) => job.status === "interrupted");
-  const renderActive = Boolean(state.renderJob && ACTIVE_JOB_STATES.has(state.renderJob.status));
-  const renderCancellable = Boolean(state.renderJob && CANCELLABLE_JOB_STATES.has(state.renderJob.status));
-  const renderCompleted = Boolean(state.renderJob && RENDER_SUCCESS_STATES.has(state.renderJob.status));
+  const renderActive = Boolean(state.renderJob && isActiveJobStatus(state.renderJob.status));
+  const renderCancellable = Boolean(state.renderJob && isCancellableJobStatus(state.renderJob.status));
+  const renderCompleted = Boolean(state.renderJob && isSuccessfulRenderStatus(state.renderJob.status));
   const previewCapabilityReady = Boolean(
     state.capabilities?.ffmpeg.available
     && state.capabilities.ffprobe.available
@@ -257,7 +201,7 @@ function VideoWorkbench({
   }
 
   function persistTimelineHead(projectId: string, timeline: CreativeTimeline): void {
-    persistSession(scopeKey, {
+    persistVideoSession(window.localStorage, scopeKey, {
       projectId,
       timelineId: timeline.id,
       timelineRevision: timeline.revision,
@@ -338,7 +282,7 @@ function VideoWorkbench({
         job.timeline_id === input.timelineId
         && job.timeline_revision === input.revision
         && job.kind === input.kind
-        && (!input.knownJobIds.has(job.id) || ACTIVE_JOB_STATES.has(job.status))
+        && (!input.knownJobIds.has(job.id) || isActiveJobStatus(job.status))
       ));
       if (!matching) return false;
       dispatch({ type: "render_job", job: matching });
@@ -436,7 +380,7 @@ function VideoWorkbench({
 
   useEffect(() => {
     if (!canUseBackend || !dbPath || state.project || state.projectPhase !== "idle") return;
-    const saved = readPersistedSession(scopeKey);
+    const saved = readPersistedVideoSession(window.localStorage, scopeKey);
     if (!saved) return;
     const capturedScope = scopeKey;
     const controller = createTrackedController();
@@ -498,7 +442,7 @@ function VideoWorkbench({
   }, [apiBase, scopeKey, activeIndexJobs.map((job) => `${job.id}:${job.status}`).join("|")]);
 
   useEffect(() => {
-    if (!state.renderJob || !ACTIVE_JOB_STATES.has(state.renderJob.status)) return;
+    if (!state.renderJob || !isActiveJobStatus(state.renderJob.status)) return;
     const capturedScope = scopeKey;
     const renderJobId = state.renderJob.id;
     let stopped = false;
@@ -729,7 +673,11 @@ function VideoWorkbench({
       mutationLedger.settle(lease, { kind: "success" });
       if (!isCurrentScope(capturedScope)) return;
       dispatch({ type: "project_ready", project });
-      persistSession(scopeKey, { projectId: project.id, timelineId: null, timelineRevision: null });
+      persistVideoSession(window.localStorage, scopeKey, {
+        projectId: project.id,
+        timelineId: null,
+        timelineRevision: null,
+      });
     } catch (error) {
       settleMutationError(lease, error);
       if (!controller.signal.aborted && isCurrentScope(capturedScope)) {
@@ -1085,7 +1033,7 @@ function VideoWorkbench({
   async function handleSaveArtifact(): Promise<void> {
     if (!state.renderJob || !renderCompleted || !state.timeline) return;
     const artifactUrl = renderDownloadUrl(apiBase, state.renderJob);
-    const filename = state.renderJob.filename ?? state.renderJob.output?.filename ?? defaultExportFilename(state.timeline);
+    const filename = state.renderJob.filename ?? state.renderJob.output?.filename ?? defaultPreviewFilename(state.timeline);
     if (!canVerifiedPreviewSaveAs) {
       dispatch({
         type: "save_message",
@@ -1167,7 +1115,7 @@ function VideoWorkbench({
       <ol className="video-stepper" aria-label="Video creation progress">
         {[
           ["Setup", previewCapabilityReady],
-          ["Library", state.indexJobs.some((job) => USABLE_JOB_STATES.has(job.status)) || indexedAssetCount > 0],
+          ["Library", state.indexJobs.some((job) => isUsableJobStatus(job.status)) || indexedAssetCount > 0],
           ["Create", Boolean(state.project)],
           ["Storyboard", Boolean(state.timeline)],
           ["Preview / Save", renderCompleted],
@@ -1387,7 +1335,7 @@ function VideoWorkbench({
                       <label className="video-source-check">
                         <input type="checkbox" checked={referenced} onChange={() => toggleReference(match.id)} />
                         <span>Use in brief</span>
-                        <em>{formatScore(match.score)}</em>
+                        <em>{formatMediaScore(match.score)}</em>
                       </label>
                     </article>
                   );
@@ -1419,7 +1367,7 @@ function VideoWorkbench({
                     <p>{selectedMatch.summary}</p>
                     <div className="meta-pills">
                       {selectedMatch.provenance.map((source) => <span key={source} className="meta-pill">{source}</span>)}
-                      {selectedMatch.confidence !== null ? <span className="meta-pill">confidence {formatScore(selectedMatch.confidence)}</span> : null}
+                      {selectedMatch.confidence !== null ? <span className="meta-pill">confidence {formatMediaScore(selectedMatch.confidence)}</span> : null}
                       {selectedMatch.analysis_revision !== null ? <span className="meta-pill">analysis r{selectedMatch.analysis_revision}</span> : null}
                     </div>
                     {state.segment?.transcript.length ? (

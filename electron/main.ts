@@ -1,8 +1,8 @@
 import { createWriteStream, existsSync } from "node:fs";
-import { link, readdir, unlink } from "node:fs/promises";
+import { link, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { dirname, extname, join, relative, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -24,12 +24,11 @@ import {
   normalizeSha256Etag,
   parseArtifactIntegrityProof,
 } from "./artifactIntegrity.js";
+import { DesktopIndexingCoordinator } from "./indexingCoordinator.js";
 
 import type {
   DesktopSettings,
   DesktopFolderSelection,
-  DesktopIndexingPhase,
-  DesktopIndexingProgress,
   DesktopIndexingResult,
   DesktopIndexingStartOptions,
 } from "../src/query/types.js";
@@ -41,21 +40,6 @@ import type {
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog, ipcMain } =
   require("electron") as typeof Electron.CrossProcessExports;
-
-const SUPPORTED_IMAGE_EXTENSIONS = new Set([
-  ".jpg",
-  ".jpeg",
-  ".png",
-  ".webp",
-  ".bmp",
-  ".gif",
-  ".tif",
-  ".tiff",
-  ".heic",
-  ".heif",
-]);
-
-const LOCAL_INDEX_BATCH_SIZE = 6;
 
 const CURRENT_FILE = fileURLToPath(import.meta.url);
 const CURRENT_DIR = dirname(CURRENT_FILE);
@@ -80,16 +64,12 @@ function resolveProjectRoot(): string {
 }
 
 const PROJECT_ROOT = resolveProjectRoot();
+const indexingCoordinator = new DesktopIndexingCoordinator({
+  apiBase: DEFAULT_BACKEND_URL,
+  getSessionToken: getDesktopSessionToken,
+  resolveDbPath: resolveSelectedDbPath,
+});
 
-interface ActiveIndexingJob {
-  sender: Electron.WebContents;
-  progress: DesktopIndexingProgress;
-  pauseRequested: boolean;
-  resumeResolvers: Array<() => void>;
-}
-
-let activeIndexingJob: ActiveIndexingJob | null = null;
-let indexingStartInProgress = false;
 let desktopSessionAuthenticationConfigured = false;
 const trustedRendererEntries = new Map<number, string>();
 
@@ -226,39 +206,6 @@ function createWindow(): Electron.BrowserWindow {
   });
 
   return window;
-}
-
-async function collectImageFiles(folderPath: string): Promise<string[]> {
-  const entries = await readdir(folderPath, { withFileTypes: true });
-  const nested = await Promise.all(
-    entries.map(async (entry) => {
-      const entryPath = join(folderPath, entry.name);
-      if (entry.isDirectory()) {
-        return collectImageFiles(entryPath);
-      }
-      if (entry.isFile() && SUPPORTED_IMAGE_EXTENSIONS.has(extname(entry.name).toLowerCase())) {
-        return [entryPath];
-      }
-      return [];
-    }),
-  );
-  return nested.flat().sort();
-}
-
-function toRelativePath(rootPath: string, filePath: string): string {
-  return relative(rootPath, filePath).split(sep).join("/");
-}
-
-function chunkPaths(values: string[], chunkSize: number): string[][] {
-  if (chunkSize <= 1) {
-    return values.map((value) => [value]);
-  }
-
-  const chunks: string[][] = [];
-  for (let index = 0; index < values.length; index += chunkSize) {
-    chunks.push(values.slice(index, index + chunkSize));
-  }
-  return chunks;
 }
 
 function resolveSelectedDbPath(folderPath: string): string {
@@ -419,152 +366,6 @@ async function saveCompletedRenderArtifact(
   }
 }
 
-function emitProgress(sender: Electron.WebContents, progress: DesktopIndexingProgress): void {
-  if (sender.isDestroyed()) {
-    return;
-  }
-  sender.send("memolens:indexing-progress", progress);
-}
-
-function publishJobProgress(
-  job: ActiveIndexingJob,
-  patch: Partial<DesktopIndexingProgress>,
-): DesktopIndexingProgress {
-  const nextProgress = {
-    ...job.progress,
-    ...patch,
-  };
-  job.progress = nextProgress;
-  emitProgress(job.sender, nextProgress);
-  return nextProgress;
-}
-
-function releaseResumeResolvers(job: ActiveIndexingJob): void {
-  const resolvers = [...job.resumeResolvers];
-  job.resumeResolvers = [];
-  for (const resolve of resolvers) {
-    resolve();
-  }
-}
-
-async function waitIfPaused(job: ActiveIndexingJob): Promise<void> {
-  if (!job.pauseRequested) {
-    return;
-  }
-
-  if (job.progress.phase !== "paused") {
-    publishJobProgress(job, {
-      phase: "paused",
-    });
-  }
-
-  await new Promise<void>((resolve) => {
-    job.resumeResolvers.push(resolve);
-  });
-}
-
-function canPausePhase(phase: DesktopIndexingPhase): boolean {
-  return phase === "running" || phase === "pausing" || phase === "paused";
-}
-
-async function analyzeImageBatch({
-  apiBase,
-  filePaths,
-  rootPath,
-  model,
-  dbPath,
-  reindex,
-}: {
-  apiBase: string;
-  filePaths: string[];
-  rootPath: string;
-  model: string | null;
-  dbPath: string;
-  reindex: boolean;
-}): Promise<{ indexed: number; skipped: number; failed: number; errors: string[] }> {
-  const relativePaths = filePaths.map((filePath) => toRelativePath(rootPath, filePath));
-  const payload = {
-    model,
-    persist_to_server: true,
-    reindex,
-    db_path: dbPath,
-    input: {
-      image_dir: rootPath,
-      files: relativePaths,
-      recursive: false,
-    },
-  };
-
-  const response = await fetch(`${apiBase.replace(/\/$/, "")}/v1/indexing/jobs`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-MemoLens-Desktop-Token": getDesktopSessionToken(),
-    },
-    body: JSON.stringify(payload),
-  });
-  const body = (await response.json()) as {
-    message?: string;
-    data?: Array<{ relative_path?: string | null }>;
-    skipped?: Array<{ relative_path?: string | null }>;
-    errors?: Array<{ relative_path?: string | null; message?: string | null }>;
-  };
-  if (!response.ok) {
-    throw new Error(body.message ?? `indexing request failed with status ${response.status}`);
-  }
-
-  const indexedItems = Array.isArray(body.data) ? body.data : [];
-  const skippedItems = Array.isArray(body.skipped) ? body.skipped : [];
-  const errorItems = Array.isArray(body.errors) ? body.errors : [];
-  const errors = errorItems
-    .map((item) => {
-      const relativePath =
-        typeof item?.relative_path === "string" && item.relative_path.trim().length > 0
-          ? item.relative_path
-          : null;
-      const message =
-        typeof item?.message === "string" && item.message.trim().length > 0
-          ? item.message
-          : "indexing failed";
-      return relativePath ? `${relativePath}: ${message}` : message;
-    });
-  const processedRelativePaths = new Set(
-    [...indexedItems, ...skippedItems, ...errorItems]
-      .map((item) =>
-        typeof item?.relative_path === "string" && item.relative_path.trim().length > 0
-          ? item.relative_path
-          : null,
-      )
-      .filter((value): value is string => value !== null),
-  );
-  const missingRelativePaths = relativePaths.filter(
-    (relativePath) => !processedRelativePaths.has(relativePath),
-  );
-  if (missingRelativePaths.length > 0) {
-    errors.push(
-      ...missingRelativePaths.map(
-        (relativePath) => `${relativePath}: backend did not return a result for this file`,
-      ),
-    );
-  }
-
-  if (
-    indexedItems.length === 0
-    && skippedItems.length === 0
-    && errorItems.length === 0
-    && missingRelativePaths.length === 0
-  ) {
-    throw new Error("indexing response did not contain any processed items");
-  }
-
-  return {
-    indexed: indexedItems.length,
-    skipped: skippedItems.length,
-    failed: errorItems.length + missingRelativePaths.length,
-    errors,
-  };
-}
-
 ipcMain.handle("memolens:pick-image-folder", async (event) => {
   assertTrustedIpcSender(event);
   const settings = await loadDesktopSettings(PROJECT_ROOT);
@@ -629,177 +430,18 @@ ipcMain.handle(
   "memolens:start-indexing",
   async (event, options: DesktopIndexingStartOptions): Promise<DesktopIndexingResult> => {
     assertTrustedIpcSender(event);
-    if (activeIndexingJob !== null) {
-      throw new Error("An indexing job is already running. Pause or wait for the current run to finish.");
-    }
-    if (indexingStartInProgress) {
-      throw new Error("An indexing job is already starting. Wait for the current run to initialize.");
-    }
-
-    indexingStartInProgress = true;
-    let job: ActiveIndexingJob | null = null;
-
-    try {
-      const folderPath = resolve(options.folderPath);
-      const dbPath = resolve(options.dbPath ?? resolveSelectedDbPath(folderPath));
-      const apiBase = DEFAULT_BACKEND_URL;
-      const imageFiles = await collectImageFiles(folderPath);
-
-      const errors: string[] = [];
-      let completed = 0;
-      let indexed = 0;
-      let skipped = 0;
-      let failed = 0;
-      job = {
-        sender: event.sender,
-        progress: {
-          phase: "running",
-          total: imageFiles.length,
-          completed,
-          indexed,
-          skipped,
-          failed,
-          currentFile: null,
-          folderPath,
-          dbPath,
-          percent: imageFiles.length === 0 ? 100 : 0,
-        },
-        pauseRequested: false,
-        resumeResolvers: [],
-      };
-      activeIndexingJob = job;
-      indexingStartInProgress = false;
-
-      publishJobProgress(job, {
-        phase: "running",
-        total: imageFiles.length,
-        completed,
-        indexed,
-        skipped,
-        failed,
-        currentFile: null,
-        folderPath,
-        dbPath,
-        percent: imageFiles.length === 0 ? 100 : 0,
-      });
-
-      const imageBatches = chunkPaths(imageFiles, LOCAL_INDEX_BATCH_SIZE);
-
-      for (const fileBatch of imageBatches) {
-        await waitIfPaused(job);
-
-        const batchRelativePaths = fileBatch.map((filePath) => toRelativePath(folderPath, filePath));
-        const currentFile =
-          batchRelativePaths.length <= 1
-            ? (batchRelativePaths[0] ?? null)
-            : `${batchRelativePaths[0]} ... ${batchRelativePaths[batchRelativePaths.length - 1]}`;
-        publishJobProgress(job, {
-          phase: "running",
-          currentFile,
-        });
-
-        try {
-          const result = await analyzeImageBatch({
-            apiBase,
-            filePaths: fileBatch,
-            rootPath: folderPath,
-            model: options.model ?? null,
-            dbPath,
-            reindex: Boolean(options.reindex),
-          });
-          indexed += result.indexed;
-          skipped += result.skipped;
-          failed += result.failed;
-          errors.push(...result.errors);
-        } catch (error) {
-          failed += fileBatch.length;
-          errors.push(`${currentFile ?? "batch"}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-
-        completed += fileBatch.length;
-        publishJobProgress(job, {
-          phase:
-            completed >= imageFiles.length ? "finalizing" : job.pauseRequested ? "pausing" : "running",
-          completed,
-          indexed,
-          skipped,
-          failed,
-          currentFile,
-          percent:
-            imageFiles.length === 0 ? 100 : Math.round((completed / imageFiles.length) * 100),
-        });
-      }
-
-      const result: DesktopIndexingResult = {
-        status:
-          imageFiles.length === 0
-            ? "empty"
-            : failed === imageFiles.length
-              ? "failed"
-              : failed > 0
-                ? "partial"
-                : "completed",
-        folderPath,
-        dbPath,
-        total: imageFiles.length,
-        indexed,
-        skipped,
-        failed,
-        errors,
-      };
-      publishJobProgress(job, {
-        phase: "completed",
-        completed,
-        indexed,
-        skipped,
-        failed,
-        currentFile: null,
-        percent: 100,
-      });
-      return result;
-    } finally {
-      indexingStartInProgress = false;
-      if (job) {
-        releaseResumeResolvers(job);
-      }
-      if (job && activeIndexingJob === job) {
-        activeIndexingJob = null;
-      }
-    }
+    return indexingCoordinator.start(event.sender, options);
   },
 );
 
 ipcMain.handle("memolens:pause-indexing", async (event): Promise<boolean> => {
   assertTrustedIpcSender(event);
-  const job = activeIndexingJob;
-  if (job === null || !canPausePhase(job.progress.phase)) {
-    return false;
-  }
-
-  job.pauseRequested = true;
-  if (job.progress.phase === "running") {
-    publishJobProgress(job, {
-      phase: "pausing",
-    });
-  }
-  return true;
+  return indexingCoordinator.pause();
 });
 
 ipcMain.handle("memolens:resume-indexing", async (event): Promise<boolean> => {
   assertTrustedIpcSender(event);
-  const job = activeIndexingJob;
-  if (job === null || !canPausePhase(job.progress.phase)) {
-    return false;
-  }
-
-  job.pauseRequested = false;
-  if (job.progress.phase === "paused" || job.progress.phase === "pausing") {
-    publishJobProgress(job, {
-      phase: "running",
-    });
-  }
-  releaseResumeResolvers(job);
-  return true;
+  return indexingCoordinator.resume();
 });
 
 app.whenReady().then(async () => {

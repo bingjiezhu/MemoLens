@@ -1,7 +1,7 @@
 {
   "name": "memolens",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "main": "electron-dist/electron/main.js",
   "engines": {
@@ -21,13 +21,16 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "lint:python": "ruff check .",
-    "audit:deps": "npm audit --audit-level=high && pip-audit",
-    "test:unit": "python3 -m unittest discover -s tests -v",
-    "test:electron": "npm run build:electron && node --experimental-strip-types --test tests/backend_manager_health.test.mjs tests/artifact_integrity.test.mjs tests/video_mutation_ledger.test.mjs",
-    "test:plugin": "python3 -m unittest discover -s .agents/plugins/plugins/memolens/tests -v",
-    "test:smoke": "python3 scripts/verify_local_deployment.py",
+    "audit:deps": "npm audit --audit-level=high && bash ./scripts/run_pip_audit.sh",
+    "test:unit": "bash ./scripts/run_python.sh -m unittest discover -s tests -v",
+    "test:node": "node --experimental-strip-types --test tests/backend_manager_health.test.mjs tests/indexing_coordinator.test.mjs tests/artifact_integrity.test.mjs tests/video_mutation_ledger.test.mjs tests/video_session.test.mjs tests/video_job_model.test.mjs && npm run test:renderer-models",
+    "test:electron": "npm run build:electron && npm run test:node",
+    "test:renderer-models": "node --experimental-strip-types --experimental-loader ./tests/ts-extension-loader.mjs --test tests/video_api.test.mjs tests/atlas_basket_model.test.mjs tests/draft_generation.test.mjs",
+    "test:video-api": "node --experimental-strip-types --experimental-loader ./tests/ts-extension-loader.mjs --test tests/video_api.test.mjs",
+    "test:plugin": "bash ./scripts/run_python.sh -m unittest discover -s .agents/plugins/plugins/memolens/tests -v",
+    "test:smoke": "bash ./scripts/run_python.sh scripts/verify_local_deployment.py",
     "verify:local": "bash ./scripts/verify_local.sh",
-    "check": "npm run lint:python && npm run test:unit && npm run test:plugin && npm run verify:local && npm run build && node --test tests/backend_manager_health.test.mjs"
+    "check": "npm run lint:python && npm run test:unit && npm run test:plugin && npm run verify:local && npm run build && npm run test:node"
   },
   "dependencies": {
     "react": "^19.1.0",
