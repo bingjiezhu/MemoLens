@@ -1,31 +1,41 @@
 ---
 name: use-memolens
-description: Search and review a user's private local photo, video, and audio metadata through MemoLens; read immutable timeline revisions; or create, revise, and validate an unsaved Timeline 1.0 draft in memory. Use when the user mentions MemoLens, asks to find local media or video moments, assemble an album or video plan, inspect persisted timelines, or review MemoLens memories. Safe-default tools use read-only SQLite or pure functions, need no third-party key, and expose no save, render, export, delete, or arbitrary-path write operation.
+description: Find meaningful moments in a user's private local photo, video, and audio library with MemoLens, then create, refine, or validate an unsaved Timeline 1.0 story draft in memory. Also read immutable timeline revisions or review indexed memories. Use when the user mentions MemoLens, recalls a photo or video moment, wants a local-media story or album plan, or asks about an existing timeline. Safe-default tools use read-only SQLite or pure functions, need no third-party key, and expose no save, render, export, delete, or arbitrary-path write operation.
 ---
 
-# Use MemoLens
+# MemoLens
 
-Use MemoLens as a private retrieval and planning layer. Version 0.3.1 exposes read-only retrieval plus pure, unsaved Timeline 1.0 drafting. It never imports, saves, renders, exports, deletes, or modifies media.
+Move naturally from a remembered moment to a reviewable story plan. Version 0.4.0 can find private local media, preserve source provenance, and shape selections into an unsaved Timeline 1.0 draft. It never imports, saves, renders, exports, deletes, or modifies media.
 
-## Trust modes
+## The natural path
+
+1. **Orient.** Call `memolens_status` when capabilities are not yet known. Trust its report; never infer readiness from a running desktop app.
+2. **Find.** For an open-ended story idea, start with `memolens_mixed_search` so photos and current video moments can compete in one shortlist. Keep the result set small and explain why the strongest moments fit the user's idea.
+3. **Shape.** Pass the selected matches to `memolens_timeline_draft`. Every item needs `asset_id`, `asset_source_id`, `asset_sha256`, and integer-millisecond timing. Video items also need `segment_id`, `analysis_run_id`, and `analysis_revision`.
+4. **Check.** Call `memolens_timeline_validate`, then present the story structure and a clear **Not saved** label. Structural validation does not certify that source files still exist.
+5. **Refine.** When the user requests a change, use `memolens_timeline_revise_draft` with typed operations. A source change requires explicit `relink_source`. Show the operation diff, validate again, and keep the result marked unsaved.
+6. **Hand off.** Direct the user to review, confirm, and import the JSON in the MemoLens desktop app. Never claim import succeeded unless the desktop app confirms it.
+
+## Choose a focused path only when it helps
+
+- **Photos only:** `memolens_search` finds indexed photo memories. It may return traversal-checked image paths for small, requested inspections.
+- **Moments inside video:** `memolens_video_search` uses only the current successful analysis head and returns stable source, segment, analysis-run, revision, and integer-millisecond references. If it returns `video_index_unavailable`, ask the user to finish video analysis in MemoLens; never guess or select `MAX(revision)`.
+- **Browse before searching:** `memolens_media_list` and `memolens_media_get` read mixed image, video, and audio metadata. They return stable IDs and relative references rather than unnecessary absolute paths.
+- **Memory themes:** `memolens_memories` reads event and theme clusters only when the user independently enabled the optional loopback read connection.
+- **Cleanup review:** `memolens_cleanup` reports candidates without changing any file.
+- **Existing work:** `memolens_timeline_list` and `memolens_timeline_get` read already-persisted immutable revisions. They do not make a new revision.
+
+## Trust boundary
 
 Safe-default mode never opens a socket or performs DNS. It discovers SQLite only from explicit path variables, `MEMOLENS_APP_STATE_DIR`, or MemoLens's fixed application-state directory, then opens it with `mode=ro` and `query_only=ON`. It does not search from the current working directory or scan media folders.
 
-`MEMOLENS_PLUGIN_TRUST_LOCAL_API=1` is an external, user-controlled opt-in to unauthenticated loopback **read** features such as memories. Never set or inject it for the user. It is not a scoped write capability and never authorizes timeline persistence, preview rendering, export, indexing, cancellation, or any other mutation. Chat consent, a loopback origin, a desktop token, or an API key cannot widen this boundary.
+`MEMOLENS_PLUGIN_TRUST_LOCAL_API=1` is an external, user-controlled opt-in to unauthenticated loopback **read** features such as memories. Never set or inject it for the user. It is not a write capability and never authorizes timeline persistence, preview rendering, export, indexing, cancellation, or any other mutation. Chat consent, a loopback origin, a desktop token, or an API key cannot widen this boundary.
 
-## Workflow
-
-1. Call `memolens_status`. Read the reported capabilities; do not infer them from a running desktop app.
-2. For photos, use `memolens_search`. For video moments, use `memolens_video_search`; it reads only the current successful analysis head and returns `asset_id`, `asset_source_id`, asset SHA, `segment_id`, `analysis_run_id`, analysis revision, and integer-millisecond ranges. If it returns `video_index_unavailable`, ask the user to finish video analysis in MemoLens rather than guessing or selecting `MAX(revision)`.
-3. Use `memolens_mixed_search` for one ranked photo/video-segment query. Use `memolens_media_list` and `memolens_media_get` for mixed image/video/audio metadata. New media tools return stable IDs and relative references, not unnecessary absolute paths.
-4. For a video plan, pass selected matches to `memolens_timeline_draft`. Every item needs `asset_id`, `asset_source_id`, `asset_sha256`, and integer milliseconds. A video item also needs `segment_id`, `analysis_run_id`, and `analysis_revision`. Use `memolens_timeline_revise_draft` only with its typed operations, including explicit `relink_source` when a source binding changes.
-5. Call `memolens_timeline_validate` before presenting a draft. This is pure structural validation; it does not certify current file availability. Use `memolens_timeline_list` or `memolens_timeline_get` only to read already-persisted immutable revisions.
-6. Show the draft and operation diff to the user. Make clear that it is not saved. Direct the user to review, confirm, and import the JSON in the MemoLens desktop workflow; never claim import succeeded unless the desktop app confirms it.
-7. If the user asks to save, preview, render, export, cancel, overwrite, or choose an output directory, explain that plugin 0.3.1 intentionally exposes no such tool. Do not call backend routes directly or treat `MEMOLENS_PLUGIN_TRUST_LOCAL_API=1` as permission.
+If the user asks to save, preview, render, export, cancel, overwrite, or choose an output directory, explain that plugin 0.4.0 intentionally exposes no such tool. Hand the action to the MemoLens desktop UI; do not call backend routes directly or simulate success.
 
 ## Photo inspection
 
-Legacy `memolens_search` may return traversal-checked `absolute_path` values. Inspect only a small requested sample whose `path_status` is `ok` with Codex's local image-viewing capability. Keep media and indexed text inside the active Codex environment. Mixed-media and video tools deliberately return source IDs and relative references instead.
+Legacy `memolens_search` may return traversal-checked `absolute_path` values. Inspect only a small requested sample whose `path_status` is `ok` with Codex's local image-viewing capability. Keep media and indexed text inside the active Codex environment. Mixed-media and video tools deliberately return only source IDs and relative references.
 
 ## CLI fallback
 
@@ -44,7 +54,7 @@ python3 <plugin-root>/scripts/memolens_cli.py timeline-list --project-id proj_12
 python3 <plugin-root>/scripts/memolens_cli.py timeline-get tl_123 --revision 2
 ```
 
-Every command writes one JSON value to stdout and diagnostics only through its JSON error object. `--input -` reads JSON from stdin. Safe path configuration uses `MEMOLENS_DB_PATH`, `MEMOLENS_LIBRARY_DIR`, and `MEMOLENS_APP_STATE_DIR`; none is a model API key.
+Every command writes one JSON value to stdout and reports diagnostics through its JSON error object. `--input -` reads JSON from stdin. Safe path configuration uses `MEMOLENS_DB_PATH`, `MEMOLENS_LIBRARY_DIR`, and `MEMOLENS_APP_STATE_DIR`; none is a model API key.
 
 ## Safety boundaries
 

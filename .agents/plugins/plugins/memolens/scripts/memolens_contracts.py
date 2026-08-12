@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-PLUGIN_VERSION = "0.3.1"
+PLUGIN_VERSION = "0.4.0"
 
 
 class MemoLensError(RuntimeError):

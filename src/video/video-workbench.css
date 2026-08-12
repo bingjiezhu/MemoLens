@@ -43,11 +43,11 @@
 .video-workbench-heading h2 {
   max-width: 780px;
   margin: 5px 0 12px;
-  font-family: "Iowan Old Style", "Baskerville", "Georgia", serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
   font-size: clamp(2.2rem, 4.6vw, 4.45rem);
-  font-weight: 500;
+  font-weight: 650;
   line-height: 0.98;
-  letter-spacing: -0.055em;
+  letter-spacing: -0.06em;
 }
 
 .video-workbench-heading p:not(.eyebrow) {
@@ -83,7 +83,7 @@
 
 .video-stepper {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
   margin: 0;
   padding: 0;
@@ -92,18 +92,38 @@
 
 .video-stepper li {
   min-width: 0;
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr);
-  gap: 9px;
-  align-items: center;
-  padding: 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 15px;
   color: rgba(248, 242, 233, 0.58);
   background: rgba(255, 255, 255, 0.045);
 }
 
-.video-stepper li > span {
+.video-stepper button {
+  width: 100%;
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  padding: 9px;
+  color: inherit;
+  text-align: left;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+}
+
+.video-stepper button:focus-visible {
+  outline: 3px solid rgba(212, 173, 113, 0.58);
+  outline-offset: 2px;
+}
+
+.video-stepper button:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.video-stepper button > span:first-child {
   width: 32px;
   height: 32px;
   display: grid;
@@ -113,23 +133,59 @@
   font-size: 0.78rem;
 }
 
-.video-stepper li strong {
+.video-stepper button > span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.video-stepper li strong,
+.video-stepper li small {
   overflow: hidden;
-  font-size: 0.78rem;
   white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.video-stepper li.complete {
+.video-stepper li strong {
+  color: inherit;
+  font-size: 0.78rem;
+}
+
+.video-stepper li small {
+  color: rgba(248, 242, 233, 0.66);
+  font-size: 0.7rem;
+}
+
+.video-stepper li.video-step-complete {
   color: #e3eee5;
   border-color: rgba(185, 209, 191, 0.28);
   background: rgba(185, 209, 191, 0.1);
 }
 
-.video-stepper li.complete > span {
+.video-stepper li.video-step-complete button > span:first-child {
   color: var(--video-deep);
   border-color: var(--video-mint);
   background: var(--video-mint);
+}
+
+.video-stepper li.video-step-current {
+  color: #fffaf2;
+  border-color: rgba(212, 173, 113, 0.62);
+  background: rgba(212, 173, 113, 0.16);
+  box-shadow: 0 8px 24px rgba(5, 12, 8, 0.18);
+}
+
+.video-stepper li.video-step-current button > span:first-child {
+  color: var(--video-deep);
+  border-color: var(--video-copper);
+  background: var(--video-copper);
+}
+
+.video-workflow-status {
+  margin: -8px 0 0;
+  color: rgba(248, 242, 233, 0.68);
+  font-size: 0.78rem;
+  text-align: right;
 }
 
 .video-workspace-stack {
@@ -145,6 +201,68 @@
   border-radius: 24px;
   background: rgba(251, 247, 239, 0.94);
   box-shadow: 0 22px 52px rgba(5, 12, 8, 0.16);
+}
+
+.video-step-panel {
+  animation: video-step-enter 220ms ease-out both;
+}
+
+@keyframes video-step-enter {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.video-idea-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 13px;
+}
+
+.video-setup-disclosure {
+  margin-bottom: 24px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.video-setup-disclosure > summary {
+  min-height: 28px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.video-setup-disclosure[open] > summary {
+  margin-bottom: 14px;
+}
+
+.video-material-section {
+  padding-block: 4px 24px;
+}
+
+.video-material-section + .video-material-section {
+  padding-top: 24px;
+  border-top: 1px solid var(--line);
+}
+
+.video-step-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 18px;
+  color: var(--muted);
+  border-top: 1px solid var(--line);
+  font-size: 0.82rem;
 }
 
 .video-panel-head {
@@ -165,7 +283,7 @@
 .video-segment-inspector h4,
 .video-command-panel h4 {
   margin: 3px 0 5px;
-  font-family: "Iowan Old Style", "Baskerville", "Georgia", serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
   font-weight: 600;
   letter-spacing: -0.025em;
 }
@@ -639,6 +757,12 @@
   background: rgba(255, 255, 255, 0.74);
 }
 
+.video-format-toolbar button[aria-pressed="true"] {
+  color: #f8f2e9;
+  border-color: var(--video-deep);
+  background: var(--video-deep);
+}
+
 .video-storyboard {
   display: grid;
   gap: 9px;
@@ -658,7 +782,7 @@
 
 .video-clip-number {
   color: #8c7858;
-  font-family: "Iowan Old Style", "Baskerville", "Georgia", serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
   font-size: 1.15rem;
   font-variant-numeric: tabular-nums;
 }
@@ -826,6 +950,10 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .video-stepper {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .video-segment-inspector {
     position: static;
   }
@@ -846,6 +974,18 @@
     border-radius: 24px;
   }
 
+  .video-workbench-heading {
+    gap: 18px;
+  }
+
+  .video-local-contract {
+    padding: 13px 14px;
+  }
+
+  .video-local-contract span:last-child {
+    display: none;
+  }
+
   .video-stepper {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -857,7 +997,8 @@
 
   .video-panel-head,
   .video-job-summary,
-  .video-form-actions {
+  .video-form-actions,
+  .video-step-actions {
     align-items: stretch;
     flex-direction: column;
   }
@@ -873,6 +1014,7 @@
 
   .video-source-grid,
   .video-brief-grid,
+  .video-idea-form,
   .video-project-evidence,
   .video-command-panel {
     grid-template-columns: 1fr;
@@ -912,13 +1054,29 @@
   }
 
   .video-workbench-heading h2 {
-    font-size: clamp(2.05rem, 13vw, 3rem);
+    font-size: clamp(2rem, 11.5vw, 2.8rem);
   }
 
-  .video-stepper,
+  .video-workbench-heading p:not(.eyebrow) {
+    font-size: 0.92rem;
+    line-height: 1.55;
+  }
+
   .video-capability-grid,
   .video-job-list {
     grid-template-columns: 1fr;
+  }
+
+  .video-stepper {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .video-stepper button {
+    min-height: 58px;
+  }
+
+  .video-stepper li small {
+    display: none;
   }
 
   .video-panel {

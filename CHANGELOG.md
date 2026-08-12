@@ -3,6 +3,24 @@
 All notable changes to MemoLens are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-08-12
+
+### Added
+
+- A focused Home / Library / Memories / Create workspace model, responsive bottom navigation, and explicit Photo Story / Video First Cut creation modes.
+- A six-step video flow — Idea, Material, Brief, Timeline, Preview, Save — that reveals one actionable panel at a time while keeping completed work reviewable.
+- A new MemoLens Codex icon, concise starter prompts, and a shared Find → Select → Shape → Review plugin journey.
+
+### Changed
+
+- Rebuilt the visual language around a neutral system palette, restrained depth, consistent controls, 44-pixel touch targets, and progressive disclosure instead of a single long feature page.
+- Moved runtime, model, embedding, and SQLite diagnostics into Advanced settings; made photo prompts the first interaction and optional inspiration secondary.
+- Simplified Atlas empty/error states, mobile memory browsing, generation progress, focus treatment, and screen-reader semantics.
+
+### Tests
+
+- Added a pure video workflow model with locked/current/complete transition coverage, plus desktop and 390-pixel browser QA for overflow, navigation, focus, and panel disclosure.
+
 ## [0.3.1] - 2026-08-12
 
 ### Changed
@@ -72,6 +90,7 @@ All notable changes to MemoLens are documented here. The project follows
 - Hardened the loopback API, backend identity checks, Electron sandbox/navigation/IPC boundaries, local file serving, and release build freshness.
 - Distinguished empty, partial, and failed indexing outcomes instead of presenting them as successful work.
 
+[0.4.0]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.4.0
 [0.3.1]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.3.1
 [0.3.0]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.3.0
 [0.2.0]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.2.0

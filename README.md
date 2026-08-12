@@ -5,10 +5,10 @@
 Turn a private photo and video folder into a searchable memory layer — find real moments, direct an evidence-backed story, edit a versioned timeline, and render a non-destructive MP4 preview in the MemoLens desktop app. Codex can search the same index and prepare an unsaved timeline draft without gaining render or export permission.
 
 <p align="center">
-  <img src="docs/assets/memolens-architecture.png" alt="MemoLens architecture — local-first layers from user surfaces to SQLite" width="100%" />
+  <img src="docs/assets/memolens-home-v040.jpg" alt="MemoLens 0.4 home workspace" width="100%" />
 </p>
 
-<p align="center"><sub>Source artboard: <code>docs/assets/memolens-architecture.html</code></sub></p>
+<p align="center"><sub>One private workspace from remembered media to a reviewable first cut.</sub></p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
@@ -37,13 +37,13 @@ People remember media by scene, mood, action, place, and intent — not by filen
 | Captions you can trust | Grounds titles / captions / highlights in retrieved evidence |
 | Codex access without another model key | Searches the read-only SQLite memory and drafts or validates timelines locally |
 
-Original files, indexes, keyframes, previews, and timelines stay local in the desktop/browser workflow. Photo indexing may send a resized working copy to an API-based vision profile after the existing disclosure. Video is stricter in 0.3.0: frames, audio, and transcripts remain offline even when a cloud key is configured; no video-egress authorization flow is exposed yet. Query, inspiration, directing, and timeline planning operate on indexed facts rather than silently uploading the library. Photon image replies deliberately upload selected copies to Discord; see its privacy boundary below.
+Original files, indexes, keyframes, previews, and timelines stay local in the desktop/browser workflow. Photo indexing may send a resized working copy to an API-based vision profile after the existing disclosure. Video remains stricter: frames, audio, and transcripts stay offline even when a cloud key is configured; no video-egress authorization flow is exposed yet. Query, inspiration, directing, and timeline planning operate on indexed facts rather than silently uploading the library. Photon image replies deliberately upload selected copies to Discord; see its privacy boundary below.
 
 ---
 
 ## What You Get
 
-- **Media Memory** — scan photos plus MP4/MOV/M4V; probe locally, detect visual scene changes, select representative frames, align optional sidecar transcripts, and index real video time ranges. Version 0.3 search is deterministic metadata/sidecar text, not a claim of full semantic video understanding
+- **Media Memory** — scan photos plus MP4/MOV/M4V; probe locally, detect visual scene changes, select representative frames, align optional sidecar transcripts, and index real video time ranges. Current search is deterministic metadata/sidecar text, not a claim of full semantic video understanding
 - **Compose** — natural-language search with exclusions, quality-aware selection, and near-duplicate suppression
 - **Workbench** — memories, Keyword Galaxy, storylines, duplicate stacks, baskets, cleanup cues, and feedback
 - **Director** — turn audience, platform, duration, aspect ratio, tone, and constraints into a grounded brief and storyboard
@@ -58,6 +58,15 @@ Original files, indexes, keyframes, previews, and timelines stay local in the de
 When an external vision profile is unavailable, MemoLens can fall back to metadata-derived descriptions and keep query / copy flowing through the configured text profile.
 
 Reverse geocoding is implemented but **off by default** (`geocode.enabled: false` / `ENABLE_REVERSE_GEOCODE=false`). Enabling it sends each GPS-tagged photo's precise latitude/longitude to OpenStreetMap Nominatim, whose privacy and retention terms then apply.
+
+<p align="center">
+  <img src="docs/assets/memolens-memories-v040.jpg" alt="MemoLens Memories workspace with a private library map" width="72%" />
+  <img src="docs/assets/memolens-mobile-v040.jpg" alt="MemoLens responsive mobile home workspace" width="22%" />
+</p>
+
+<p align="center">
+  <img src="docs/assets/memolens-video-v040.jpg" alt="MemoLens six-step Video First Cut workspace" width="100%" />
+</p>
 
 ---
 
@@ -90,10 +99,10 @@ npm run electron
 
 ### First run inside the app
 
-1. Open **Control** and confirm the backend is online (`http://127.0.0.1:5519`).
-2. Choose a media folder, index photos in **Library**, then open **Create video** to scan videos and start persistent analysis jobs. Photo indexing dual-writes into the same mixed-media memory immediately.
-3. Open **Workbench** to build the Atlas memory layer and explore Keyword Galaxy.
-4. Open **Compose** to search, or **Create video** to turn a brief into a grounded timeline and local preview.
+1. Open **Library** and confirm the private local service is online.
+2. Choose a media folder and build its local memory index. Advanced model and SQLite controls stay folded away unless you need them.
+3. Open **Memories** to explore themes and evidence, or **Create** to switch between a photo story and a video first cut.
+4. For video, follow the six visible steps: **Idea → Material → Brief → Timeline → Preview → Save**. Only the current step is expanded; completed work remains reviewable.
 
 Managed desktop state lives under:
 
@@ -200,6 +209,12 @@ export SQLITE_DB_PATH="$IMAGE_LIBRARY_DIR/photo_index.db"
 
 ## Architecture
 
+<p align="center">
+  <img src="docs/assets/memolens-architecture.png" alt="MemoLens architecture — local-first layers from user surfaces to SQLite" width="100%" />
+</p>
+
+<p align="center"><sub>Source artboard: <code>docs/assets/memolens-architecture.html</code></sub></p>
+
 Six boundaries, one local loop:
 
 | Layer | Code | Responsibility |
@@ -265,7 +280,7 @@ Default bind: `http://127.0.0.1:5519` (loopback-only). Override with `MEMOLENS_B
 | `POST` | `/v1/renders` | Start an authenticated, hash-bound local preview job |
 | `GET` / `POST` | `/v1/renders/<job_id>/*` | Preview status, cancellation, and verified Range download |
 
-The API rejects non-loopback callers and untrusted browser origins. The Electron renderer additionally uses a per-launch authenticated session. Existing originless read clients such as curl and Photon remain part of the trusted-machine boundary, but originless loopback access does not authorize any media write or FFmpeg route. Final 1080p export remains fail-closed until a one-time Electron output-grant flow is implemented; 0.3.0 can save the verified 720p preview through the native Save As dialog.
+The API rejects non-loopback callers and untrusted browser origins. The Electron renderer additionally uses a per-launch authenticated session. Existing originless read clients such as curl and Photon remain part of the trusted-machine boundary, but originless loopback access does not authorize any media write or FFmpeg route. Final 1080p export remains fail-closed until a one-time Electron output-grant flow is implemented; the current app can save the verified 720p preview through the native Save As dialog.
 
 ---
 
@@ -309,7 +324,7 @@ npm run quality:backfill -- \
 - MemoLens-managed/default photo directories, SQLite DBs, `.env`, caches, and exports are gitignored; keep arbitrary private libraries outside the repository
 - Default `config.yaml` uses `./local-photo-library` as a placeholder only
 - API vision profiles receive a resized working copy of each photo being indexed; choose a local Ollama profile or the metadata fallback when images must not leave the device
-- Video probing, scene scanning, keyframes, sidecar transcripts, timelines, and rendering stay local in 0.3.0; an existing cloud key never authorizes video frames or audio to leave the device
+- Video probing, scene scanning, keyframes, sidecar transcripts, timelines, and rendering stay local; an existing cloud key never authorizes video frames or audio to leave the device
 - Enabling reverse geocoding sends precise EXIF coordinates to OpenStreetMap Nominatim; it remains off by default
 - Inspiration / copy paths send structured summaries and selected facts — not raw libraries or absolute private paths
 - Photon image replies leave the device for Discord; use strict user/channel allowlists and trusted destinations only
@@ -329,7 +344,7 @@ Public beta with a local-first media memory and creative loop:
 - Retrieval supports planning, negatives, semantic scoring, quality, and duplicate suppression
 - Workbench derives Atlas assets from the same index
 - Query planning, ranking, and copy generation are owned by `backend/src/retrieval/`
-- Video jobs produce timestamped scene segments and representative keyframes without requiring a cloud model; 0.3 retrieval uses deterministic metadata and optional sidecar text while richer visual/audio semantics remain a later Spec 005 phase
+- Video jobs produce timestamped scene segments and representative keyframes without requiring a cloud model; current retrieval uses deterministic metadata and optional sidecar text while richer visual/audio semantics remain a later Spec 005 phase
 - Create Video turns grounded matches into validated, versioned timelines and local 720p MP4 previews that can be saved through the desktop dialog
 - The Codex plugin can search and draft offline; authenticated Codex write capabilities remain deliberately unavailable until the desktop confirmation flow is complete
 

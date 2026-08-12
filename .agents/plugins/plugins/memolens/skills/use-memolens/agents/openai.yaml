@@ -1,5 +1,5 @@
 interface:
-  display_name: "Use MemoLens"
-  short_description: "Search private media and draft unsaved timelines"
-  brand_color: "#6750A4"
-  default_prompt: "Use $use-memolens to search my local media with current provenance and draft an unsaved Timeline 1.0 plan for desktop review."
+  display_name: "MemoLens"
+  short_description: "Find private moments. Shape an unsaved story."
+  brand_color: "#426B5A"
+  default_prompt: "Use $use-memolens to find the strongest local photo and video moments for my idea, then shape them into an unsaved timeline draft for review."
