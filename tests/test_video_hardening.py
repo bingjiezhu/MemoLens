@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -192,6 +193,180 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
 
         results = MixedRetrievalService(Candidates()).search({"query": "keyword"})["results"]
         self.assertEqual([item["id"] for item in results], ["a-late", "b-early"])
+
+    def test_mixed_search_response_contract_and_revision_are_stable(self) -> None:
+        class Candidates:
+            @staticmethod
+            def mixed_candidates():
+                video = {
+                    "result_type": "video_segment",
+                    "asset_id": "asset-video",
+                    "asset_source_id": "source-video",
+                    "filename": "trip.mp4",
+                    "summary": "Beach Sunset subtitle moment",
+                    "combined_text": "subtitle beach sunset",
+                    "tags": [],
+                    "analysis_run_id": "run-current",
+                    "analysis_revision": 4,
+                    "source_availability": "available",
+                    "width": 1920,
+                    "height": 1080,
+                    "captured_at": None,
+                }
+                image = {
+                    "result_type": "image_asset",
+                    "id": "image-a",
+                    "asset_id": "asset-image",
+                    "asset_source_id": "source-image",
+                    "filename": "Beach Sunset.jpg",
+                    "summary": "",
+                    "combined_text": "",
+                    "tags": [],
+                    "analysis_run_id": None,
+                    "analysis_revision": None,
+                    "source_availability": "available",
+                    "width": 640,
+                    "height": 360,
+                    "start_ms": None,
+                    "end_ms": None,
+                    "captured_at": "2026-01-02T03:04:05+00:00",
+                }
+                return (
+                    [
+                        {**video, "id": "video-a", "start_ms": 0, "end_ms": 10_000},
+                        {**video, "id": "video-b", "start_ms": 250, "end_ms": 9_000},
+                        image,
+                        {
+                            **image,
+                            "id": "zero-score",
+                            "asset_id": "asset-zero",
+                            "asset_source_id": "source-zero",
+                            "filename": "unrelated.jpg",
+                        },
+                        {
+                            **image,
+                            "id": "excluded",
+                            "asset_id": "asset-excluded",
+                            "asset_source_id": "source-excluded",
+                            "filename": "blocked Beach Sunset.jpg",
+                        },
+                        {
+                            **image,
+                            "id": "portrait",
+                            "asset_id": "asset-portrait",
+                            "asset_source_id": "source-portrait",
+                            "width": 360,
+                            "height": 640,
+                        },
+                        {**video, "id": "too-short", "start_ms": 0, "end_ms": 500},
+                    ],
+                    {"asset-video": "run-current"},
+                )
+
+        filters = {
+            "orientation": "landscape",
+            "excluded_terms": ["blocked"],
+            "duration_min_ms": 1_000,
+            "duration_max_ms": 12_000,
+        }
+        response = MixedRetrievalService(Candidates()).search(
+            {
+                "text": "  Beach Sunset  ",
+                "types": ["video", "image", "unknown"],
+                "top_k": 10,
+                "filters": filters,
+            }
+        )
+
+        self.assertIs(response["results"], response["data"])
+        search_id = response.pop("id")
+        created_at = response.pop("created_at")
+        self.assertRegex(search_id, r"^search_[0-9a-f]{32}$")
+        self.assertRegex(created_at, r"^\d{4}-\d{2}-\d{2}T.*\+00:00$")
+        expected_results = [
+            {
+                "object": "creative_asset_match",
+                "result_type": "video_segment",
+                "id": "video-a",
+                "asset_id": "asset-video",
+                "asset_source_id": "source-video",
+                "filename": "trip.mp4",
+                "start_ms": 0,
+                "end_ms": 10_000,
+                "thumbnail_url": "/v1/video-segments/video-a/thumbnail",
+                "media_url": "/v1/assets/asset-video/media",
+                "summary": "Beach Sunset subtitle moment",
+                "matched_terms": ["beach", "sunset"],
+                "score": 1.0,
+                "grounded": True,
+                "confidence": None,
+                "analysis_run_id": "run-current",
+                "analysis_revision": 4,
+                "score_components": {"lexical": 1.0, "semantic": None, "recency": 0.0},
+                "source_availability": "available",
+                "provenance": ["local_keyframe", "sidecar_transcript"],
+            },
+            {
+                "object": "creative_asset_match",
+                "result_type": "image_asset",
+                "id": "image-a",
+                "asset_id": "asset-image",
+                "asset_source_id": "source-image",
+                "filename": "Beach Sunset.jpg",
+                "start_ms": None,
+                "end_ms": None,
+                "thumbnail_url": "/v1/assets/asset-image/thumbnail",
+                "media_url": None,
+                "summary": "Local image file named Beach Sunset.jpg.",
+                "matched_terms": ["beach", "sunset"],
+                "score": 1.0,
+                "grounded": True,
+                "confidence": None,
+                "analysis_run_id": None,
+                "analysis_revision": None,
+                "score_components": {"lexical": 1.0, "semantic": None, "recency": 0.0},
+                "source_availability": "available",
+                "provenance": ["image_index"],
+            },
+        ]
+        self.assertEqual(
+            response,
+            {
+                "object": "mixed.search",
+                "schema_version": "1",
+                "status": "succeeded",
+                "query": "Beach Sunset",
+                "search_revision": "4abba978c53b2660845f844929512d37757b84264975d7677b3fd7204446d01e",
+                "analysis_heads": {"asset-video": "run-current"},
+                "results": expected_results,
+                "data": expected_results,
+                "candidate_count": 3,
+                "considered_count": 4,
+                "retrieval_mode": "lexical_local_fallback",
+                "semantic_available": False,
+                "external_analysis": False,
+            },
+        )
+
+    def test_mixed_search_request_validation_messages_are_stable(self) -> None:
+        class NoCandidates:
+            @staticmethod
+            def mixed_candidates():
+                return [], {}
+
+        retrieval = MixedRetrievalService(NoCandidates())
+        cases = [
+            ({}, "`query` must be a non-empty string."),
+            ({"query": "valid", "top_k": True}, "`top_k` must be an integer from 1 to 100."),
+            ({"query": "valid", "top_k": 0}, "`top_k` must be an integer from 1 to 100."),
+            (
+                {"query": "valid", "types": ["unknown"]},
+                "`types` must include image/image_asset or video/video_segment.",
+            ),
+        ]
+        for payload, message in cases:
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, re.escape(message)):
+                retrieval.search(payload)
 
     def test_duplicate_content_rebind_preserves_one_preferred_source(self) -> None:
         first_path = self.library / "first.mp4"

@@ -3,8 +3,20 @@ target-version = "py310"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F"]
+select = ["E", "F", "C90"]
 ignore = ["E501"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 30
+
+[tool.ruff.lint.extend-per-file-ignores]
+# Tracked debt: these pre-refactor ranking, planning, and timeline paths are
+# protected by behavior tests and must only move downward in complexity.
+".agents/plugins/plugins/memolens/scripts/memolens_timeline.py" = ["C901"]
+"backend/src/retrieval/retrieval.py" = ["C901"]
+"core/photo_atlas.py" = ["C901"]
+"indexing/pipeline.py" = ["C901"]
+"scripts/*.py" = ["C901"]
 
 [tool.ruff.lint.per-file-ignores]
 "backend/app.py" = ["E402"]

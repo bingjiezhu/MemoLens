@@ -22,12 +22,14 @@ SCRIPTS = PLUGIN_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from memolens_core import (  # noqa: E402
+    MAX_RESPONSE_BYTES,
     TRUST_LOCAL_API_ENV,
     MemoLensError,
     MemoLensGateway,
     _state_dir_candidates,
     validate_base_url,
 )
+from memolens_contracts import PLUGIN_VERSION  # noqa: E402
 
 
 class _MemoLensHandler(BaseHTTPRequestHandler):
@@ -46,6 +48,11 @@ class _MemoLensHandler(BaseHTTPRequestHandler):
         server = self.server
         server.request_paths.append(self.path)
         if self.path == "/healthz":
+            if server.redirect_health:
+                self.send_response(302)
+                self.send_header("Location", "/v1/settings")
+                self.end_headers()
+                return
             payload = {
                 "status": "ok",
                 "object": "health.check",
@@ -208,6 +215,7 @@ class PluginTests(unittest.TestCase):
         self.server.decoy_dir = self.root / "health-decoy"
         self.server.valid_identity = True
         self.server.valid_settings = True
+        self.server.redirect_health = False
         self.server.settings_requests = 0
         self.server.request_paths = []
         self.server.asset_count = 2
@@ -340,6 +348,68 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(second["source"], "local_api")
         self.assertEqual(self.server.settings_requests, 2)
 
+    def test_valid_identity_and_settings_are_cached_as_one_verified_pair(self) -> None:
+        gateway = self.gateway(
+            trust_local_api=True,
+            base_url=self.base_url,
+            timeout=1,
+        )
+
+        first = gateway.health()
+        second = gateway.health()
+
+        self.assertIs(first, second)
+        self.assertEqual(self.server.request_paths, ["/healthz", "/v1/settings"])
+        self.assertEqual(self.server.settings_requests, 1)
+
+    def test_transport_refuses_redirects_and_bounds_timeout_and_response_size(self) -> None:
+        self.server.redirect_health = True
+        gateway = self.gateway(
+            trust_local_api=True,
+            base_url=self.base_url,
+            timeout=999,
+        )
+        self.assertEqual(gateway.timeout, 30.0)
+        with self.assertRaises(MemoLensError) as redirect:
+            gateway.health()
+        self.assertEqual(redirect.exception.code, "redirect_refused")
+        self.assertEqual(self.server.settings_requests, 0)
+
+        class OversizedResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, amount: int) -> bytes:
+                self.amount = amount
+                return b"x" * amount
+
+        class RecordingOpener:
+            def __init__(self) -> None:
+                self.response = OversizedResponse()
+                self.timeout = None
+
+            def open(self, _request, *, timeout: float):
+                self.timeout = timeout
+                return self.response
+
+        opener = RecordingOpener()
+        gateway._opener = opener
+        with self.assertRaises(MemoLensError) as oversized:
+            gateway._request_json("/healthz", verify_identity=False)
+        self.assertEqual(oversized.exception.code, "response_too_large")
+        self.assertEqual(opener.response.amount, MAX_RESPONSE_BYTES + 1)
+        self.assertEqual(opener.timeout, 30.0)
+
+        minimum_timeout = self.gateway(
+            trust_local_api=True,
+            base_url=self.base_url,
+            timeout=0,
+        )
+        self.assertEqual(minimum_timeout.timeout, 0.1)
+
     def test_sqlite_fallback_is_read_only_and_rejects_traversal(self) -> None:
         gateway = self.gateway(
             base_url="http://127.0.0.1:1",
@@ -358,6 +428,13 @@ class PluginTests(unittest.TestCase):
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM image_index").fetchone()[0], 2
             )
+
+    def test_sqlite_connection_uses_uri_read_only_and_query_only(self) -> None:
+        gateway = self.gateway(db_path=self.db, library_dir=self.library)
+        with closing(gateway._sqlite_connection()) as connection:
+            self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 1)
+            with self.assertRaises(sqlite3.OperationalError):
+                connection.execute("CREATE TABLE forbidden_write (id INTEGER)")
 
     def test_sqlite_fallback_streams_past_ten_thousand_with_bounded_results(self) -> None:
         with closing(sqlite3.connect(self.db)) as connection:
@@ -460,6 +537,10 @@ class PluginTests(unittest.TestCase):
     def test_marketplace_resolves_from_repository_root(self) -> None:
         manifest_path = MARKETPLACE_ROOT / ".agents" / "plugins" / "marketplace.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        release_version = json.loads(
+            (MARKETPLACE_ROOT / "package.json").read_text(encoding="utf-8")
+        )["version"]
+        self.assertEqual(PLUGIN_VERSION, release_version)
         self.assertEqual(manifest["name"], "memolens-local")
         entry = next(item for item in manifest["plugins"] if item["name"] == "memolens")
         resolved_plugin = (MARKETPLACE_ROOT / entry["source"]["path"]).resolve()
@@ -475,12 +556,12 @@ class PluginTests(unittest.TestCase):
         )
         self.assertEqual(plugin_manifest["interface"]["logo"], "./assets/memolens.svg")
         self.assertTrue(
-            plugin_manifest["version"].startswith("0.3.0+codex."),
+            plugin_manifest["version"].startswith(f"{release_version}+codex."),
             plugin_manifest["version"],
         )
         self.assertEqual(entry["policy"]["authentication"], "ON_USE")
         self.assertIn(
-            "0.3.0",
+            release_version,
             (resolved_plugin / "README.md").read_text(encoding="utf-8"),
         )
 

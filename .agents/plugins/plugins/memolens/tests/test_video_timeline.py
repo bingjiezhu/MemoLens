@@ -23,6 +23,7 @@ from memolens_core import (  # noqa: E402
     MemoLensError,
     MemoLensGateway,
 )
+from memolens_contracts import PLUGIN_VERSION  # noqa: E402
 from memolens_mcp import SERVER_INFO, TOOLS  # noqa: E402
 from memolens_timeline import (  # noqa: E402
     TimelineInputError,
@@ -609,7 +610,7 @@ class VideoTimelineTests(unittest.TestCase):
             self.assertFalse(status["capabilities"][capability])
 
     def test_mcp_exposes_only_read_or_in_memory_tools_with_accurate_annotations(self) -> None:
-        self.assertEqual(SERVER_INFO["version"], "0.3.0")
+        self.assertEqual(SERVER_INFO["version"], PLUGIN_VERSION)
         names = {tool["name"] for tool in TOOLS}
         self.assertEqual(len(names), 13)
         self.assertTrue(
