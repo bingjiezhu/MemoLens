@@ -69,7 +69,7 @@ def create_openai_client(*, api_key: str | None, base_url: str) -> OpenAI:
         raise RuntimeError(
             "Incompatible OpenAI SDK stack detected "
             f"(openai={openai_version}, httpx={httpx_version}). "
-            "Reinstall from `requirements.txt` or pin `httpx<0.28`."
+            "Reinstall the supported versions from `requirements.txt`."
         ) from exc
 
 

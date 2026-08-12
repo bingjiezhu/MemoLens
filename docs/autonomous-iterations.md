@@ -46,13 +46,13 @@ The working target is a local-first macOS photo agent with:
 - Updated runtime callers and smoke-test scripts to import retrieval services from the backend-owned path.
 - Surfaced parsed query / filter chips in the React UI so retrieval is easier to inspect.
 
-## In Progress
+### Pass 6
 
-- Replace the remaining backend-owned retrieval shims with fully relocated source files.
+- Relocated the active Python planner, retrieval, and copywriter implementations into `backend/src/retrieval/`.
+- Kept thin compatibility imports under `frontend/querying/` for downstream callers.
 
 ## Next Queue
 
-- Replace the remaining `frontend/querying` runtime ownership with backend-owned modules.
 - Add filter chips and a structured query inspector to the result view.
 - Add ignore rules, sidecar metadata ingestion, and reindex/reset actions.
 - Add a first-run onboarding flow for library selection and indexing.

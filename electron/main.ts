@@ -4,10 +4,15 @@ import { createRequire } from "node:module";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { ensureBackendReady, stopManagedBackend } from "./backendManager.js";
+import {
+  DESKTOP_SESSION_TOKEN,
+  ensureBackendReady,
+  stopManagedBackend,
+} from "./backendManager.js";
 import {
   DEFAULT_BACKEND_URL,
   loadDesktopSettings,
+  resolveLibraryDbPath,
   saveDesktopSettings,
 } from "./desktopSettings.js";
 
@@ -21,31 +26,8 @@ import type {
 } from "../src/query/types.js";
 
 const require = createRequire(import.meta.url);
-const { app, BrowserWindow, dialog, ipcMain, protocol, net } =
+const { app, BrowserWindow, dialog, ipcMain } =
   require("electron") as typeof Electron.CrossProcessExports;
-
-protocol.registerSchemesAsPrivileged([
-  {
-    scheme: "memolens-local",
-    privileges: {
-      standard: true,
-      secure: true,
-      bypassCSP: true,
-      allowServiceWorkers: true,
-      supportFetchAPI: true,
-      corsEnabled: true,
-      stream: true,
-    },
-  },
-]);
-
-// Linux dev setups often lack a correctly configured chrome-sandbox helper.
-// MemoLens runs as a local desktop tool, so we disable the setuid sandbox here
-// to keep the Electron shell usable without extra system-level setup.
-if (process.platform === "linux") {
-  app.commandLine.appendSwitch("no-sandbox");
-  app.commandLine.appendSwitch("disable-setuid-sandbox");
-}
 
 const SUPPORTED_IMAGE_EXTENSIONS = new Set([
   ".jpg",
@@ -95,52 +77,127 @@ interface ActiveIndexingJob {
 
 let activeIndexingJob: ActiveIndexingJob | null = null;
 let indexingStartInProgress = false;
+let desktopSessionAuthenticationConfigured = false;
+const trustedRendererEntries = new Map<number, string>();
 
-/**
- * Allow the renderer (loaded from file://) to make requests to the local
- * backend at 127.0.0.1:5519.  We intercept every response from that origin
- * and ensure the CORS headers the browser needs are present, regardless of
- * what the backend itself returns.  This is safe because MemoLens only ever
- * connects to a trusted, user-started localhost service.
- */
-function configureLocalBackendAccess(): void {
+function assertTrustedIpcSender(event: Electron.IpcMainInvokeEvent): void {
+  const expectedEntryUrl = trustedRendererEntries.get(event.sender.id);
+  const isMainFrame = event.senderFrame === event.sender.mainFrame;
+  if (
+    !expectedEntryUrl
+    || !isMainFrame
+    || !isTrustedRendererNavigation(event.senderFrame.url, expectedEntryUrl)
+  ) {
+    throw new Error("Rejected IPC call from an untrusted renderer frame.");
+  }
+}
+
+function configureSessionPermissions(): void {
   const { session } = require("electron") as typeof Electron.CrossProcessExports;
-  const backendPattern = "http://127.0.0.1:5519/*";
+  const isAllowed = (
+    webContents: Electron.WebContents | null,
+    permission: string,
+  ): boolean => Boolean(
+    webContents
+    && trustedRendererEntries.has(webContents.id)
+    && permission === "clipboard-sanitized-write"
+  );
 
-  session.defaultSession.webRequest.onHeadersReceived(
-    { urls: [backendPattern] },
+  session.defaultSession.setPermissionCheckHandler((webContents, permission) => (
+    isAllowed(webContents, permission)
+  ));
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    callback(isAllowed(webContents, permission));
+  });
+  session.defaultSession.setDevicePermissionHandler(() => false);
+}
+
+function configureDesktopSessionAuthentication(): void {
+  if (desktopSessionAuthenticationConfigured) {
+    return;
+  }
+  const { session } = require("electron") as typeof Electron.CrossProcessExports;
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: [`${DEFAULT_BACKEND_URL}/*`] },
     (details, callback) => {
-      const headers = { ...details.responseHeaders };
-      headers["Access-Control-Allow-Origin"] = ["*"];
-      headers["Access-Control-Allow-Methods"] = ["GET, POST, PUT, OPTIONS"];
-      headers["Access-Control-Allow-Headers"] = ["Content-Type, Authorization"];
-      callback({ responseHeaders: headers });
+      details.requestHeaders["X-MemoLens-Desktop-Token"] = DESKTOP_SESSION_TOKEN;
+      callback({ requestHeaders: details.requestHeaders });
     },
   );
+  desktopSessionAuthenticationConfigured = true;
+}
+
+function isLoopbackDevelopmentUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    return ["http:", "https:"].includes(parsed.protocol)
+      && ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isTrustedRendererNavigation(targetUrl: string, entryUrl: string): boolean {
+  try {
+    const target = new URL(targetUrl);
+    const entry = new URL(entryUrl);
+    if (entry.protocol === "file:") {
+      return target.protocol === "file:" && fileURLToPath(target) === fileURLToPath(entry);
+    }
+    return target.origin === entry.origin;
+  } catch {
+    return false;
+  }
 }
 
 function createWindow(): Electron.BrowserWindow {
   const window = new BrowserWindow({
     width: 1560,
     height: 1040,
-    minWidth: 1120,
-    minHeight: 760,
+    minWidth: 760,
+    minHeight: 640,
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
-      preload: join(CURRENT_DIR, "preload.js"),
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      webviewTag: false,
+      preload: join(CURRENT_DIR, "preload.cjs"),
     },
   });
 
-  const devUrl = process.env.ELECTRON_RENDERER_URL;
-  if (devUrl) {
-    void window.loadURL(devUrl);
-  } else {
-    const indexPath = join(PROJECT_ROOT, "dist", "index.html");
-    void window.loadURL(pathToFileURL(indexPath).toString());
+  const requestedDevUrl = process.env.ELECTRON_RENDERER_URL;
+  const devUrl = requestedDevUrl && isLoopbackDevelopmentUrl(requestedDevUrl)
+    ? requestedDevUrl
+    : null;
+  if (requestedDevUrl && devUrl === null) {
+    console.error(`[memolens-desktop] rejected non-loopback renderer URL: ${requestedDevUrl}`);
   }
+  const indexPath = join(PROJECT_ROOT, "dist", "index.html");
+  const rendererEntryUrl = devUrl ?? pathToFileURL(indexPath).toString();
+  const webContentsId = window.webContents.id;
+  trustedRendererEntries.set(webContentsId, rendererEntryUrl);
+  window.webContents.once("destroyed", () => {
+    trustedRendererEntries.delete(webContentsId);
+  });
+
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    console.warn(`[memolens-desktop] blocked new window: ${url}`);
+    return { action: "deny" };
+  });
+  window.webContents.on("will-navigate", (event, navigationUrl) => {
+    if (!isTrustedRendererNavigation(navigationUrl, rendererEntryUrl)) {
+      event.preventDefault();
+      console.warn(`[memolens-desktop] blocked renderer navigation: ${navigationUrl}`);
+    }
+  });
+  window.webContents.on("will-attach-webview", (event) => {
+    event.preventDefault();
+  });
+
+  void window.loadURL(rendererEntryUrl);
 
   window.webContents.on("did-finish-load", () => {
     console.log("[memolens-desktop] renderer finished loading");
@@ -187,15 +244,8 @@ function chunkPaths(values: string[], chunkSize: number): string[][] {
   return chunks;
 }
 
-function resolveSelectedDbPath(settings: DesktopSettings, folderPath: string): string {
-  const defaultLibraryDir = settings.defaultLibraryDir ? resolve(settings.defaultLibraryDir) : null;
-  const defaultDbPath = settings.defaultDbPath ? resolve(settings.defaultDbPath) : null;
-
-  if (defaultLibraryDir === folderPath && defaultDbPath) {
-    return defaultDbPath;
-  }
-
-  return join(folderPath, "photo_index.db");
+function resolveSelectedDbPath(folderPath: string): string {
+  return resolveLibraryDbPath(folderPath);
 }
 
 function emitProgress(sender: Electron.WebContents, progress: DesktopIndexingProgress): void {
@@ -278,6 +328,7 @@ async function analyzeImageBatch({
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "X-MemoLens-Desktop-Token": DESKTOP_SESSION_TOKEN,
     },
     body: JSON.stringify(payload),
   });
@@ -343,7 +394,8 @@ async function analyzeImageBatch({
   };
 }
 
-ipcMain.handle("memolens:pick-image-folder", async () => {
+ipcMain.handle("memolens:pick-image-folder", async (event) => {
+  assertTrustedIpcSender(event);
   const settings = await loadDesktopSettings(PROJECT_ROOT);
   const result = await dialog.showOpenDialog({
     properties: ["openDirectory"],
@@ -355,32 +407,46 @@ ipcMain.handle("memolens:pick-image-folder", async () => {
   }
 
   const folderPath = resolve(result.filePaths[0]);
+  const dbPath = resolveSelectedDbPath(folderPath);
+  await saveDesktopSettings(PROJECT_ROOT, {
+    ...settings,
+    defaultLibraryDir: folderPath,
+    defaultDbPath: dbPath,
+  });
   const selection: DesktopFolderSelection = {
     folderPath,
-    dbPath: resolveSelectedDbPath(settings, folderPath),
+    dbPath,
   };
   return selection;
 });
 
-ipcMain.handle("memolens:get-settings", async (): Promise<DesktopSettings> => {
+ipcMain.handle("memolens:get-settings", async (event): Promise<DesktopSettings> => {
+  assertTrustedIpcSender(event);
   return loadDesktopSettings(PROJECT_ROOT);
 });
 
 ipcMain.handle(
   "memolens:save-settings",
-  async (_event, settings: DesktopSettings): Promise<DesktopSettings> => {
+  async (event, settings: DesktopSettings): Promise<DesktopSettings> => {
+    assertTrustedIpcSender(event);
     return saveDesktopSettings(PROJECT_ROOT, settings);
   },
 );
 
-ipcMain.handle("memolens:ensure-backend", async () => {
+ipcMain.handle("memolens:ensure-backend", async (event) => {
+  assertTrustedIpcSender(event);
   const settings = await loadDesktopSettings(PROJECT_ROOT);
-  return ensureBackendReady(PROJECT_ROOT, settings);
+  const status = await ensureBackendReady(PROJECT_ROOT, settings);
+  if (status.state === "connected" || status.state === "started") {
+    configureDesktopSessionAuthentication();
+  }
+  return status;
 });
 
 ipcMain.handle(
   "memolens:start-indexing",
   async (event, options: DesktopIndexingStartOptions): Promise<DesktopIndexingResult> => {
+    assertTrustedIpcSender(event);
     if (activeIndexingJob !== null) {
       throw new Error("An indexing job is already running. Pause or wait for the current run to finish.");
     }
@@ -393,8 +459,7 @@ ipcMain.handle(
 
     try {
       const folderPath = resolve(options.folderPath);
-      const settings = await loadDesktopSettings(PROJECT_ROOT);
-      const dbPath = resolve(options.dbPath ?? resolveSelectedDbPath(settings, folderPath));
+      const dbPath = resolve(options.dbPath ?? resolveSelectedDbPath(folderPath));
       const apiBase = DEFAULT_BACKEND_URL;
       const imageFiles = await collectImageFiles(folderPath);
 
@@ -484,7 +549,14 @@ ipcMain.handle(
       }
 
       const result: DesktopIndexingResult = {
-        status: "completed",
+        status:
+          imageFiles.length === 0
+            ? "empty"
+            : failed === imageFiles.length
+              ? "failed"
+              : failed > 0
+                ? "partial"
+                : "completed",
         folderPath,
         dbPath,
         total: imageFiles.length,
@@ -515,7 +587,8 @@ ipcMain.handle(
   },
 );
 
-ipcMain.handle("memolens:pause-indexing", async (): Promise<boolean> => {
+ipcMain.handle("memolens:pause-indexing", async (event): Promise<boolean> => {
+  assertTrustedIpcSender(event);
   const job = activeIndexingJob;
   if (job === null || !canPausePhase(job.progress.phase)) {
     return false;
@@ -530,7 +603,8 @@ ipcMain.handle("memolens:pause-indexing", async (): Promise<boolean> => {
   return true;
 });
 
-ipcMain.handle("memolens:resume-indexing", async (): Promise<boolean> => {
+ipcMain.handle("memolens:resume-indexing", async (event): Promise<boolean> => {
+  assertTrustedIpcSender(event);
   const job = activeIndexingJob;
   if (job === null || !canPausePhase(job.progress.phase)) {
     return false;
@@ -546,33 +620,26 @@ ipcMain.handle("memolens:resume-indexing", async (): Promise<boolean> => {
   return true;
 });
 
-app.whenReady().then(() => {
-  configureLocalBackendAccess();
-
-  protocol.handle("memolens-local", (request) => {
-    try {
-      const parsed = new URL(request.url);
-      const decodedPath = decodeURIComponent(parsed.pathname);
-      console.log(`[memolens-local] Serving: ${decodedPath}`);
-      return net.fetch(pathToFileURL(decodedPath).toString());
-    } catch (error) {
-      console.error("[memolens-local] Failed to parse URL:", request.url, error);
-      return new Response("Not found", { status: 404 });
+app.whenReady().then(async () => {
+  configureSessionPermissions();
+  try {
+    const settings = await loadDesktopSettings(PROJECT_ROOT);
+    const status = await ensureBackendReady(PROJECT_ROOT, settings);
+    if (status.state === "connected" || status.state === "started") {
+      // Only expose the renderer session token after the backend has proved
+      // possession of the spawn-time secret via the public health challenge.
+      configureDesktopSessionAuthentication();
     }
-  });
+    console.log(
+      `[memolens-desktop] backend bootstrap ${status.state} :: ${status.url} :: ${status.message}`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[memolens-desktop] backend bootstrap failed :: ${message}`);
+  }
 
-  void loadDesktopSettings(PROJECT_ROOT)
-    .then((settings) => ensureBackendReady(PROJECT_ROOT, settings))
-    .then((status) => {
-      console.log(
-        `[memolens-desktop] backend bootstrap ${status.state} :: ${status.url} :: ${status.message}`,
-      );
-    })
-    .catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      console.error(`[memolens-desktop] backend bootstrap failed :: ${message}`);
-    });
-
+  // Do not create a renderer that can make authenticated requests until the
+  // backend proof attempt above has completed.
   createWindow();
 
   app.on("activate", () => {

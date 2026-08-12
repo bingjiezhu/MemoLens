@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      renderer-and-desktop:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /photon-bot
+    schedule:
+      interval: weekly
+    groups:
+      photon-bot:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

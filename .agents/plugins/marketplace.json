@@ -1,0 +1,20 @@
+{
+  "name": "memolens-local",
+  "interface": {
+    "displayName": "MemoLens Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "memolens",
+      "source": {
+        "source": "local",
+        "path": "./.agents/plugins/plugins/memolens"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
