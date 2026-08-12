@@ -17,7 +17,7 @@ embedding:
 
 geocode:
   enabled: false
-  user_agent: image-retrieval-local/0.1
+  user_agent: memolens-local/0.1
 
 retrieval:
   semantic_hints:

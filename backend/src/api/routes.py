@@ -20,7 +20,10 @@ from core.photo_atlas import (
 )
 from core.schemas import RetrievedImageSummary, parse_indexing_request, parse_retrieval_request
 from backend.src import reload_runtime
+from indexing.files import ensure_heif_support
 
+
+ensure_heif_support()
 
 api_blueprint = Blueprint("api", __name__)
 LOCAL_CLIENT_ADDRESSES = {"127.0.0.1", "::1"}
