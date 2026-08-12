@@ -6,6 +6,10 @@ import type {
   DesktopIndexingStartOptions,
   DesktopSettings,
 } from "../src/query/types.js";
+import type {
+  DesktopArtifactSaveRequest,
+  DesktopArtifactSaveResult,
+} from "../src/video/types.js";
 
 // Sandboxed preload scripts run in Electron's restricted CommonJS context.
 // `electron` is one of the explicitly supported modules there; Node built-ins
@@ -33,6 +37,9 @@ contextBridge.exposeInMainWorld("memolensDesktop", {
   },
   resumeIndexing(): Promise<boolean> {
     return ipcRenderer.invoke("memolens:resume-indexing");
+  },
+  saveVideoArtifact(request: DesktopArtifactSaveRequest): Promise<DesktopArtifactSaveResult> {
+    return ipcRenderer.invoke("memolens:save-video-artifact", request);
   },
   onIndexingProgress(callback: (progress: DesktopIndexingProgress) => void): () => void {
     const listener = (_event: Electron.IpcRendererEvent, progress: DesktopIndexingProgress) => {

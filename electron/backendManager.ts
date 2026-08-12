@@ -17,10 +17,36 @@ const BACKEND_STARTUP_TIMEOUT_MS = 30000;
 const HEALTH_POLL_INTERVAL_MS = 500;
 const EXPECTED_BACKEND_SERVICE = "memolens-backend";
 const EXPECTED_API_VERSION = "1";
-export const DESKTOP_SESSION_TOKEN = randomBytes(32).toString("hex");
+let desktopSessionToken = randomBytes(32).toString("hex");
 
 let managedBackendProcess: ChildProcess | null = null;
 let managedBackendStartError: string | null = null;
+let backendIdentityVerified = false;
+
+function updateBackendTrust(trusted: boolean): void {
+  backendIdentityVerified = trusted;
+}
+
+function rotateDesktopSessionToken(): void {
+  desktopSessionToken = randomBytes(32).toString("hex");
+  updateBackendTrust(false);
+}
+
+export function getDesktopSessionToken(): string {
+  return desktopSessionToken;
+}
+
+export function isBackendIdentityVerified(): boolean {
+  return backendIdentityVerified;
+}
+
+export function revokeBackendTrust(): void {
+  rotateDesktopSessionToken();
+}
+
+export function markBackendTrustVerified(): void {
+  updateBackendTrust(true);
+}
 
 function sleep(durationMs: number): Promise<void> {
   return new Promise((resolve) => {
@@ -59,7 +85,7 @@ export function verifyBackendHealthPayload(
     return false;
   }
 
-  const expectedProof = createHmac("sha256", DESKTOP_SESSION_TOKEN)
+  const expectedProof = createHmac("sha256", getDesktopSessionToken())
     .update(challenge)
     .digest();
   const suppliedProofBytes = Buffer.from(suppliedProof, "hex");
@@ -98,6 +124,7 @@ function attachLogging(processRef: ChildProcess): void {
     console.error(`[memolens-backend] failed to start: ${error.message}`);
     if (managedBackendProcess === processRef) {
       managedBackendProcess = null;
+      rotateDesktopSessionToken();
     }
   });
 
@@ -121,6 +148,7 @@ function attachLogging(processRef: ChildProcess): void {
     );
     if (managedBackendProcess === processRef) {
       managedBackendProcess = null;
+      rotateDesktopSessionToken();
     }
   });
 }
@@ -184,6 +212,7 @@ function loadDotEnvVars(projectRoot: string): Record<string, string> {
 }
 
 function killManagedProcess(): void {
+  rotateDesktopSessionToken();
   if (managedBackendProcess !== null) {
     try {
       if (managedBackendProcess.exitCode === null) {
@@ -202,7 +231,12 @@ export async function ensureBackendReady(
 ): Promise<DesktopBackendStatus> {
   const url = normalizeBackendUrl(DEFAULT_BACKEND_URL);
 
+  // A health proof is required on every ensure operation. Until it succeeds,
+  // the Electron session must not attach the bearer to renderer traffic.
+  updateBackendTrust(false);
+
   if (await isBackendHealthy(url)) {
+    updateBackendTrust(true);
     return {
       state: "connected",
       message: "Local backend is online.",
@@ -236,7 +270,7 @@ export async function ensureBackendReady(
         MEMOLENS_APP_STATE_DIR: getCanonicalAppStateDir(),
         MEMOLENS_BACKEND_PORT: resolveBackendPort(url),
         MEMOLENS_BACKEND_DEBUG: "0",
-        MEMOLENS_DESKTOP_SESSION_TOKEN: DESKTOP_SESSION_TOKEN,
+        MEMOLENS_DESKTOP_SESSION_TOKEN: getDesktopSessionToken(),
         PYTHONUNBUFFERED: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -246,6 +280,7 @@ export async function ensureBackendReady(
   }
 
   if (await waitForHealthy(url)) {
+    updateBackendTrust(true);
     return {
       state: "started",
       message: "Local backend started by the desktop app.",
@@ -269,7 +304,7 @@ export async function ensureBackendReady(
       MEMOLENS_APP_STATE_DIR: getCanonicalAppStateDir(),
       MEMOLENS_BACKEND_PORT: resolveBackendPort(url),
       MEMOLENS_BACKEND_DEBUG: "0",
-      MEMOLENS_DESKTOP_SESSION_TOKEN: DESKTOP_SESSION_TOKEN,
+      MEMOLENS_DESKTOP_SESSION_TOKEN: getDesktopSessionToken(),
       PYTHONUNBUFFERED: "1",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -278,6 +313,7 @@ export async function ensureBackendReady(
   attachLogging(retryProcess);
 
   if (await waitForHealthy(url)) {
+    updateBackendTrust(true);
     return {
       state: "started",
       message: "Local backend started by the desktop app (retry succeeded).",
@@ -297,6 +333,7 @@ export async function ensureBackendReady(
 }
 
 export function stopManagedBackend(): void {
+  rotateDesktopSessionToken();
   if (managedBackendProcess !== null && managedBackendProcess.exitCode === null) {
     managedBackendProcess.kill("SIGTERM");
   }

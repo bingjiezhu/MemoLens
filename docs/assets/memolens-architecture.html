@@ -308,18 +308,18 @@
     <header class="hero">
       <div class="brand">
         <div class="eyebrow">Local-first architecture</div>
-        <h1>MemoLens Current Architecture</h1>
+        <h1>MemoLens Creative Memory Architecture</h1>
         <p class="subtitle">
-          One loopback Flask brain powers desktop, browser, and Discord —
-          from private photo indexing to Workbench memories and grounded captions.
+          One authenticated loopback brain turns a private photo and video library into
+          timestamped memory, grounded direction, versioned edits, and local MP4 exports.
         </p>
       </div>
       <div class="loop" aria-label="Product loop">
-        <span class="accent">Index</span><i>→</i>
-        <span>Compose</span><i>→</i>
-        <span>Workbench</span><i>→</i>
-        <span>AI Inspire</span><i>→</i>
-        <span>Discord</span>
+        <span class="accent">Remember</span><i>→</i>
+        <span>Find</span><i>→</i>
+        <span>Direct</span><i>→</i>
+        <span>Edit</span><i>→</i>
+        <span>Render</span>
       </div>
     </header>
 
@@ -332,22 +332,22 @@
         </div>
         <div class="cards">
           <article class="card feature">
-            <h3>Natural-language goal</h3>
-            <p>Find, curate, explain, and publish from everyday language.</p>
-            <div class="tags"><span class="tag">search</span><span class="tag">curate</span><span class="tag">caption</span></div>
+            <h3>Idea → playable first cut</h3>
+            <p>Find real source moments, explain the choices, and edit from everyday language.</p>
+            <div class="tags"><span class="tag">search</span><span class="tag">storyboard</span><span class="tag">timeline</span></div>
           </article>
           <article class="card">
             <h3>Electron + React</h3>
-            <p>Control · Library · Workbench · Compose · Result</p>
+            <p>Control · Library · Workbench · Compose · Create Video</p>
           </article>
           <article class="card">
-            <h3>photon-bot</h3>
-            <p>Discord follow-ups with image replies and originals.</p>
-            <div class="tags"><span class="tag">More like this</span><span class="tag">send originals</span></div>
+            <h3>Codex plugin</h3>
+            <p>Offline mixed-media search, timeline drafts, validation, and safe handoff.</p>
+            <div class="tags"><span class="tag">API-off</span><span class="tag">read-only DB</span></div>
           </article>
           <article class="card">
             <h3>Browser fallback</h3>
-            <p>Vite UI against local API when Electron is unavailable.</p>
+            <p>Vite UI against the local API with Range-based media playback.</p>
           </article>
         </div>
       </section>
@@ -360,21 +360,21 @@
         </div>
         <div class="cards">
           <article class="card feature">
-            <h3>main.ts + preload.ts</h3>
-            <p>Local IPC, <code style="font-family:ui-monospace,Menlo,monospace;font-size:12px;">memolens-local://</code> previews, CORS bridge.</p>
+            <h3>main.ts + preload.cts</h3>
+            <p>Sandboxed IPC, trusted navigation, native folder and export dialogs.</p>
           </article>
           <article class="card">
             <h3>Backend manager</h3>
             <p>Auto-starts Flask on <strong>127.0.0.1:5519</strong> with app-support settings.</p>
           </article>
           <article class="card">
-            <h3>Indexing bridge</h3>
-            <p>Folder picker, batch jobs, pause / resume progress.</p>
-            <div class="tags"><span class="tag">native picker</span><span class="tag">progress</span></div>
+            <h3>Persistent media jobs</h3>
+            <p>Folder picker, bounded workers, cancel / resume, and FFmpeg process cleanup.</p>
+            <div class="tags"><span class="tag">native picker</span><span class="tag">recoverable</span></div>
           </article>
           <article class="card">
             <h3>App Support state</h3>
-            <p>Settings and SQLite live under Application Support, not inside the photo folder.</p>
+            <p>Settings, SQLite, derived frames, and previews live outside the source library.</p>
           </article>
         </div>
       </section>
@@ -387,24 +387,24 @@
         </div>
         <div class="cards">
           <article class="card feature">
-            <h3>/healthz · /v1/settings</h3>
-            <p>Profile catalog, local model tips, index health.</p>
+            <h3>/healthz · /v1/media/capabilities</h3>
+            <p>Verified service identity plus local FFmpeg and analysis readiness.</p>
           </article>
           <article class="card">
-            <h3>/v1/indexing/jobs</h3>
-            <p>Local path + DB overrides, rebuild / reindex.</p>
+            <h3>/v1/assets · /v1/index/jobs</h3>
+            <p>Safe discovery, probe, adaptive segment indexing, progress, and cancellation.</p>
           </article>
           <article class="card">
-            <h3>/v1/retrieval/*</h3>
-            <p>Query planning, ranking, grounded copy.</p>
+            <h3>/v1/search/mixed</h3>
+            <p>Unified image assets and timestamped video-segment evidence.</p>
           </article>
           <article class="card">
-            <h3>/v1/atlas/*</h3>
-            <p>Workbench, memories, baskets, cleanup, generate.</p>
+            <h3>/v1/creative · /v1/timelines</h3>
+            <p>Briefs, grounded storyboards, typed edits, immutable revisions.</p>
           </article>
           <article class="card">
-            <h3>/v1/library/previews</h3>
-            <p>EXIF-safe JPEG previews for camera formats.</p>
+            <h3>/v1/renders · media streams</h3>
+            <p>Validated preview/export jobs and HTTP Range playback.</p>
           </article>
         </div>
       </section>
@@ -417,24 +417,24 @@
         </div>
         <div class="cards">
           <article class="card feature">
-            <h3>Indexing pipeline</h3>
-            <p>EXIF/GPS · vision tags · optional geocode · semantic vectors · quality.</p>
+            <h3>Coarse-to-fine memory</h3>
+            <p>ffprobe · scene changes · representative frames · transcript alignment.</p>
           </article>
           <article class="card">
             <h3>Retrieval service</h3>
-            <p>Planner · hints · embeddings · multi-signal rank · diversity.</p>
+            <p>Pictures + video ranges · lexical/semantic evidence · diversity.</p>
           </article>
           <article class="card">
-            <h3>Grounded copywriter</h3>
-            <p>Image-aware title, caption, and highlights.</p>
+            <h3>Director + timeline compiler</h3>
+            <p>Creative constraints → sourced storyboard → typed reversible edits.</p>
           </article>
           <article class="card">
-            <h3>Photo Atlas</h3>
-            <p>PCA layout · clusters · memories · duplicate stacks · roles.</p>
+            <h3>Deterministic renderer</h3>
+            <p>Validated JSON → fixed FFmpeg argv → atomic H.264/AAC output.</p>
           </article>
           <article class="card">
-            <h3>AI Inspire</h3>
-            <p>Sanitized summaries → fresh Compose prompts.</p>
+            <h3>Photo Atlas + Compose</h3>
+            <p>Existing memories, duplicate stacks, curation, and grounded copy stay compatible.</p>
           </article>
         </div>
       </section>
@@ -443,28 +443,28 @@
         <div class="col-head">
           <div class="col-index">05</div>
           <div class="col-title">Local Data</div>
-          <div class="col-sub">Photos, SQLite, models, and guardrails</div>
+          <div class="col-sub">Media, SQLite revisions, grants, and guardrails</div>
         </div>
         <div class="cards">
           <article class="card feature">
-            <h3>Local photo library</h3>
-            <p>Originals stay on disk; indexes never enter git.</p>
+            <h3>Private media library</h3>
+            <p>Original pictures, video, and audio stay unchanged on disk.</p>
           </article>
           <article class="card">
             <h3>SQLite</h3>
-            <p><code style="font-family:ui-monospace,Menlo,monospace;font-size:12px;">image_index</code> + Atlas tables under Application Support.</p>
+            <p>Compatible <code style="font-family:ui-monospace,Menlo,monospace;font-size:12px;">image_index</code> + versioned assets, segments, jobs, and timelines.</p>
           </article>
           <article class="card">
-            <h3>Model profiles</h3>
-            <p>MiniMax · Vertex/Gemini · OpenAI · DashScope · Ollama/Gemma.</p>
+            <h3>Offline-first analysis</h3>
+            <p>Local technical fallback; video frame/audio egress needs a separate opt-in.</p>
           </article>
           <article class="card">
-            <h3>Local-first boundaries</h3>
-            <p>Loopback admin APIs and path overrides for local clients only.</p>
+            <h3>Scoped capabilities</h3>
+            <p>Desktop session trust; Codex read-only by default; writes require short-lived grants.</p>
           </article>
           <article class="card">
             <h3>User-ready outputs</h3>
-            <p>Curated sets · Keyword Galaxy · Workbench · captions.</p>
+            <p>Curated sets · storyboards · timeline revisions · preview and export MP4.</p>
           </article>
         </div>
       </section>
@@ -473,7 +473,7 @@
     <footer class="footer">
       <div class="modules">
         <strong>Generated from repository modules:</strong>
-        electron/ · src/ · backend/ · indexing/ · core/ · frontend/querying/ · photon-bot/
+        electron/ · src/video/ · backend/src/media/ · indexing/ · core/ · Codex plugin
       </div>
       <div class="badge">127.0.0.1:5519 · local-first</div>
     </footer>

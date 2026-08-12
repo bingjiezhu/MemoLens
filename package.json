@@ -1,7 +1,7 @@
 {
   "name": "memolens",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "main": "electron-dist/electron/main.js",
   "engines": {
@@ -23,7 +23,7 @@
     "lint:python": "ruff check .",
     "audit:deps": "npm audit --audit-level=high && pip-audit",
     "test:unit": "python3 -m unittest discover -s tests -v",
-    "test:electron": "npm run build:electron && node --test tests/backend_manager_health.test.mjs",
+    "test:electron": "npm run build:electron && node --experimental-strip-types --test tests/backend_manager_health.test.mjs tests/artifact_integrity.test.mjs tests/video_mutation_ledger.test.mjs",
     "test:plugin": "python3 -m unittest discover -s .agents/plugins/plugins/memolens/tests -v",
     "test:smoke": "python3 scripts/verify_local_deployment.py",
     "verify:local": "bash ./scripts/verify_local.sh",

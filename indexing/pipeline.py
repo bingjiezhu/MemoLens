@@ -5,6 +5,7 @@ from pathlib import Path
 
 from core.config import Settings
 from core.db import ImageIndexRepository
+from core.media_db import MediaRepository
 from core.image_quality import score_image_bytes, score_image_file
 from core.schemas import (
     IndexedImageSummary,
@@ -36,6 +37,7 @@ class IndexingService:
         embedding_service: EmbeddingService,
         text_embedding_service: TextEmbeddingService,
         geocoder: ReverseGeocoder,
+        media_repository: MediaRepository | None = None,
     ):
         self.settings = settings
         self.repository = repository
@@ -43,11 +45,60 @@ class IndexingService:
         self.embedding_service = embedding_service
         self.text_embedding_service = text_embedding_service
         self.geocoder = geocoder
+        self.media_repository = media_repository
+
+    def _sync_media_asset(self, record: StoredImageRecord, library_root: Path) -> None:
+        if self.media_repository is None:
+            return
+        self._sync_media_identity(
+            asset_id=record.id,
+            sha256=record.sha256,
+            filename=record.filename,
+            relative_path=record.relative_path,
+            mime_type=record.mime_type,
+            file_size=record.file_size,
+            width=int(record.width or 1),
+            height=int(record.height or 1),
+            library_root=library_root,
+        )
+
+    def _sync_media_identity(
+        self,
+        *,
+        asset_id: str,
+        sha256: str,
+        filename: str,
+        relative_path: str,
+        mime_type: str,
+        file_size: int,
+        width: int,
+        height: int,
+        library_root: Path,
+    ) -> None:
+        if self.media_repository is None or library_root.resolve() != self.settings.image_library_dir.resolve():
+            return
+        source = (library_root / relative_path).resolve(strict=True)
+        source.relative_to(library_root)
+        if source.is_symlink() or not source.is_file():
+            raise ValueError("Image media source must be a regular non-symlink file.")
+        metadata = source.stat()
+        registered_root = self.media_repository.register_library_root(library_root)
+        asset = self.media_repository.upsert_asset_source(
+            root_id=str(registered_root["id"]),
+            relative_path=relative_path,
+            filename=filename,
+            kind="image",
+            sha256=sha256,
+            mime_type=mime_type,
+            file_size=file_size,
+            mtime_ns=metadata.st_mtime_ns,
+            source_file_id=str(metadata.st_ino),
+            asset_id_override=asset_id,
+        )
+        self.media_repository.update_image_probe(str(asset["id"]), width=width, height=height)
 
     def run(self, indexing_request: IndexingRequest) -> IndexingJobResult:
-        library_root = Path(
-            indexing_request.input.image_dir or self.settings.image_library_dir
-        ).expanduser().resolve()
+        library_root = Path(indexing_request.input.image_dir or self.settings.image_library_dir).expanduser().resolve()
         if indexing_request.input.image is not None:
             return self._run_uploaded_image(indexing_request, library_root)
 
@@ -98,6 +149,18 @@ class IndexingService:
                         updated_at=utc_now_iso(),
                     )
                     skip_message = "already indexed (path updated)"
+
+                self._sync_media_identity(
+                    asset_id=str(existing_record["id"] or local_metadata.id),
+                    sha256=local_metadata.sha256,
+                    filename=local_metadata.filename,
+                    relative_path=local_metadata.relative_path,
+                    mime_type=local_metadata.mime_type,
+                    file_size=local_metadata.file_size,
+                    width=int(local_metadata.width or 1),
+                    height=int(local_metadata.height or 1),
+                    library_root=library_root,
+                )
 
                 skipped.append(
                     IndexedImageSummary(
@@ -156,9 +219,7 @@ class IndexingService:
                     tags=vision_metadata.tags,
                     combined_text=combined_text,
                     text_embedding_model=(
-                        self.settings.text_embedding_model_id
-                        if combined_text_embedding_blob is not None
-                        else None
+                        self.settings.text_embedding_model_id if combined_text_embedding_blob is not None else None
                     ),
                     combined_text_embedding_blob=combined_text_embedding_blob,
                     embedding_backend=self.settings.embedding_backend,
@@ -172,6 +233,7 @@ class IndexingService:
                 )
                 if indexing_request.persist_to_server:
                     self.repository.upsert(record)
+                    self._sync_media_asset(record, library_root)
                 records.append(record)
                 summary_status = "indexed" if indexing_request.persist_to_server else "processed"
 
@@ -318,9 +380,7 @@ class IndexingService:
                     tags=vision_metadata.tags,
                     combined_text=combined_text,
                     text_embedding_model=(
-                        self.settings.text_embedding_model_id
-                        if combined_text_embedding_blob is not None
-                        else None
+                        self.settings.text_embedding_model_id if combined_text_embedding_blob is not None else None
                     ),
                     combined_text_embedding_blob=combined_text_embedding_blob,
                     embedding_backend=self.settings.embedding_backend,
