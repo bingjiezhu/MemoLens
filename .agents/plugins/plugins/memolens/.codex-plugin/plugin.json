@@ -1,0 +1,39 @@
+{
+  "name": "memolens",
+  "version": "0.2.0",
+  "description": "Private local photo search for Codex through read-only SQLite, with optional user-trusted MemoLens loopback features.",
+  "author": {
+    "name": "MemoLens contributors",
+    "url": "https://github.com/bingjiezhu/MemoLens"
+  },
+  "homepage": "https://github.com/bingjiezhu/MemoLens",
+  "repository": "https://github.com/bingjiezhu/MemoLens",
+  "license": "MIT",
+  "keywords": [
+    "photos",
+    "local-first",
+    "search",
+    "memories",
+    "privacy"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "MemoLens",
+    "shortDescription": "Search and narrate your private local photos.",
+    "longDescription": "MemoLens lets Codex search a local photo index through SQLite opened read-only, inspect traversal-checked matches with Codex vision, and create grounded albums or narratives. No third-party model API key is required. The unauthenticated loopback API is disabled by default and requires explicit user opt-in for memories and cleanup reports.",
+    "developerName": "MemoLens contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Local photo search",
+      "Memory discovery",
+      "Read-only cleanup review",
+      "Offline SQLite search"
+    ],
+    "websiteURL": "https://github.com/bingjiezhu/MemoLens",
+    "brandColor": "#6750A4",
+    "composerIcon": "./assets/memolens.svg",
+    "logo": "./assets/memolens.svg",
+    "defaultPrompt": "Search my local MemoLens library, inspect the strongest matching photos with Codex vision, and create a grounded album or narrative without changing my originals."
+  }
+}

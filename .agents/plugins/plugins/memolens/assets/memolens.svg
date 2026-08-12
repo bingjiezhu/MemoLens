@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title description">
+  <title id="title">MemoLens</title>
+  <desc id="description">A violet camera lens containing a warm memory spark.</desc>
+  <defs>
+    <linearGradient id="frame" x1="18" y1="14" x2="110" y2="116" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8B72D8"/>
+      <stop offset="1" stop-color="#4C378D"/>
+    </linearGradient>
+    <radialGradient id="lens" cx="42%" cy="34%" r="72%">
+      <stop stop-color="#BFC8FF"/>
+      <stop offset="0.44" stop-color="#6750A4"/>
+      <stop offset="1" stop-color="#241A47"/>
+    </radialGradient>
+  </defs>
+  <rect x="8" y="18" width="112" height="94" rx="24" fill="url(#frame)"/>
+  <path d="M35 18l8-10h42l8 10" fill="#6750A4"/>
+  <circle cx="64" cy="65" r="35" fill="#F8F6FF" opacity=".96"/>
+  <circle cx="64" cy="65" r="28" fill="url(#lens)"/>
+  <path d="M64 43l5.1 11.5L81 59.6l-11.9 5.1L64 76.5l-5.1-11.8L47 59.6l11.9-5.1z" fill="#FFD48A"/>
+  <circle cx="101" cy="37" r="6" fill="#FFD48A"/>
+</svg>

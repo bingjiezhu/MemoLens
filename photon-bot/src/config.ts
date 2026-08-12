@@ -11,6 +11,7 @@ export type BotConfig = {
   backendSendPathOverrides: boolean;
   discordSendImageWidth: number;
   discordBotToken: string;
+  discordAllowedUserIds: string[];
   discordAllowedChannelIds: string[];
   backendRequestTimeoutMs: number;
   defaultTopK: number;
@@ -30,6 +31,13 @@ let envLoaded = false;
 
 export function loadConfig(): BotConfig {
   loadEnvFiles();
+
+  // This is deliberately parsed before filesystem and network settings so a
+  // missing privacy boundary is the first startup error an operator sees.
+  const discordAllowedUserIds = readRequiredStringList(
+    process.env.DISCORD_ALLOWED_USER_IDS,
+    "DISCORD_ALLOWED_USER_IDS",
+  );
 
   const backendBaseUrl = readUrl(
     process.env.BACKEND_BASE_URL ?? "http://127.0.0.1:5519",
@@ -93,6 +101,7 @@ export function loadConfig(): BotConfig {
     backendSendPathOverrides,
     discordSendImageWidth,
     discordBotToken,
+    discordAllowedUserIds,
     discordAllowedChannelIds,
     backendRequestTimeoutMs,
     defaultTopK,
@@ -199,10 +208,24 @@ function readStringList(rawValue: string | undefined): string[] {
     return [];
   }
 
-  return rawValue
-    .split(",")
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0);
+  return [
+    ...new Set(
+      rawValue
+        .split(",")
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    ),
+  ];
+}
+
+function readRequiredStringList(rawValue: string | undefined, key: string): string[] {
+  const values = readStringList(rawValue);
+  if (values.length === 0) {
+    throw new Error(
+      `${key} must contain at least one Discord user ID. Refusing to start with an empty user allowlist.`,
+    );
+  }
+  return values;
 }
 
 function readInteger(
