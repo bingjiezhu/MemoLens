@@ -5,8 +5,10 @@
 Turn a private photo folder into a searchable memory layer — index locally, search in natural language, curate diverse results, explore memories in Workbench, and reuse the same brain from Discord.
 
 <p align="center">
-  <img src="docs/assets/memolens-architecture.png" alt="MemoLens architecture" width="920" />
+  <img src="docs/assets/memolens-architecture.png" alt="MemoLens architecture — local-first layers from user surfaces to SQLite" width="100%" />
 </p>
+
+<p align="center"><sub>Source artboard: <code>docs/assets/memolens-architecture.html</code></sub></p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
