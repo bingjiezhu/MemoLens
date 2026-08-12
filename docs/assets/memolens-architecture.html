@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>MemoLens Architecture</title>
+  <style>
+    :root {
+      --bg: #f3ede4;
+      --bg-soft: #faf5ee;
+      --panel: #fffbf4;
+      --line: rgba(43, 34, 22, 0.12);
+      --line-strong: rgba(43, 34, 22, 0.2);
+      --text: #201a13;
+      --muted: #6c655d;
+      --gold: #a88a58;
+      --sage: #5e7262;
+      --charcoal: #2e2a27;
+      --teal: #3f6b73;
+      --clay: #98573d;
+      --ink: #1c1814;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 2400px;
+      height: 1480px;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Avenir Next", "Helvetica Neue", "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      background:
+        radial-gradient(circle at 12% 8%, rgba(168, 138, 88, 0.16), transparent 34%),
+        radial-gradient(circle at 88% 12%, rgba(94, 114, 98, 0.14), transparent 32%),
+        radial-gradient(circle at 50% 100%, rgba(63, 107, 115, 0.08), transparent 40%),
+        linear-gradient(180deg, #f7f2e9 0%, #f3ede4 46%, #efe8dd 100%);
+      padding: 48px 56px 40px;
+      position: relative;
+    }
+
+    .frame {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+
+    .hero {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 32px;
+    }
+
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-width: 1180px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--sage);
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 28px;
+      height: 2px;
+      background: linear-gradient(90deg, var(--gold), var(--sage));
+      border-radius: 999px;
+    }
+
+    h1 {
+      font-family: "Iowan Old Style", "Baskerville", "Georgia", serif;
+      font-size: 58px;
+      line-height: 1.02;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 22px;
+      line-height: 1.45;
+      max-width: 980px;
+    }
+
+    .loop {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 18px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 251, 244, 0.82);
+      box-shadow: 0 18px 40px rgba(44, 34, 22, 0.06);
+      white-space: nowrap;
+    }
+
+    .loop span {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--charcoal);
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid var(--line);
+    }
+
+    .loop span.accent {
+      background: linear-gradient(135deg, rgba(168, 138, 88, 0.18), rgba(94, 114, 98, 0.16));
+      border-color: rgba(168, 138, 88, 0.28);
+    }
+
+    .loop i {
+      color: var(--gold);
+      font-style: normal;
+      font-weight: 700;
+    }
+
+    .columns {
+      flex: 1;
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 18px;
+      min-height: 0;
+    }
+
+    .col {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      min-width: 0;
+      padding: 18px;
+      border-radius: 28px;
+      border: 1px solid var(--line);
+      background: rgba(255, 251, 244, 0.55);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .col::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 4px;
+      background: var(--accent);
+      opacity: 0.9;
+    }
+
+    .col.surfaces { --accent: #5e7262; --soft: rgba(94, 114, 98, 0.12); }
+    .col.runtime { --accent: #a88a58; --soft: rgba(168, 138, 88, 0.12); }
+    .col.api { --accent: #3f6b73; --soft: rgba(63, 107, 115, 0.12); }
+    .col.intel { --accent: #98573d; --soft: rgba(152, 87, 61, 0.11); }
+    .col.data { --accent: #2e2a27; --soft: rgba(46, 42, 39, 0.08); }
+
+    .col-head {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 4px 4px 8px;
+    }
+
+    .col-index {
+      width: 34px;
+      height: 34px;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      font-size: 14px;
+      font-weight: 700;
+      color: #fffbf4;
+      background: var(--accent);
+      margin-bottom: 4px;
+    }
+
+    .col-title {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+    }
+
+    .col-sub {
+      font-size: 14px;
+      line-height: 1.35;
+      color: var(--muted);
+    }
+
+    .cards {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      flex: 1;
+    }
+
+    .card {
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.72);
+      padding: 14px 15px 15px;
+      box-shadow: 0 10px 24px rgba(44, 34, 22, 0.04);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-height: 0;
+      flex: 1;
+      justify-content: center;
+    }
+
+    .card.feature {
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(255, 251, 244, 0.9));
+      border-color: rgba(43, 34, 22, 0.14);
+    }
+
+    .card h3 {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--charcoal);
+      letter-spacing: -0.01em;
+    }
+
+    .card p {
+      font-size: 13.5px;
+      line-height: 1.4;
+      color: var(--muted);
+    }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .tag {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--charcoal);
+      background: var(--soft);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 4px 9px;
+    }
+
+    .footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 16px 22px;
+      border-radius: 20px;
+      border: 1px solid var(--line);
+      background: rgba(255, 251, 244, 0.78);
+    }
+
+    .modules {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .modules strong {
+      color: var(--charcoal);
+      font-weight: 700;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--charcoal), #47413a);
+      color: #f8f2e9;
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .badge::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #c8d5b9;
+      box-shadow: 0 0 0 4px rgba(200, 213, 185, 0.25);
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <header class="hero">
+      <div class="brand">
+        <div class="eyebrow">Local-first architecture</div>
+        <h1>MemoLens Current Architecture</h1>
+        <p class="subtitle">
+          One loopback Flask brain powers desktop, browser, and Discord —
+          from private photo indexing to Workbench memories and grounded captions.
+        </p>
+      </div>
+      <div class="loop" aria-label="Product loop">
+        <span class="accent">Index</span><i>→</i>
+        <span>Compose</span><i>→</i>
+        <span>Workbench</span><i>→</i>
+        <span>AI Inspire</span><i>→</i>
+        <span>Discord</span>
+      </div>
+    </header>
+
+    <main class="columns">
+      <section class="col surfaces">
+        <div class="col-head">
+          <div class="col-index">01</div>
+          <div class="col-title">User Surfaces</div>
+          <div class="col-sub">How people enter the memory loop</div>
+        </div>
+        <div class="cards">
+          <article class="card feature">
+            <h3>Natural-language goal</h3>
+            <p>Find, curate, explain, and publish from everyday language.</p>
+            <div class="tags"><span class="tag">search</span><span class="tag">curate</span><span class="tag">caption</span></div>
+          </article>
+          <article class="card">
+            <h3>Electron + React</h3>
+            <p>Control · Library · Workbench · Compose · Result</p>
+          </article>
+          <article class="card">
+            <h3>photon-bot</h3>
+            <p>Discord follow-ups with image replies and originals.</p>
+            <div class="tags"><span class="tag">More like this</span><span class="tag">send originals</span></div>
+          </article>
+          <article class="card">
+            <h3>Browser fallback</h3>
+            <p>Vite UI against local API when Electron is unavailable.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="col runtime">
+        <div class="col-head">
+          <div class="col-index">02</div>
+          <div class="col-title">Desktop Runtime</div>
+          <div class="col-sub">macOS shell around the local backend</div>
+        </div>
+        <div class="cards">
+          <article class="card feature">
+            <h3>main.ts + preload.ts</h3>
+            <p>Local IPC, <code style="font-family:ui-monospace,Menlo,monospace;font-size:12px;">memolens-local://</code> previews, CORS bridge.</p>
+          </article>
+          <article class="card">
+            <h3>Backend manager</h3>
+            <p>Auto-starts Flask on <strong>127.0.0.1:5519</strong> with app-support settings.</p>
+          </article>
+          <article class="card">
+            <h3>Indexing bridge</h3>
+            <p>Folder picker, batch jobs, pause / resume progress.</p>
+            <div class="tags"><span class="tag">native picker</span><span class="tag">progress</span></div>
+          </article>
+          <article class="card">
+            <h3>App Support state</h3>
+            <p>Settings and SQLite live under Application Support, not inside the photo folder.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="col api">
+        <div class="col-head">
+          <div class="col-index">03</div>
+          <div class="col-title">Flask API</div>
+          <div class="col-sub">Loopback services for trusted local clients</div>
+        </div>
+        <div class="cards">
+          <article class="card feature">
+            <h3>/healthz · /v1/settings</h3>
+            <p>Profile catalog, local model tips, index health.</p>
+          </article>
+          <article class="card">
+            <h3>/v1/indexing/jobs</h3>
+            <p>Local path + DB overrides, rebuild / reindex.</p>
+          </article>
+          <article class="card">
+            <h3>/v1/retrieval/*</h3>
+            <p>Query planning, ranking, grounded copy.</p>
+          </article>
+          <article class="card">
+            <h3>/v1/atlas/*</h3>
+            <p>Workbench, memories, baskets, cleanup, generate.</p>
+          </article>
+          <article class="card">
+            <h3>/v1/library/previews</h3>
+            <p>EXIF-safe JPEG previews for camera formats.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="col intel">
+        <div class="col-head">
+          <div class="col-index">04</div>
+          <div class="col-title">AI + Memory</div>
+          <div class="col-sub">Intelligence that stays grounded in local evidence</div>
+        </div>
+        <div class="cards">
+          <article class="card feature">
+            <h3>Indexing pipeline</h3>
+            <p>EXIF/GPS · vision tags · optional geocode · semantic vectors · quality.</p>
+          </article>
+          <article class="card">
+            <h3>Retrieval service</h3>
+            <p>Planner · hints · embeddings · multi-signal rank · diversity.</p>
+          </article>
+          <article class="card">
+            <h3>Grounded copywriter</h3>
+            <p>Image-aware title, caption, and highlights.</p>
+          </article>
+          <article class="card">
+            <h3>Photo Atlas</h3>
+            <p>PCA layout · clusters · memories · duplicate stacks · roles.</p>
+          </article>
+          <article class="card">
+            <h3>AI Inspire</h3>
+            <p>Sanitized summaries → fresh Compose prompts.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="col data">
+        <div class="col-head">
+          <div class="col-index">05</div>
+          <div class="col-title">Local Data</div>
+          <div class="col-sub">Photos, SQLite, models, and guardrails</div>
+        </div>
+        <div class="cards">
+          <article class="card feature">
+            <h3>Local photo library</h3>
+            <p>Originals stay on disk; indexes never enter git.</p>
+          </article>
+          <article class="card">
+            <h3>SQLite</h3>
+            <p><code style="font-family:ui-monospace,Menlo,monospace;font-size:12px;">image_index</code> + Atlas tables under Application Support.</p>
+          </article>
+          <article class="card">
+            <h3>Model profiles</h3>
+            <p>MiniMax · Vertex/Gemini · OpenAI · DashScope · Ollama/Gemma.</p>
+          </article>
+          <article class="card">
+            <h3>Local-first boundaries</h3>
+            <p>Loopback admin APIs and path overrides for local clients only.</p>
+          </article>
+          <article class="card">
+            <h3>User-ready outputs</h3>
+            <p>Curated sets · Keyword Galaxy · Workbench · captions.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="modules">
+        <strong>Generated from repository modules:</strong>
+        electron/ · src/ · backend/ · indexing/ · core/ · frontend/querying/ · photon-bot/
+      </div>
+      <div class="badge">127.0.0.1:5519 · local-first</div>
+    </footer>
+  </div>
+</body>
+</html>
