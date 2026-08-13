@@ -1,6 +1,22 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 
 import { usePersistedAtlasBasket } from "./basket/usePersistedAtlasBasket";
+import { CreatorMemoryPanel } from "./creator/CreatorMemoryPanel";
+import { CreatorPreferenceContext } from "./creator/CreatorPreferenceContext";
+import {
+  formatCreatorProfileProvenance,
+  snapshotCreatorProfileProvenance,
+} from "./creator/provenance";
+import type { CreatorProfileProvenance } from "./creator/provenance";
+import {
+  activeCreatorPreferenceFields,
+  countCreatorPreferences,
+  creatorMemorySummary,
+  creatorProfilePromptContext,
+  filterCreatorProfile,
+} from "./creator/model";
+import type { CreatorProfileField } from "./creator/types";
+import { useCreatorMemory } from "./creator/useCreatorMemory";
 import {
   DRAFT_PIPELINE_LENGTH,
   applyDraftCopyUpdate,
@@ -15,10 +31,12 @@ import {
   startBackendIndexing,
 } from "./query/api";
 import {
+  commitLocalLibrarySelection,
   ensureDesktopBackend,
   getDesktopSettings,
   isElectronShell,
   isDesktopRuntime,
+  openMemoLensInCodex,
   pickLocalImageFolder,
   pauseLocalIndexing,
   resumeLocalIndexing,
@@ -43,6 +61,8 @@ import type {
   LocalModelRuntimeSummary,
   VlmProfileCatalogEntry,
 } from "./query/types";
+import { MediaInbox } from "./library/MediaInbox";
+import { fetchInbox } from "./library/api";
 
 const AtlasView = lazy(() => import("./AtlasView"));
 const VideoWorkbench = lazy(() => import("./VideoWorkbench"));
@@ -206,7 +226,14 @@ function normalizeDraftForDisplay(
   };
 }
 
-function buildExportContent(draft: DraftResult): string {
+function preserveUserPrompt(draft: DraftResult, prompt: string): DraftResult {
+  return { ...draft, prompt };
+}
+
+function buildExportContent(
+  draft: DraftResult,
+  provenance: CreatorProfileProvenance | null,
+): string {
   const photoLines = draft.selected
     .map(
       (photo, index) =>
@@ -221,13 +248,20 @@ function buildExportContent(draft: DraftResult): string {
     "",
     `Prompt: ${draft.prompt}`,
     "",
+    "Creator Memory Provenance:",
+    formatCreatorProfileProvenance(provenance),
+    ...(provenance ? [`Prompt context: ${provenance.prompt_context}`] : []),
+    "",
     "Selected Photos:",
     photoLines,
   ].join("\n");
 }
 
-function downloadDraft(draft: DraftResult): void {
-  const blob = new Blob([buildExportContent(draft)], {
+function downloadDraft(
+  draft: DraftResult,
+  provenance: CreatorProfileProvenance | null,
+): void {
+  const blob = new Blob([buildExportContent(draft, provenance)], {
     type: "text/plain;charset=utf-8",
   });
   const url = URL.createObjectURL(blob);
@@ -245,6 +279,11 @@ function App() {
   const { workspace: activeWorkspace, createMode } = destination;
   const [hasVisitedCreate, setHasVisitedCreate] = useState(activeWorkspace === "create");
   const [prompt, setPrompt] = useState(INITIAL_PROMPT);
+  const [creatorMemoryEnabled, setCreatorMemoryEnabled] = useState(true);
+  const [activePreferenceFields, setActivePreferenceFields] = useState<CreatorProfileField[]>([]);
+  const [photoCreatorProvenance, setPhotoCreatorProvenance] = useState<CreatorProfileProvenance | null>(null);
+  const [inboxSummary, setInboxSummary] = useState<{ inboxCount: number; hasMore: boolean } | null>(null);
+  const [codexOpenMessage, setCodexOpenMessage] = useState<string | null>(null);
   const [atlasInspirationCards, setAtlasInspirationCards] = useState<AtlasInspirationCard[]>([]);
   const [atlasStorylines, setAtlasStorylines] = useState<AtlasStoryline[]>([]);
   const [atlasSuggestedQueries, setAtlasSuggestedQueries] = useState<string[]>([]);
@@ -281,8 +320,29 @@ function App() {
   const [hasCompletedGeneration, setHasCompletedGeneration] = useState(false);
   const [isIndexingControlPending, setIsIndexingControlPending] = useState(false);
   const seedRef = useRef(1);
+  const generationUserPromptRef = useRef(prompt);
+  const pendingPhotoCreatorProvenanceRef = useRef<CreatorProfileProvenance | null>(null);
   const hasUserNavigatedRef = useRef(false);
-  const basketScope = normalizeScopePath(selectedDbPath ?? health.dbPath);
+  const desktopLibraryConfigured = !desktopRuntime || desktopSettings?.libraryConfigured === true;
+  const basketScope = normalizeScopePath(
+    selectedDbPath ?? (desktopLibraryConfigured ? health.dbPath : null),
+  );
+  const creatorMemory = useCreatorMemory({
+    apiBase,
+    dbPath: basketScope,
+    canRead: health.state === "connected" && Boolean(basketScope),
+    canWrite: desktopRuntime && health.state === "connected" && Boolean(basketScope),
+  });
+  const creatorProfile = creatorMemory.profile?.profile ?? null;
+  const availablePreferenceFields = activeCreatorPreferenceFields(creatorProfile);
+  const selectedCreatorProfile = creatorMemoryEnabled
+    ? filterCreatorProfile(creatorProfile, activePreferenceFields)
+    : null;
+  const activeCreatorPreferenceCount = countCreatorPreferences(selectedCreatorProfile);
+  const promptCreatorContext = creatorProfilePromptContext(selectedCreatorProfile);
+  const effectivePrompt = promptCreatorContext
+    ? `${prompt.trim()}\n\n${promptCreatorContext}`
+    : prompt;
   const {
     items: basketItems,
     assetIds: basketAssetIds,
@@ -300,7 +360,7 @@ function App() {
     apiBase,
     scope: basketScope,
     selectedImageLibraryDir: selectedFolderPath,
-    fallbackImageLibraryDir: health.imageLibraryDir,
+    fallbackImageLibraryDir: desktopLibraryConfigured ? health.imageLibraryDir : null,
     connectionState: health.state,
   });
   const {
@@ -313,7 +373,7 @@ function App() {
     reset: resetGeneration,
   } = useDraftGeneration({
     apiBase,
-    prompt,
+    prompt: effectivePrompt,
     contextAssetIds: basketAssetIds,
     health,
     selectedImageLibraryDir: selectedFolderPath,
@@ -321,6 +381,11 @@ function App() {
     desktopRuntime,
     onStarted: () => {
       seedRef.current += 1;
+      generationUserPromptRef.current = prompt;
+      pendingPhotoCreatorProvenanceRef.current = snapshotCreatorProfileProvenance(
+        creatorMemory.profile,
+        selectedCreatorProfile,
+      );
       setCopyState("idle");
     },
     onCopyUpdate: (copyUpdate) => {
@@ -328,7 +393,8 @@ function App() {
     },
     onResult: (nextDraft) => {
       setHasCompletedGeneration(true);
-      setDraft(nextDraft);
+      setDraft(preserveUserPrompt(nextDraft, generationUserPromptRef.current));
+      setPhotoCreatorProvenance(pendingPhotoCreatorProvenanceRef.current);
       setActivePhotoId(nextDraft.selected[0]?.id ?? null);
     },
     onBackendRestarted: (status) => {
@@ -353,15 +419,25 @@ function App() {
     activeResultDraft?.selected[0] ??
     null;
   const previewPhotos = activeResultDraft?.selected.slice(0, 3) ?? [];
-  const libraryFolderLabel = selectedFolderPath ?? health.imageLibraryDir ?? "No folder selected";
-  const libraryDbLabel = selectedDbPath ?? health.dbPath ?? "No database yet";
+  const libraryFolderLabel = selectedFolderPath
+    ?? (desktopLibraryConfigured ? health.imageLibraryDir : null)
+    ?? "No folder selected";
+  const libraryDbLabel = selectedDbPath
+    ?? (desktopLibraryConfigured ? health.dbPath : null)
+    ?? "No database yet";
   const runtimeLabel = desktopRuntime ? "Desktop" : electronShell ? "Shell" : "Browser";
-  const canGenerateDraft = health.state === "connected" || canUseMockMode;
+  const canGenerateDraft = canUseMockMode || (
+    health.state === "connected"
+    && desktopLibraryConfigured
+    && Boolean(basketScope)
+  );
   const pipeline = createPipelineSteps(
     null,
     generationProgress.phase === "completed" ? DRAFT_PIPELINE_LENGTH : 0,
   );
-  const currentDbScope = normalizeScopePath(selectedDbPath ?? health.dbPath);
+  const currentDbScope = normalizeScopePath(
+    selectedDbPath ?? (desktopLibraryConfigured ? health.dbPath : null),
+  );
   const parsedQueryChips = buildParsedQueryChips(activeResultDraft?.parsedQuery ?? null);
   const scopedIndexStatusMatchesCurrent = Boolean(
     currentDbScope
@@ -444,6 +520,36 @@ function App() {
   }, []);
 
   useEffect(() => {
+    setActivePreferenceFields((current) => {
+      const available = new Set(availablePreferenceFields);
+      const preserved = current.filter((field) => available.has(field));
+      const added = availablePreferenceFields.filter((field) => !current.includes(field));
+      return [...preserved, ...added];
+    });
+  }, [availablePreferenceFields.join("|")]);
+
+  useEffect(() => {
+    if (!currentDbScope || health.state !== "connected") {
+      setInboxSummary(null);
+      return;
+    }
+    const controller = new AbortController();
+    void fetchInbox({
+      apiBase,
+      dbPath: currentDbScope,
+      state: "inbox",
+      kinds: ["image", "video"],
+      limit: 1,
+      signal: controller.signal,
+    }).then((page) => {
+      setInboxSummary({ inboxCount: page.summary.inbox, hasMore: false });
+    }).catch(() => {
+      if (!controller.signal.aborted) setInboxSummary(null);
+    });
+    return () => controller.abort();
+  }, [apiBase, currentDbScope, health.state, atlasRefreshKey]);
+
+  useEffect(() => {
     if (!desktopRuntime) {
       return;
     }
@@ -462,8 +568,10 @@ function App() {
         setHealth({
           state: "checking",
           message: "Starting local service",
-          imageLibraryDir: settings.defaultLibraryDir ?? undefined,
-          dbPath: settings.defaultDbPath ?? undefined,
+          imageLibraryDir: settings.libraryConfigured
+            ? settings.defaultLibraryDir ?? undefined
+            : undefined,
+          dbPath: settings.libraryConfigured ? settings.defaultDbPath ?? undefined : undefined,
         });
         const status = await ensureDesktopBackend();
         if (!disposed && status !== null) {
@@ -483,6 +591,9 @@ function App() {
   }, [desktopRuntime]);
 
   useEffect(() => {
+    if (desktopRuntime && desktopSettings === null) {
+      return;
+    }
     const controller = new AbortController();
     let disposed = false;
     const timeoutId = window.setTimeout(() => controller.abort(), 7500);
@@ -516,11 +627,14 @@ function App() {
             return;
           }
           setBackendSettings(nextBackendSettings);
+          const exposeDesktopLibrary = !desktopRuntime || desktopSettings?.libraryConfigured === true;
           setHealth({
             state: "connected",
             message: `Local service online · ${apiBase}`,
-            imageLibraryDir: nextBackendSettings.effective.image_library_dir,
-            dbPath: nextBackendSettings.effective.db_path,
+            imageLibraryDir: exposeDesktopLibrary
+              ? nextBackendSettings.effective.image_library_dir
+              : undefined,
+            dbPath: exposeDesktopLibrary ? nextBackendSettings.effective.db_path : undefined,
             visionProfile: nextBackendSettings.effective.vision_profile_name,
             queryProfile: nextBackendSettings.effective.query_profile_name,
             embeddingBackend: nextBackendSettings.effective.embedding_backend,
@@ -534,8 +648,13 @@ function App() {
               : undefined,
           });
           if (desktopRuntime) {
-            setSelectedFolderPath((current) => current ?? nextBackendSettings.effective.image_library_dir);
-            setSelectedDbPath((current) => current ?? nextBackendSettings.effective.db_path);
+            if (desktopSettings?.libraryConfigured) {
+              setSelectedFolderPath((current) => current ?? nextBackendSettings.effective.image_library_dir);
+              setSelectedDbPath((current) => current ?? nextBackendSettings.effective.db_path);
+            } else {
+              setSelectedFolderPath(null);
+              setSelectedDbPath(null);
+            }
           } else {
             setSelectedFolderPath(nextBackendSettings.effective.image_library_dir);
             setSelectedDbPath(nextBackendSettings.effective.db_path);
@@ -554,8 +673,12 @@ function App() {
         setHealth({
           state: "offline",
           message: `Local service unavailable · ${reason}`,
-          imageLibraryDir: desktopSettings?.defaultLibraryDir ?? undefined,
-          dbPath: desktopSettings?.defaultDbPath ?? undefined,
+          imageLibraryDir: desktopSettings?.libraryConfigured
+            ? desktopSettings.defaultLibraryDir ?? undefined
+            : undefined,
+          dbPath: desktopSettings?.libraryConfigured
+            ? desktopSettings.defaultDbPath ?? undefined
+            : undefined,
         });
       }
     }
@@ -566,7 +689,14 @@ function App() {
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [apiBase, desktopSettings?.defaultDbPath, desktopSettings?.defaultLibraryDir, healthRefreshKey]);
+  }, [
+    apiBase,
+    desktopRuntime,
+    desktopSettings?.defaultDbPath,
+    desktopSettings?.defaultLibraryDir,
+    desktopSettings?.libraryConfigured,
+    healthRefreshKey,
+  ]);
 
   useEffect(() => {
     const unsubscribe = subscribeToIndexingProgress((progress) => {
@@ -834,9 +964,6 @@ function App() {
     }
 
     setDesktopSettings(savedSettings);
-    setSelectedFolderPath(savedSettings.defaultLibraryDir);
-    setSelectedDbPath(savedSettings.defaultDbPath);
-    setScopedIndexStatus(null);
     setSettingsMessage("Desktop settings saved.");
     setHealthRefreshKey((current) => current + 1);
 
@@ -852,22 +979,7 @@ function App() {
       setSettingsMessage("Choose a default folder from the Electron desktop app.");
       return;
     }
-
-    const selection = await pickLocalImageFolder();
-    if (!selection) {
-      return;
-    }
-
-    setDesktopSettings((current) =>
-      current
-        ? {
-            ...current,
-            defaultLibraryDir: selection.folderPath,
-            defaultDbPath: selection.dbPath,
-          }
-        : null,
-    );
-    setSettingsMessage("Default library updated. Save settings to persist it.");
+    await handlePickFolder();
   }
 
   function handleUseCurrentLibraryInSettings(): void {
@@ -878,6 +990,7 @@ function App() {
 
     setDesktopSettings({
       ...desktopSettings,
+      libraryConfigured: true,
       defaultLibraryDir: selectedFolderPath,
       defaultDbPath: selectedDbPath ?? desktopSettings.defaultDbPath,
     });
@@ -902,13 +1015,14 @@ function App() {
         queryProfileName: backendSettings.effective.query_profile_name,
       });
       setBackendSettings(saved);
-      setSelectedFolderPath(saved.effective.image_library_dir);
-      setSelectedDbPath(saved.effective.db_path);
+      const exposeDesktopLibrary = !desktopRuntime || desktopSettings?.libraryConfigured === true;
+      setSelectedFolderPath(exposeDesktopLibrary ? saved.effective.image_library_dir : null);
+      setSelectedDbPath(exposeDesktopLibrary ? saved.effective.db_path : null);
       setScopedIndexStatus(null);
       setHealth((current) => ({
         ...current,
-        imageLibraryDir: saved.effective.image_library_dir,
-        dbPath: saved.effective.db_path,
+        imageLibraryDir: exposeDesktopLibrary ? saved.effective.image_library_dir : undefined,
+        dbPath: exposeDesktopLibrary ? saved.effective.db_path : undefined,
         visionProfile: saved.effective.vision_profile_name,
         queryProfile: saved.effective.query_profile_name,
       }));
@@ -1004,6 +1118,8 @@ function App() {
       setIndexingProgress(null);
       resetGeneration();
       setHasCompletedGeneration(false);
+      setPhotoCreatorProvenance(null);
+      pendingPhotoCreatorProvenanceRef.current = null;
       return;
     }
 
@@ -1013,8 +1129,69 @@ function App() {
     if (!selection) {
       return;
     }
+    let previousBackendSettings: BackendSettingsResponse;
+    try {
+      previousBackendSettings = backendSettings ?? await fetchBackendSettings(apiBase);
+    } catch (error) {
+      setSettingsMessage(
+        error instanceof Error
+          ? `The selected folder was not activated: ${error.message}`
+          : "The selected folder was not activated because local settings are unavailable.",
+      );
+      return;
+    }
+
+    let rebound: BackendSettingsResponse;
+    try {
+      rebound = await saveBackendSettings({
+        apiBase,
+        imageLibraryDir: selection.folderPath,
+        dbPath: selection.dbPath,
+        processImageWidth: previousBackendSettings.effective.process_image_width,
+        visionProfileName: previousBackendSettings.effective.vision_profile_name,
+        queryProfileName: previousBackendSettings.effective.query_profile_name,
+      });
+    } catch (error) {
+      setSettingsMessage(
+        error instanceof Error
+          ? `The selected folder was not activated: ${error.message}`
+          : "The selected folder was not activated because the local service could not bind it.",
+      );
+      return;
+    }
+
+    let committedSettings: DesktopSettings | null = null;
+    try {
+      committedSettings = await commitLocalLibrarySelection(selection);
+      if (committedSettings === null) {
+        throw new Error("The desktop settings bridge is unavailable.");
+      }
+    } catch (commitError) {
+      let rollbackMessage = "The backend was restored to the previous library.";
+      try {
+        const restored = await saveBackendSettings({
+          apiBase,
+          imageLibraryDir: previousBackendSettings.effective.image_library_dir,
+          dbPath: previousBackendSettings.effective.db_path,
+          processImageWidth: previousBackendSettings.effective.process_image_width,
+          visionProfileName: previousBackendSettings.effective.vision_profile_name,
+          queryProfileName: previousBackendSettings.effective.query_profile_name,
+        });
+        setBackendSettings(restored);
+      } catch {
+        rollbackMessage = "The backend could not be restored automatically; retry the library selection.";
+        setBackendSettings(rebound);
+      }
+      const detail = commitError instanceof Error ? commitError.message : "desktop commit failed";
+      setSettingsMessage(`The selected folder was not committed: ${detail} ${rollbackMessage}`);
+      setHealthRefreshKey((current) => current + 1);
+      return;
+    }
+
+    setBackendSettings(rebound);
     setSelectedFolderPath(selection.folderPath);
     setSelectedDbPath(selection.dbPath);
+    setDesktopSettings(committedSettings);
     setScopedIndexStatus(null);
     setHealth((currentHealth) => ({
       ...currentHealth,
@@ -1025,10 +1202,13 @@ function App() {
     setIndexingProgress(null);
     resetGeneration();
     setHasCompletedGeneration(false);
+    setPhotoCreatorProvenance(null);
+    pendingPhotoCreatorProvenanceRef.current = null;
+    setSettingsMessage("Library connected. You can index it now.");
   }
 
   async function handleStartIndexing(): Promise<void> {
-    if (!selectedFolderPath) {
+    if ((desktopRuntime && !desktopLibraryConfigured) || !selectedFolderPath) {
       setIndexingError(
         desktopRuntime
           ? "Pick a local image folder first."
@@ -1044,6 +1224,8 @@ function App() {
     setIndexingResult(null);
     resetGeneration();
     setHasCompletedGeneration(false);
+    setPhotoCreatorProvenance(null);
+    pendingPhotoCreatorProvenanceRef.current = null;
 
     try {
       const result = desktopRuntime
@@ -1125,7 +1307,10 @@ function App() {
   const canControlIndexing = canPauseIndexing || canResumeIndexing;
   const indexingPhaseMessage = indexingProgress ? getIndexingPhaseMessage(indexingProgress) : null;
   const canStartIndexing =
-    Boolean(selectedFolderPath) && !isIndexing && (desktopRuntime || health.state === "connected");
+    Boolean(selectedFolderPath)
+    && desktopLibraryConfigured
+    && !isIndexing
+    && (desktopRuntime || health.state === "connected");
   const indexingActionLabel = hasStaleIndex ? "Rebuild index" : "Start indexing";
   const hasIndexedLibrary = scopedIndexStatusMatchesCurrent
     ? (scopedIndexStatus?.index_stats.total_records ?? 0) > 0
@@ -1170,8 +1355,12 @@ function App() {
   const visibleSuggestedQueries = atlasSuggestedQueries.slice(0, 4);
 
   async function handleGenerateInspirations(): Promise<void> {
-    if (health.state !== "connected") {
-      setAiInspirationError("Start the local service before asking AI for search ideas.");
+    if (health.state !== "connected" || !currentDbScope) {
+      setAiInspirationError(
+        health.state !== "connected"
+          ? "Start the local service before asking AI for search ideas."
+          : "Choose a media folder before asking AI for search ideas.",
+      );
       return;
     }
     setIsGeneratingInspirations(true);
@@ -1181,7 +1370,7 @@ function App() {
     try {
       const suggestions = await fetchAiInspirations(
         apiBase,
-        selectedDbPath ?? health.dbPath ?? null,
+        currentDbScope,
         basketAssetIds,
         controller.signal,
       );
@@ -1203,12 +1392,26 @@ function App() {
     }
   }
 
+  async function handleContinueInCodex(): Promise<void> {
+    setCodexOpenMessage(null);
+    try {
+      const opened = await openMemoLensInCodex();
+      setCodexOpenMessage(opened
+        ? "MemoLens opened in Codex."
+        : "Codex could not be opened from this runtime.");
+    } catch (error) {
+      setCodexOpenMessage(
+        error instanceof Error ? error.message : "Codex could not be opened.",
+      );
+    }
+  }
+
   function handlePrimaryJourneyAction(): void {
     if (health.state !== "connected") {
       void handleEnsureBackend();
       return;
     }
-    if (!selectedFolderPath && desktopRuntime) {
+    if (desktopRuntime && (!desktopLibraryConfigured || !selectedFolderPath)) {
       void handlePickFolder();
       return;
     }
@@ -1247,7 +1450,9 @@ function App() {
       ? desktopRuntime
         ? "Start local service"
         : "Retry connection"
-      : !selectedFolderPath
+      : desktopRuntime && !desktopLibraryConfigured
+        ? "Choose media folder"
+        : !selectedFolderPath
         ? desktopRuntime
           ? "Choose media folder"
           : "Set library path"
@@ -1366,6 +1571,37 @@ function App() {
               <span className="trust-chip"><span aria-hidden="true">✓</span> Private by default</span>
               <span className="trust-chip"><span aria-hidden="true">✓</span> Originals untouched</span>
             </div>
+            {hasIndexedLibrary ? (
+              <div className="home-ready-summary" aria-label="Library ready summary">
+                <button type="button" onClick={() => navigateToWorkspace("library")}>
+                  <span>Media Inbox</span>
+                  <strong>
+                    {inboxSummary
+                      ? `${inboxSummary.inboxCount}${inboxSummary.hasMore ? "+" : ""} ready to review`
+                      : "Open Inbox"}
+                  </strong>
+                </button>
+                <button type="button" onClick={() => navigateToWorkspace("library")}>
+                  <span>Creator Memory</span>
+                  <strong>{creatorMemorySummary(creatorProfile)}</strong>
+                </button>
+              </div>
+            ) : null}
+            {desktopRuntime && hasIndexedLibrary ? (
+              <div className="codex-continuation">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => void handleContinueInCodex()}
+                >
+                  Continue in Codex
+                </button>
+                <span>Chat with your private library through the MemoLens plugin.</span>
+              </div>
+            ) : null}
+            {codexOpenMessage ? (
+              <p className="inline-note" role="status" aria-live="polite">{codexOpenMessage}</p>
+            ) : null}
           </div>
 
           <aside className="hero-preview-card">
@@ -1539,12 +1775,8 @@ function App() {
                       className="settings-input"
                       type="text"
                       value={desktopSettings.defaultLibraryDir ?? ""}
-                      onChange={(event) =>
-                        setDesktopSettings({
-                          ...desktopSettings,
-                          defaultLibraryDir: event.target.value,
-                        })
-                      }
+                      readOnly
+                      aria-describedby="desktop-library-path-help"
                     />
                   </label>
 
@@ -1554,13 +1786,12 @@ function App() {
                       className="settings-input"
                       type="text"
                       value={desktopSettings.defaultDbPath ?? ""}
-                      onChange={(event) =>
-                        setDesktopSettings({
-                          ...desktopSettings,
-                          defaultDbPath: event.target.value,
-                        })
-                      }
+                      readOnly
+                      aria-describedby="desktop-library-path-help"
                     />
+                    <small id="desktop-library-path-help" className="settings-help">
+                      Change these paths with Choose and connect folder so the backend and desktop commit together.
+                    </small>
                   </label>
                 </article>
               ) : null}
@@ -1779,7 +2010,7 @@ function App() {
               onClick={() => void handleChooseDefaultFolder()}
               disabled={!desktopRuntime || !desktopSettings}
             >
-              Choose default folder
+              Choose and connect folder
             </button>
             <button
               className="secondary-button"
@@ -1926,6 +2157,18 @@ function App() {
             </p>
           ) : null}
         </section>
+        {hasIndexedLibrary ? (
+          <>
+            <MediaInbox
+              apiBase={apiBase}
+              dbPath={currentDbScope}
+              canRead={health.state === "connected"}
+              canWrite={desktopRuntime && health.state === "connected"}
+              onSummaryChange={setInboxSummary}
+            />
+            <CreatorMemoryPanel store={creatorMemory} />
+          </>
+        ) : null}
           </>
         ) : null}
 
@@ -1936,6 +2179,7 @@ function App() {
               <h1>See the shape of your library.</h1>
               <p>Move from themes and places to a grounded set without losing the evidence behind it.</p>
             </header>
+
         <Suspense
           fallback={
             <section className="section-block atlas-section" id="atlas">
@@ -1991,6 +2235,35 @@ function App() {
               </div>
             </header>
 
+            {creatorProfile && availablePreferenceFields.length > 0 ? (
+              <CreatorPreferenceContext
+                profile={creatorProfile}
+                availableFields={availablePreferenceFields}
+                activeFields={activePreferenceFields}
+                onToggle={(field) => setActivePreferenceFields((current) => (
+                  current.includes(field)
+                    ? current.filter((value) => value !== field)
+                    : [...current, field]
+                ))}
+                enabled={creatorMemoryEnabled}
+                onEnabledChange={setCreatorMemoryEnabled}
+              />
+            ) : null}
+
+            <div className="create-codex-row">
+              <span className="status-pill">Using {activeCreatorPreferenceCount} creator preferences</span>
+              {desktopRuntime ? (
+                <button
+                  className="secondary-button compact-button"
+                  type="button"
+                  onClick={() => void handleContinueInCodex()}
+                >
+                  Continue in Codex
+                </button>
+              ) : null}
+              {codexOpenMessage ? <span role="status" aria-live="polite">{codexOpenMessage}</span> : null}
+            </div>
+
         <div hidden={createMode !== "video"}>
         <Suspense
           fallback={
@@ -2007,6 +2280,11 @@ function App() {
             canUseBackend={health.state === "connected"}
             desktopRuntime={desktopRuntime}
             indexedAssetCount={scopedIndexCount}
+            creatorProfile={selectedCreatorProfile}
+            creatorProfileId={creatorMemory.profile?.profile_id ?? null}
+            creatorProfileContentSha256={creatorMemory.profile?.content_sha256 ?? null}
+            creatorProfileRevision={creatorMemory.profile?.revision ?? 0}
+            creatorPreferenceCount={activeCreatorPreferenceCount}
           />
         </Suspense>
         </div>
@@ -2088,6 +2366,14 @@ function App() {
             </button>
           </div>
 
+          {promptCreatorContext ? (
+            <div className="compose-preference-context" role="note">
+              <strong>Will be passed to the next draft</strong>
+              <span>{promptCreatorContext}</span>
+              <button type="button" onClick={() => setCreatorMemoryEnabled(false)}>Remove for this draft</button>
+            </div>
+          ) : null}
+
           {aiSuggestions.length > 0 ? (
             <div className="ai-suggestions-panel">
               <div className="compose-inspiration-head">
@@ -2103,7 +2389,7 @@ function App() {
                   className="secondary-button"
                   type="button"
                   onClick={() => void handleGenerateInspirations()}
-                  disabled={isGeneratingInspirations || health.state !== "connected"}
+                  disabled={isGeneratingInspirations || health.state !== "connected" || !currentDbScope}
                 >
                   Refresh ideas
                 </button>
@@ -2387,6 +2673,14 @@ function App() {
 
                   <p className="story-body">{activeResultDraft.caption}</p>
 
+                  <p className="inline-note photo-provenance-note" role="note">
+                    <strong>Creator Memory provenance</strong>
+                    <br />
+                    {photoCreatorProvenance
+                      ? `Revision ${photoCreatorProvenance.revision} · ${photoCreatorProvenance.applied_profile_fields.join(", ")}`
+                      : "Creator Memory was not used for this draft."}
+                  </p>
+
                   <div className="action-row">
                     <button className="secondary-button" type="button" onClick={() => addBasketItems([activePhoto])}>
                       Add active
@@ -2415,7 +2709,7 @@ function App() {
                     <button
                       className="secondary-button"
                       type="button"
-                      onClick={() => downloadDraft(activeResultDraft)}
+                      onClick={() => downloadDraft(activeResultDraft, photoCreatorProvenance)}
                     >
                       Export
                     </button>

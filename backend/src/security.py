@@ -121,7 +121,7 @@ def install_local_api_security(
         if allowed_origin is not None:
             response.headers["Access-Control-Allow-Origin"] = allowed_origin
             response.headers["Access-Control-Allow-Headers"] = (
-                f"Content-Type, Authorization, {DESKTOP_TOKEN_HEADER}"
+                f"Content-Type, Authorization, Idempotency-Key, {DESKTOP_TOKEN_HEADER}"
             )
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, OPTIONS"
             response.headers["Access-Control-Max-Age"] = "600"

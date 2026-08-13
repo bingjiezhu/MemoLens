@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, normalize, resolve } from "node:path";
 
-import type { DesktopSettings } from "../src/query/types.js";
+import type { DesktopFolderSelection, DesktopSettings } from "../src/query/types.js";
 import { getCanonicalAppStateDir } from "./appPaths.js";
 
 export const DEFAULT_BACKEND_URL = "http://127.0.0.1:5519";
@@ -71,6 +71,10 @@ function normalizeSettings(
       : {};
   const defaultLibraryDir = normalizeOptionalPath(raw.defaultLibraryDir) ?? defaults.defaultLibraryDir;
   const defaultDbPath = normalizeOptionalPath(raw.defaultDbPath) ?? defaults.defaultDbPath;
+  const libraryConfigured = typeof raw.libraryConfigured === "boolean"
+    ? raw.libraryConfigured
+    : normalizeOptionalPath(raw.defaultLibraryDir) !== null
+      && normalizeOptionalPath(raw.defaultDbPath) !== null;
 
   return {
     pythonCommand: normalizePythonCommand(raw.pythonCommand, defaults.pythonCommand),
@@ -78,6 +82,7 @@ function normalizeSettings(
       typeof raw.autoStartBackend === "boolean"
         ? raw.autoStartBackend
         : defaults.autoStartBackend,
+    libraryConfigured,
     defaultLibraryDir,
     defaultDbPath,
   };
@@ -88,6 +93,7 @@ export async function loadDesktopSettings(projectRoot: string): Promise<DesktopS
   const defaults: DesktopSettings = {
     pythonCommand: await getDefaultPythonCommand(projectRoot),
     autoStartBackend: true,
+    libraryConfigured: false,
     defaultLibraryDir,
     defaultDbPath: resolveLibraryDbPath(defaultLibraryDir),
   };
@@ -109,4 +115,23 @@ export async function saveDesktopSettings(
   await mkdir(dirname(settingsPath), { recursive: true });
   await writeFile(settingsPath, `${JSON.stringify(normalized, null, 2)}\n`, "utf-8");
   return normalized;
+}
+
+export async function commitDesktopLibrarySelection(
+  projectRoot: string,
+  selection: DesktopFolderSelection,
+): Promise<DesktopSettings> {
+  const folderPath = resolve(selection.folderPath);
+  const dbPath = resolve(selection.dbPath);
+  const expectedDbPath = resolveLibraryDbPath(folderPath);
+  if (dbPath !== expectedDbPath) {
+    throw new Error("MemoLens rejected a library selection with an unexpected database path.");
+  }
+  const settings = await loadDesktopSettings(projectRoot);
+  return saveDesktopSettings(projectRoot, {
+    ...settings,
+    libraryConfigured: true,
+    defaultLibraryDir: folderPath,
+    defaultDbPath: dbPath,
+  });
 }

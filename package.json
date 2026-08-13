@@ -1,7 +1,7 @@
 {
   "name": "memolens",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "main": "electron-dist/electron/main.js",
   "engines": {
@@ -23,9 +23,9 @@
     "lint:python": "ruff check .",
     "audit:deps": "npm audit --audit-level=high && bash ./scripts/run_pip_audit.sh",
     "test:unit": "bash ./scripts/run_python.sh -m unittest discover -s tests -v",
-    "test:node": "node --experimental-strip-types --test tests/backend_manager_health.test.mjs tests/indexing_coordinator.test.mjs tests/artifact_integrity.test.mjs tests/video_mutation_ledger.test.mjs tests/video_session.test.mjs tests/video_job_model.test.mjs && npm run test:renderer-models",
+    "test:node": "node --experimental-strip-types --test tests/backend_manager_health.test.mjs tests/indexing_coordinator.test.mjs tests/artifact_integrity.test.mjs tests/codex_integration.test.mjs tests/video_mutation_ledger.test.mjs tests/video_session.test.mjs tests/video_job_model.test.mjs && npm run test:renderer-models",
     "test:electron": "npm run build:electron && npm run test:node",
-    "test:renderer-models": "node --experimental-strip-types --experimental-loader ./tests/ts-extension-loader.mjs --test tests/video_api.test.mjs tests/video_workflow.test.mjs tests/atlas_basket_model.test.mjs tests/draft_generation.test.mjs",
+    "test:renderer-models": "node --experimental-strip-types --experimental-loader ./tests/ts-extension-loader.mjs --test tests/video_api.test.mjs tests/video_workflow.test.mjs tests/atlas_basket_model.test.mjs tests/draft_generation.test.mjs tests/creator_memory_model.test.mjs tests/media_inbox_model.test.mjs",
     "test:video-api": "node --experimental-strip-types --experimental-loader ./tests/ts-extension-loader.mjs --test tests/video_api.test.mjs",
     "test:plugin": "bash ./scripts/run_python.sh -m unittest discover -s .agents/plugins/plugins/memolens/tests -v",
     "test:smoke": "bash ./scripts/run_python.sh scripts/verify_local_deployment.py",

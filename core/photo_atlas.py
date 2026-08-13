@@ -520,6 +520,7 @@ class PhotoAtlasService:
                 """
             ).fetchall()
             hidden_ids = self._hidden_asset_ids(connection)
+            hidden_ids.update(self._archived_asset_ids(connection))
             forced_people_ids = self._feedback_asset_ids(connection, "never_show_people")
             cluster_labels = self._cluster_label_map(connection)
 
@@ -1062,6 +1063,7 @@ class PhotoAtlasService:
         cluster_labels = self._cluster_label_map(connection)
         forced_people_ids = self._feedback_asset_ids(connection, "never_show_people")
         hidden_ids = self._hidden_asset_ids(connection)
+        hidden_ids.update(self._archived_asset_ids(connection))
         return [
             self._asset_row_to_dict(
                 row,
@@ -1094,13 +1096,27 @@ class PhotoAtlasService:
         ).fetchall()
         cluster_labels = self._cluster_label_map(connection)
         forced_people_ids = self._feedback_asset_ids(connection, "never_show_people")
+        review_states = self._asset_review_states(connection, asset_ids)
         by_id = {
-            row["image_id"]: self._asset_row_to_dict(
-                row,
-                mode="semantic",
-                forced_people_ids=forced_people_ids,
-                cluster_labels=cluster_labels,
-            )
+            row["image_id"]: {
+                **self._asset_row_to_dict(
+                    row,
+                    mode="semantic",
+                    forced_people_ids=forced_people_ids,
+                    cluster_labels=cluster_labels,
+                ),
+                "review": review_states.get(
+                    str(row["image_id"]),
+                    {
+                        "revision": 0,
+                        "inbox_state": "inbox",
+                        "favorite": False,
+                        "project_ready": False,
+                        "note": None,
+                        "created_at": None,
+                    },
+                ),
+            }
             for row in rows
         }
         return [by_id[asset_id] for asset_id in asset_ids if asset_id in by_id]
@@ -2310,7 +2326,7 @@ class PhotoAtlasService:
 
     @staticmethod
     def _asset_to_retrieval_image(asset: dict[str, object]) -> dict[str, object]:
-        return {
+        image = {
             "object": "retrieved_image",
             "id": asset["id"],
             "filename": asset["filename"],
@@ -2323,6 +2339,9 @@ class PhotoAtlasService:
             "score": round(float(asset.get("score") or asset.get("quality_score") or 0.0), 4),
             "matched_terms": asset.get("tags", [])[:6],
         }
+        if isinstance(asset.get("review"), dict):
+            image["review"] = dict(asset["review"])
+        return image
 
     @staticmethod
     def _image_count(connection: sqlite3.Connection) -> int:
@@ -2338,6 +2357,49 @@ class PhotoAtlasService:
             """
         ).fetchall()
         return {str(row["target_id"]) for row in rows}
+
+    @staticmethod
+    def _archived_asset_ids(connection: sqlite3.Connection) -> set[str]:
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name='current_asset_reviews'"
+        ).fetchone()
+        if not exists:
+            return set()
+        rows = connection.execute(
+            "SELECT asset_id FROM current_asset_reviews WHERE inbox_state='archived'"
+        ).fetchall()
+        return {str(row["asset_id"]) for row in rows}
+
+    @staticmethod
+    def _asset_review_states(
+        connection: sqlite3.Connection,
+        asset_ids: list[str],
+    ) -> dict[str, dict[str, object]]:
+        if not asset_ids:
+            return {}
+        exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='view' AND name='current_asset_reviews'"
+        ).fetchone()
+        if not exists:
+            return {}
+        rows = connection.execute(
+            """SELECT asset_id,revision,inbox_state,favorite,project_ready,note,created_at
+               FROM current_asset_reviews WHERE asset_id IN ({})""".format(
+                ",".join("?" for _ in asset_ids)
+            ),
+            asset_ids,
+        ).fetchall()
+        return {
+            str(row["asset_id"]): {
+                "revision": int(row["revision"]),
+                "inbox_state": str(row["inbox_state"]),
+                "favorite": bool(row["favorite"]),
+                "project_ready": bool(row["project_ready"]),
+                "note": str(row["note"]) if isinstance(row["note"], str) else None,
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        }
 
     @staticmethod
     def _feedback_asset_ids(connection: sqlite3.Connection, action: str) -> set[str]:

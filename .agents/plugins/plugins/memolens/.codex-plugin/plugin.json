@@ -1,7 +1,7 @@
 {
   "name": "memolens",
-  "version": "0.4.0+codex.20260812183205",
-  "description": "Find meaningful moments in a private photo and video library, then shape them into an unsaved, provenance-grounded Timeline 1.0 draft\u2014locally and read-only.",
+  "version": "0.5.0+codex.20260813051622",
+  "description": "Use confirmed creator preferences to find, review, and shape private local photo and video moments into an unsaved, provenance-grounded Timeline 1.0 draft.",
   "author": {
     "name": "MemoLens contributors",
     "url": "https://github.com/bingjiezhu/MemoLens"
@@ -16,19 +16,23 @@
     "local-first",
     "search",
     "memories",
-    "privacy"
+    "privacy",
+    "creator-memory",
+    "media-inbox"
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "MemoLens",
-    "shortDescription": "Find private moments. Shape an unsaved story.",
-    "longDescription": "MemoLens gives Codex a calm, local-first path from memory to edit: find private photos and current video moments, inspect source-backed details, and arrange selections into an unsaved hard-cut Timeline 1.0 draft. Safe-default access is read-only SQLite, and no third-party model API key is required. The plugin cannot save, render, export, delete, or write to arbitrary paths.",
+    "shortDescription": "Your private creator library, ready to shape a story.",
+    "longDescription": "MemoLens gives Codex a calm, local-first path from creator context to story: read only preferences the user confirmed, find private photos and current video moments, review the non-destructive Media Inbox, and arrange selections into an unsaved hard-cut Timeline 1.0 draft. Safe-default access is read-only SQLite, and no third-party model API key is required. Inbox and profile changes stay in the MemoLens app; the plugin cannot save, render, export, delete, or write to arbitrary paths.",
     "developerName": "MemoLens contributors",
     "category": "Productivity",
     "capabilities": [
       "Private local media search",
       "Photo and video memory discovery",
+      "Confirmed Creator Memory context",
+      "Read-only Media Inbox review",
       "Provenance-grounded timeline drafting",
       "Read-only timeline review"
     ],
@@ -37,9 +41,9 @@
     "composerIcon": "./assets/memolens.svg",
     "logo": "./assets/memolens.svg",
     "defaultPrompt": [
-      "Find the strongest photo and video moments for a one-minute story about my recent trip.",
-      "Turn these MemoLens moments into an unsaved hard-cut timeline draft for review.",
-      "Show what MemoLens can read locally, then explain its privacy and write boundaries."
+      "Use my confirmed creator style to find moments for a one-minute story.",
+      "Show my unreviewed photo and video inbox, then suggest what to keep for this idea.",
+      "Turn these MemoLens moments into an unsaved hard-cut timeline draft for review."
     ]
   }
 }

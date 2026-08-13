@@ -21,6 +21,8 @@ def _present_candidate(
     provenance: list[str],
 ) -> dict[str, object]:
     is_video = item["result_type"] == "video_segment"
+    raw_review = item.get("review")
+    review = raw_review if isinstance(raw_review, dict) else {}
     return {
         "object": "creative_asset_match",
         "result_type": item["result_type"],
@@ -47,6 +49,12 @@ def _present_candidate(
             "recency": recency_score,
         },
         "source_availability": item["source_availability"],
+        "review": {
+            "revision": int(review.get("revision") or 0),
+            "inbox_state": str(review.get("inbox_state") or "inbox"),
+            "favorite": bool(review.get("favorite")),
+            "project_ready": bool(review.get("project_ready")),
+        },
         "provenance": provenance,
     }
 

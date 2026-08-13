@@ -128,7 +128,13 @@ def ffmpeg_encode_capability() -> dict[str, object]:
 class RenderJobRunner:
     """Single bounded deterministic renderer for app-managed preview artifacts."""
 
-    def __init__(self, repository: MediaRepository, cache_root: Path):
+    def __init__(
+        self,
+        repository: MediaRepository,
+        cache_root: Path,
+        *,
+        reconcile_on_start: bool = True,
+    ):
         self.repository = repository
         self.cache_root = cache_root.expanduser().resolve()
         self.cache_root.mkdir(parents=True, exist_ok=True)
@@ -136,9 +142,10 @@ class RenderJobRunner:
         self._submitted: set[str] = set()
         self._processes: dict[str, subprocess.Popen[bytes]] = {}
         self._lock = threading.Lock()
-        self._reconcile_interrupted_storage()
+        if reconcile_on_start:
+            self.reconcile_interrupted_storage()
 
-    def _reconcile_interrupted_storage(self) -> None:
+    def reconcile_interrupted_storage(self) -> None:
         reconcile_interrupted_storage(self.repository, self.cache_root)
 
     def shutdown(self) -> None:

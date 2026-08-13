@@ -22,8 +22,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="memolens",
         description=(
-            "Read-only local media search plus unsaved Timeline 1.0 drafting. The "
-            "unauthenticated local API is disabled unless "
+            "Read-only confirmed Creator Memory, Media Inbox, local media search, and "
+            "unsaved Timeline 1.0 drafting. The unauthenticated local API is disabled unless "
             "MEMOLENS_PLUGIN_TRUST_LOCAL_API=1 and never grants write access. Outputs JSON."
         ),
     )
@@ -58,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "status",
         help="Report safe-default read-only SQLite and optional local-API status",
+    )
+
+    subparsers.add_parser(
+        "creator-context",
+        help="Read the latest confirmed Creator Memory profile revision",
     )
 
     search = subparsers.add_parser(
@@ -97,6 +102,24 @@ def build_parser() -> argparse.ArgumentParser:
         "media-get", help="Read one indexed media asset and its current video segments"
     )
     media_get.add_argument("asset_id", help="Stable MemoLens asset ID")
+
+    inbox_list = subparsers.add_parser(
+        "inbox-list",
+        help="List current non-destructive media review state read-only",
+    )
+    inbox_list.add_argument(
+        "--state",
+        choices=("inbox", "kept", "archived", "all"),
+        default="inbox",
+    )
+    inbox_list.add_argument(
+        "--kind",
+        dest="kinds",
+        action="append",
+        choices=("image", "video", "audio"),
+    )
+    inbox_list.add_argument("--limit", type=int, default=24, help="Results, 1-100")
+    inbox_list.add_argument("--cursor", default=None, help="Opaque cursor from a prior page")
 
     memories = subparsers.add_parser(
         "memories", help="List Atlas memories (requires explicit local-API trust)"
@@ -170,6 +193,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     gateway = _gateway(args)
     if args.command == "status":
         return gateway.status()
+    if args.command == "creator-context":
+        return gateway.creator_context()
     if args.command == "search":
         return gateway.search(args.query, limit=args.limit)
     if args.command == "mixed-search":
@@ -182,6 +207,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.command == "media-get":
         return gateway.media_get(args.asset_id)
+    if args.command == "inbox-list":
+        return gateway.inbox_list(
+            state=args.state,
+            kinds=args.kinds,
+            limit=args.limit,
+            cursor=args.cursor,
+        )
     if args.command == "memories":
         return gateway.memories(query=args.query, limit=args.limit)
     if args.command == "cleanup":
