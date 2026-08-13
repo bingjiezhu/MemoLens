@@ -8,12 +8,13 @@ import stat
 import threading
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BASELINE_CHECKSUM = hashlib.sha256(b"memolens-image-index-v1").hexdigest()
 
 
@@ -217,12 +218,68 @@ V2_CHECKSUM = hashlib.sha256(
 ).hexdigest()
 
 
+V3_SCHEMA_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS asset_review_revisions (
+        asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE RESTRICT,
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        inbox_state TEXT NOT NULL CHECK(inbox_state IN ('inbox','kept','archived')),
+        favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)),
+        project_ready INTEGER NOT NULL DEFAULT 0 CHECK(project_ready IN (0,1)),
+        note TEXT,
+        provenance_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(asset_id, revision))""",
+    """CREATE TABLE IF NOT EXISTS creator_profile_revisions (
+        profile_id TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        profile_json TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL,
+        evidence_json TEXT NOT NULL DEFAULT '[]',
+        source TEXT NOT NULL CHECK(source IN ('user_edit','confirmed_suggestion','reset')),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(profile_id, revision))""",
+    "CREATE INDEX IF NOT EXISTS idx_asset_reviews_state_created ON asset_review_revisions(inbox_state,created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_creator_profiles_created ON creator_profile_revisions(profile_id,created_at DESC)",
+    """CREATE VIEW IF NOT EXISTS current_asset_reviews AS
+       SELECT reviews.*
+       FROM asset_review_revisions reviews
+       WHERE NOT EXISTS (
+         SELECT 1 FROM asset_review_revisions newer
+         WHERE newer.asset_id=reviews.asset_id AND newer.revision>reviews.revision)""",
+)
+
+V3_CHECKSUM = hashlib.sha256(
+    "\n".join(" ".join(statement.split()) for statement in V3_SCHEMA_STATEMENTS).encode()
+).hexdigest()
+
+
 class MediaMigrationError(RuntimeError):
     pass
 
 
 class IdempotencyConflictError(ValueError):
     pass
+
+
+class IdempotencyInProgressError(IdempotencyConflictError):
+    pass
+
+
+class MediaRevisionConflictError(RuntimeError):
+    def __init__(self, code: str, current: dict[str, object]):
+        super().__init__(code)
+        self.code = code
+        self.current = current
+
+
+@dataclass(frozen=True)
+class IdempotentWriteResult:
+    """A committed response snapshot, whether newly written or replayed."""
+
+    response: dict[str, object]
+    response_status: int
+    replayed: bool
+    resource_id: str | None
 
 
 def utc_now_iso() -> str:
@@ -309,11 +366,14 @@ class MediaRepository:
                 connection.execute(statement)
             self._migration(connection, 1, "image_index_baseline", BASELINE_CHECKSUM)
             self._migration(connection, 2, "video_creative_workbench", V2_CHECKSUM)
+            for statement in V3_SCHEMA_STATEMENTS:
+                connection.execute(statement)
+            self._migration(connection, 3, "creator_memory_media_inbox", V3_CHECKSUM)
             now = utc_now_iso()
             connection.execute(
                 """INSERT INTO database_meta(singleton,database_uuid,schema_version,created_at,updated_at)
-                   VALUES(1,?,2,?,?) ON CONFLICT(singleton) DO UPDATE SET
-                   schema_version=2,updated_at=excluded.updated_at""",
+                   VALUES(1,?,3,?,?) ON CONFLICT(singleton) DO UPDATE SET
+                   schema_version=3,updated_at=excluded.updated_at""",
                 (str(uuid.uuid4()), now, now),
             )
             root_id = self._upsert_library_root(connection, default_library_root.resolve())
@@ -576,7 +636,35 @@ class MediaRepository:
     def _asset_dict(row: sqlite3.Row) -> dict[str, object]:
         value = dict(row)
         value["codec"] = _loads(value.pop("codec_json", None), {})
+        if "review_revision" in value:
+            value["review"] = MediaRepository._review_dict(
+                revision=value.pop("review_revision", None),
+                inbox_state=value.pop("review_inbox_state", None),
+                favorite=value.pop("review_favorite", None),
+                project_ready=value.pop("review_project_ready", None),
+                note=value.pop("review_note", None),
+                created_at=value.pop("review_created_at", None),
+            )
         return value
+
+    @staticmethod
+    def _review_dict(
+        *,
+        revision: object = None,
+        inbox_state: object = None,
+        favorite: object = None,
+        project_ready: object = None,
+        note: object = None,
+        created_at: object = None,
+    ) -> dict[str, object]:
+        return {
+            "revision": int(revision or 0),
+            "inbox_state": str(inbox_state or "inbox"),
+            "favorite": bool(favorite),
+            "project_ready": bool(project_ready),
+            "note": str(note) if isinstance(note, str) else None,
+            "created_at": str(created_at) if isinstance(created_at, str) else None,
+        }
 
     def get_asset(self, asset_id: str) -> dict[str, object] | None:
         with self._connect() as connection:
@@ -584,12 +672,189 @@ class MediaRepository:
                 """SELECT a.*,s.id AS asset_source_id,s.display_filename AS filename,
                           s.relative_path,s.availability AS source_availability,
                           s.observed_size,s.observed_mtime_ns,s.library_root_id,
-                          r.canonical_path AS root_path
+                          r.canonical_path AS root_path,
+                          review.revision AS review_revision,
+                          review.inbox_state AS review_inbox_state,
+                          review.favorite AS review_favorite,
+                          review.project_ready AS review_project_ready,
+                          review.note AS review_note,review.created_at AS review_created_at
                    FROM assets a LEFT JOIN asset_sources s ON s.asset_id=a.id AND s.is_preferred=1
-                   LEFT JOIN library_roots r ON r.id=s.library_root_id WHERE a.id=?""",
+                   LEFT JOIN library_roots r ON r.id=s.library_root_id
+                   LEFT JOIN current_asset_reviews review ON review.asset_id=a.id
+                   WHERE a.id=?""",
                 (asset_id,),
             ).fetchone()
         return self._asset_dict(row) if row else None
+
+    def list_inbox_assets(
+        self,
+        *,
+        state: str,
+        kinds: Sequence[str],
+        limit: int,
+        cursor_sort: str | None = None,
+        cursor_id: str | None = None,
+    ) -> tuple[list[dict[str, object]], dict[str, int]]:
+        conditions = ["s.availability='available'", f"a.kind IN ({','.join('?' for _ in kinds)})"]
+        parameters: list[object] = list(kinds)
+        if state != "all":
+            conditions.append("COALESCE(review.inbox_state,'inbox')=?")
+            parameters.append(state)
+        if cursor_sort is not None and cursor_id is not None:
+            conditions.append(
+                "(COALESCE(a.captured_at,a.created_at)<? OR (COALESCE(a.captured_at,a.created_at)=? AND a.id<?))"
+            )
+            parameters.extend([cursor_sort, cursor_sort, cursor_id])
+        parameters.append(limit + 1)
+        with self.transaction() as connection:
+            rows = connection.execute(
+                f"""SELECT a.id,a.kind,s.display_filename AS filename,a.captured_at,
+                           a.width,a.height,a.duration_ms,
+                           COALESCE(a.captured_at,a.created_at) AS cursor_sort,
+                           COALESCE(review.revision,0) AS review_revision,
+                           COALESCE(review.inbox_state,'inbox') AS review_inbox_state,
+                           COALESCE(review.favorite,0) AS review_favorite,
+                           COALESCE(review.project_ready,0) AS review_project_ready,
+                           review.note AS review_note,review.created_at AS review_created_at,
+                           (SELECT k.id
+                              FROM keyframes k
+                              JOIN video_segments vs ON vs.id=k.segment_id
+                              JOIN asset_analysis_heads head
+                                ON head.asset_id=vs.asset_id AND head.analysis_run_id=vs.analysis_run_id
+                              JOIN analysis_runs run ON run.id=head.analysis_run_id AND run.status='succeeded'
+                             WHERE vs.asset_id=a.id AND k.is_representative=1
+                             ORDER BY vs.ordinal,k.timestamp_ms,k.id LIMIT 1) AS representative_keyframe_id
+                      FROM assets a
+                      JOIN asset_sources s ON s.asset_id=a.id AND s.is_preferred=1
+                      LEFT JOIN current_asset_reviews review ON review.asset_id=a.id
+                     WHERE {" AND ".join(conditions)}
+                     ORDER BY COALESCE(a.captured_at,a.created_at) DESC,a.id DESC
+                     LIMIT ?""",
+                parameters,
+            ).fetchall()
+            summary_rows = connection.execute(
+                f"""SELECT COALESCE(review.inbox_state,'inbox') AS inbox_state,COUNT(*) AS count
+                      FROM assets a
+                      JOIN asset_sources s ON s.asset_id=a.id AND s.is_preferred=1
+                      LEFT JOIN current_asset_reviews review ON review.asset_id=a.id
+                     WHERE s.availability='available' AND a.kind IN ({",".join("?" for _ in kinds)})
+                     GROUP BY COALESCE(review.inbox_state,'inbox')""",
+                list(kinds),
+            ).fetchall()
+        summary = {"inbox": 0, "kept": 0, "archived": 0, "all": 0}
+        for summary_row in summary_rows:
+            state_name = str(summary_row["inbox_state"])
+            count = int(summary_row["count"])
+            summary[state_name] = count
+            summary["all"] += count
+        assets: list[dict[str, object]] = []
+        for row in rows:
+            asset = dict(row)
+            asset["review"] = self._review_dict(
+                revision=asset.pop("review_revision", None),
+                inbox_state=asset.pop("review_inbox_state", None),
+                favorite=asset.pop("review_favorite", None),
+                project_ready=asset.pop("review_project_ready", None),
+                note=asset.pop("review_note", None),
+                created_at=asset.pop("review_created_at", None),
+            )
+            assets.append(asset)
+        return assets, summary
+
+    def get_asset_review(self, asset_id: str) -> dict[str, object] | None:
+        with self._connect() as connection:
+            asset = connection.execute("SELECT 1 FROM assets WHERE id=?", (asset_id,)).fetchone()
+            if not asset:
+                return None
+            row = connection.execute(
+                """SELECT revision,inbox_state,favorite,project_ready,note,created_at
+                   FROM current_asset_reviews WHERE asset_id=?""",
+                (asset_id,),
+            ).fetchone()
+        return self._review_from_row(row)
+
+    @classmethod
+    def _review_from_row(cls, row: sqlite3.Row | None) -> dict[str, object]:
+        if row is None:
+            return cls._review_dict()
+        return cls._review_dict(
+            revision=row["revision"],
+            inbox_state=row["inbox_state"],
+            favorite=row["favorite"],
+            project_ready=row["project_ready"],
+            note=row["note"],
+            created_at=row["created_at"],
+        )
+
+    def put_asset_review(
+        self,
+        *,
+        asset_id: str,
+        base_revision: int,
+        changes: dict[str, object],
+        idempotency_scope: str,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> tuple[dict[str, object], bool]:
+        """CAS-write review and freeze its success response in one transaction."""
+        with self.transaction(immediate=True) as connection:
+            replay = self._idempotency_replay(
+                connection,
+                scope=idempotency_scope,
+                key=idempotency_key,
+                request_sha256=request_sha256,
+            )
+            if replay is not None:
+                return replay, True
+            asset = connection.execute("SELECT 1 FROM assets WHERE id=?", (asset_id,)).fetchone()
+            if not asset:
+                raise LookupError("Asset does not exist.")
+            row = connection.execute(
+                """SELECT revision,inbox_state,favorite,project_ready,note,created_at
+                   FROM asset_review_revisions WHERE asset_id=? ORDER BY revision DESC LIMIT 1""",
+                (asset_id,),
+            ).fetchone()
+            current = self._review_from_row(row)
+            if int(current["revision"]) != base_revision:
+                raise MediaRevisionConflictError("review_revision_conflict", current)
+            snapshot = {
+                "inbox_state": current["inbox_state"],
+                "favorite": current["favorite"],
+                "project_ready": current["project_ready"],
+                "note": current["note"],
+                **changes,
+            }
+            now = utc_now_iso()
+            if all(snapshot[key] == current[key] for key in snapshot):
+                response = current
+            else:
+                revision = base_revision + 1
+                connection.execute(
+                    """INSERT INTO asset_review_revisions(
+                           asset_id,revision,inbox_state,favorite,project_ready,note,provenance_json,created_at)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (
+                        asset_id,
+                        revision,
+                        snapshot["inbox_state"],
+                        int(bool(snapshot["favorite"])),
+                        int(bool(snapshot["project_ready"])),
+                        snapshot["note"],
+                        canonical_json({"source": "desktop_api"}),
+                        now,
+                    ),
+                )
+                response = {"revision": revision, **snapshot, "created_at": now}
+            self._idempotency_store_success(
+                connection,
+                scope=idempotency_scope,
+                key=idempotency_key,
+                request_sha256=request_sha256,
+                resource_type="asset_review",
+                resource_id=asset_id,
+                response=response,
+            )
+        return response, False
 
     def get_asset_source(self, source_id: str) -> dict[str, object] | None:
         """Return one source binding for validation; callers must not serialize root_path."""
@@ -844,12 +1109,19 @@ class MediaRepository:
 
     def get_media_job(self, job_id: str) -> dict[str, object] | None:
         with self._connect() as connection:
-            row = connection.execute(
-                """SELECT j.*,ar.revision AS analysis_revision
-                   FROM media_jobs j LEFT JOIN analysis_runs ar ON ar.id=j.analysis_run_id
-                   WHERE j.id=?""",
-                (job_id,),
-            ).fetchone()
+            return self.get_media_job_in_transaction(connection, job_id)
+
+    def get_media_job_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        job_id: str,
+    ) -> dict[str, object] | None:
+        row = connection.execute(
+            """SELECT j.*,ar.revision AS analysis_revision
+               FROM media_jobs j LEFT JOIN analysis_runs ar ON ar.id=j.analysis_run_id
+               WHERE j.id=?""",
+            (job_id,),
+        ).fetchone()
         return self._job_dict(row) if row else None
 
     def list_media_jobs(self, *, active: bool, limit: int = 50) -> list[dict[str, object]]:
@@ -947,29 +1219,45 @@ class MediaRepository:
                         ),
                     )
 
-    def request_media_job_cancel(self, job_id: str) -> bool:
-        with self.transaction(immediate=True) as connection:
-            cursor = connection.execute(
+    def request_media_job_cancel(
+        self,
+        job_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> bool:
+        def update(target: sqlite3.Connection) -> bool:
+            now = utc_now_iso()
+            cursor = target.execute(
                 """UPDATE media_jobs SET cancel_requested=1,status=CASE
                      WHEN status='running' THEN 'cancelling' ELSE 'cancelled' END,
                      stage=CASE WHEN status='running' THEN stage ELSE 'cancelled' END,
                      finished_at=CASE WHEN status='running' THEN finished_at ELSE ? END,heartbeat_at=?
                    WHERE id=? AND status IN ('queued','running','interrupted')""",
-                (utc_now_iso(), utc_now_iso(), job_id),
+                (now, now, job_id),
             )
             if cursor.rowcount:
-                connection.execute(
+                target.execute(
                     """UPDATE analysis_runs SET status=CASE WHEN status='running' THEN 'cancelling'
                                ELSE 'cancelled' END,
                            finished_at=CASE WHEN status='running' THEN finished_at ELSE ? END
                        WHERE id=(SELECT analysis_run_id FROM media_jobs WHERE id=?)""",
-                    (utc_now_iso(), job_id),
+                    (now, job_id),
                 )
-        return cursor.rowcount == 1
+            return cursor.rowcount == 1
 
-    def reset_media_job_for_resume(self, job_id: str) -> bool:
-        with self.transaction(immediate=True) as connection:
-            cursor = connection.execute(
+        if connection is not None:
+            return update(connection)
+        with self.transaction(immediate=True) as target:
+            return update(target)
+
+    def reset_media_job_for_resume(
+        self,
+        job_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> bool:
+        def update(target: sqlite3.Connection) -> bool:
+            cursor = target.execute(
                 """UPDATE media_jobs SET status='queued',stage='queued',progress=0,
                      cancel_requested=0,error_json=NULL,attempt=attempt+1,started_at=NULL,
                      heartbeat_at=NULL,finished_at=NULL
@@ -977,12 +1265,17 @@ class MediaRepository:
                 (job_id,),
             )
             if cursor.rowcount:
-                connection.execute(
+                target.execute(
                     """UPDATE analysis_runs SET status='queued',error_json=NULL,started_at=NULL,finished_at=NULL
                        WHERE id=(SELECT analysis_run_id FROM media_jobs WHERE id=?)""",
                     (job_id,),
                 )
-        return cursor.rowcount == 1
+            return cursor.rowcount == 1
+
+        if connection is not None:
+            return update(connection)
+        with self.transaction(immediate=True) as target:
+            return update(target)
 
     def mark_running_jobs_interrupted(self) -> int:
         now = utc_now_iso()
@@ -1133,31 +1426,53 @@ class MediaRepository:
             "external_analysis": False,
         }
 
-    def mixed_candidates(self) -> tuple[list[dict[str, object]], dict[str, str]]:
+    def mixed_candidates(
+        self,
+        *,
+        include_archived: bool = False,
+    ) -> tuple[list[dict[str, object]], dict[str, str]]:
+        review_filter = "" if include_archived else " AND COALESCE(review.inbox_state,'inbox')!='archived'"
         with self.transaction() as connection:
             images = connection.execute(
-                """SELECT a.id,a.id AS asset_id,'image_asset' AS result_type,
+                f"""SELECT a.id,a.id AS asset_id,'image_asset' AS result_type,
                      s.id AS asset_source_id,s.display_filename AS filename,s.relative_path,
                      NULL AS start_ms,NULL AS end_ms,i.description AS summary,i.tags_json,i.combined_text,
                      NULL AS analysis_run_id,NULL AS analysis_revision,NULL AS confidence,i.taken_at AS captured_at,
                      NULL AS thumbnail_cache_key,s.availability AS source_availability,
-                     a.width,a.height,a.duration_ms
+                     a.width,a.height,a.duration_ms,
+                     COALESCE(review.revision,0) AS review_revision,
+                     COALESCE(review.inbox_state,'inbox') AS review_inbox_state,
+                     COALESCE(review.favorite,0) AS review_favorite,
+                     COALESCE(review.project_ready,0) AS review_project_ready,
+                     review.note AS review_note,review.created_at AS review_created_at
                    FROM assets a JOIN asset_sources s ON s.asset_id=a.id AND s.is_preferred=1
-                   LEFT JOIN image_index i ON i.id=a.id WHERE a.kind='image' AND s.availability='available'"""
+                   LEFT JOIN image_index i ON i.id=a.id
+                   LEFT JOIN current_asset_reviews review ON review.asset_id=a.id
+                   WHERE a.kind='image' AND s.availability='available'{review_filter}"""
             ).fetchall()
             videos = connection.execute(
-                """SELECT vs.id,vs.asset_id,'video_segment' AS result_type,
+                f"""SELECT vs.id,vs.asset_id,'video_segment' AS result_type,
                      s.id AS asset_source_id,s.display_filename AS filename,s.relative_path,
                      vs.start_ms,vs.end_ms,vs.summary,vs.semantic_json AS tags_json,vs.combined_text,
                      vs.analysis_run_id,vs.analysis_revision,vs.confidence,a.captured_at,
                      (SELECT k.cache_key FROM keyframes k WHERE k.segment_id=vs.id AND k.is_representative=1
                       ORDER BY k.timestamp_ms LIMIT 1) AS thumbnail_cache_key,
-                     s.availability AS source_availability,a.width,a.height,a.duration_ms
+                     s.availability AS source_availability,a.width,a.height,a.duration_ms,
+                     COALESCE(review.revision,0) AS review_revision,
+                     COALESCE(review.inbox_state,'inbox') AS review_inbox_state,
+                     COALESCE(review.favorite,0) AS review_favorite,
+                     COALESCE(review.project_ready,0) AS review_project_ready,
+                     review.note AS review_note,review.created_at AS review_created_at
                    FROM current_video_segments vs JOIN assets a ON a.id=vs.asset_id
                    JOIN asset_sources s ON s.asset_id=a.id AND s.is_preferred=1
-                   WHERE s.availability='available'"""
+                   LEFT JOIN current_asset_reviews review ON review.asset_id=a.id
+                   WHERE s.availability='available'{review_filter}"""
             ).fetchall()
-            heads = connection.execute("SELECT asset_id,analysis_run_id FROM asset_analysis_heads").fetchall()
+            heads = connection.execute(
+                f"""SELECT heads.asset_id,heads.analysis_run_id FROM asset_analysis_heads heads
+                    LEFT JOIN current_asset_reviews review ON review.asset_id=heads.asset_id
+                    WHERE 1=1{review_filter}"""
+            ).fetchall()
         results: list[dict[str, object]] = []
         for row in [*images, *videos]:
             item = dict(row)
@@ -1165,6 +1480,14 @@ class MediaRepository:
             if isinstance(raw_tags, dict):
                 raw_tags = raw_tags.get("tags", [])
             item["tags"] = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else []
+            item["review"] = self._review_dict(
+                revision=item.pop("review_revision", None),
+                inbox_state=item.pop("review_inbox_state", None),
+                favorite=item.pop("review_favorite", None),
+                project_ready=item.pop("review_project_ready", None),
+                note=item.pop("review_note", None),
+                created_at=item.pop("review_created_at", None),
+            )
             results.append(item)
         return results, {str(row["asset_id"]): str(row["analysis_run_id"]) for row in heads}
 
@@ -1173,8 +1496,13 @@ class MediaRepository:
             row = connection.execute(
                 """SELECT vs.*,ar.revision AS analysis_revision,s.id AS asset_source_id,
                      s.display_filename AS filename,s.relative_path,s.availability AS source_availability,
-                     a.duration_ms FROM video_segments vs JOIN analysis_runs ar ON ar.id=vs.analysis_run_id
+                     a.duration_ms,review.revision AS review_revision,
+                     review.inbox_state AS review_inbox_state,review.favorite AS review_favorite,
+                     review.project_ready AS review_project_ready,review.note AS review_note,
+                     review.created_at AS review_created_at
+                   FROM video_segments vs JOIN analysis_runs ar ON ar.id=vs.analysis_run_id
                    JOIN assets a ON a.id=vs.asset_id JOIN asset_sources s ON s.asset_id=a.id AND s.is_preferred=1
+                   LEFT JOIN current_asset_reviews review ON review.asset_id=vs.asset_id
                    WHERE vs.id=?""",
                 (segment_id,),
             ).fetchone()
@@ -1189,17 +1517,33 @@ class MediaRepository:
             ).fetchall()
         result = dict(row)
         result["semantic"] = _loads(result.pop("semantic_json", None), {})
+        result["review"] = self._review_dict(
+            revision=result.pop("review_revision", None),
+            inbox_state=result.pop("review_inbox_state", None),
+            favorite=result.pop("review_favorite", None),
+            project_ready=result.pop("review_project_ready", None),
+            note=result.pop("review_note", None),
+            created_at=result.pop("review_created_at", None),
+        )
         result["keyframes"] = [dict(frame) for frame in frames]
         result["transcripts"] = [dict(item) for item in transcripts]
         return result
 
-    def create_project(self, title: str, brief: dict[str, object], provenance: dict[str, object]) -> dict[str, object]:
+    def create_project(
+        self,
+        title: str,
+        brief: dict[str, object],
+        provenance: dict[str, object],
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
         project_id = new_id("proj")
         now = utc_now_iso()
         serialized = canonical_json(brief)
-        with self.transaction(immediate=True) as connection:
-            connection.execute("INSERT INTO creative_projects VALUES(?,?, 'active',?,?)", (project_id, title, now, now))
-            connection.execute(
+
+        def insert(target: sqlite3.Connection) -> dict[str, object]:
+            target.execute("INSERT INTO creative_projects VALUES(?,?, 'active',?,?)", (project_id, title, now, now))
+            target.execute(
                 "INSERT INTO creative_briefs VALUES(?,1,?,?,?,?)",
                 (
                     project_id,
@@ -1209,7 +1553,12 @@ class MediaRepository:
                     now,
                 ),
             )
-        return self.get_project(project_id) or {}
+            return self._get_project(target, project_id) or {}
+
+        if connection is not None:
+            return insert(connection)
+        with self.transaction(immediate=True) as target:
+            return insert(target)
 
     def get_brief(self, project_id: str, revision: int) -> dict[str, object] | None:
         with self._connect() as connection:
@@ -1226,14 +1575,18 @@ class MediaRepository:
 
     def get_project(self, project_id: str) -> dict[str, object] | None:
         with self._connect() as connection:
-            project = connection.execute("SELECT * FROM creative_projects WHERE id=?", (project_id,)).fetchone()
-            brief = connection.execute(
-                "SELECT * FROM creative_briefs WHERE project_id=? ORDER BY revision DESC LIMIT 1", (project_id,)
-            ).fetchone()
-            timeline = connection.execute(
-                "SELECT id,revision FROM timelines WHERE project_id=? ORDER BY created_at DESC,revision DESC LIMIT 1",
-                (project_id,),
-            ).fetchone()
+            return self._get_project(connection, project_id)
+
+    @staticmethod
+    def _get_project(connection: sqlite3.Connection, project_id: str) -> dict[str, object] | None:
+        project = connection.execute("SELECT * FROM creative_projects WHERE id=?", (project_id,)).fetchone()
+        brief = connection.execute(
+            "SELECT * FROM creative_briefs WHERE project_id=? ORDER BY revision DESC LIMIT 1", (project_id,)
+        ).fetchone()
+        timeline = connection.execute(
+            "SELECT id,revision FROM timelines WHERE project_id=? ORDER BY created_at DESC,revision DESC LIMIT 1",
+            (project_id,),
+        ).fetchone()
         if not project or not brief:
             return None
         result = dict(project)
@@ -1250,6 +1603,142 @@ class MediaRepository:
         result["latest_timeline_revision"] = int(timeline["revision"]) if timeline else None
         return result
 
+    def get_creator_profile(
+        self,
+        *,
+        profile_id: str,
+        revision: int | None = None,
+    ) -> dict[str, object] | None:
+        query = (
+            """SELECT profile_id,revision,profile_json,content_sha256,evidence_json,source,created_at
+               FROM creator_profile_revisions WHERE profile_id=? AND revision=?"""
+            if revision is not None
+            else """SELECT profile_id,revision,profile_json,content_sha256,evidence_json,source,created_at
+                    FROM creator_profile_revisions WHERE profile_id=? ORDER BY revision DESC LIMIT 1"""
+        )
+        parameters: tuple[object, ...] = (profile_id, revision) if revision is not None else (profile_id,)
+        with self._connect() as connection:
+            row = connection.execute(query, parameters).fetchone()
+        return self._creator_profile_from_row(row) if row else None
+
+    @staticmethod
+    def _creator_profile_from_row(row: sqlite3.Row) -> dict[str, object]:
+        return {
+            "profile_id": str(row["profile_id"]),
+            "revision": int(row["revision"]),
+            "content_sha256": str(row["content_sha256"]),
+            "profile": _loads(row["profile_json"], {}),
+            "evidence": _loads(row["evidence_json"], []),
+            "source": str(row["source"]),
+            "created_at": str(row["created_at"]),
+        }
+
+    def put_creator_profile(
+        self,
+        *,
+        profile_id: str,
+        base_revision: int,
+        profile: dict[str, object],
+        evidence: list[dict[str, object]],
+        source: str,
+        idempotency_scope: str,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> tuple[dict[str, object], bool]:
+        """CAS-write a complete creator profile and its replay snapshot atomically."""
+        with self.transaction(immediate=True) as connection:
+            replay = self._idempotency_replay(
+                connection,
+                scope=idempotency_scope,
+                key=idempotency_key,
+                request_sha256=request_sha256,
+            )
+            if replay is not None:
+                return replay, True
+            current_row = connection.execute(
+                """SELECT profile_id,revision,profile_json,content_sha256,evidence_json,source,created_at
+                   FROM creator_profile_revisions WHERE profile_id=? ORDER BY revision DESC LIMIT 1""",
+                (profile_id,),
+            ).fetchone()
+            current = self._creator_profile_from_row(current_row) if current_row else None
+            current_revision = int(current["revision"]) if current else 0
+            if current_revision != base_revision:
+                raise MediaRevisionConflictError(
+                    "profile_revision_conflict",
+                    current
+                    or {
+                        "profile_id": profile_id,
+                        "revision": 0,
+                        "content_sha256": None,
+                        "profile": {},
+                        "evidence": [],
+                        "source": None,
+                        "created_at": None,
+                    },
+                )
+            for item in evidence:
+                exists = connection.execute(
+                    "SELECT 1 FROM creative_briefs WHERE project_id=? AND revision=?",
+                    (item["project_id"], item["brief_revision"]),
+                ).fetchone()
+                if not exists:
+                    raise ValueError("Creator profile evidence references an unknown creative brief.")
+            revision = base_revision + 1
+            now = utc_now_iso()
+            digest = content_sha256(profile)
+            connection.execute(
+                """INSERT INTO creator_profile_revisions(
+                       profile_id,revision,profile_json,content_sha256,evidence_json,source,created_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (
+                    profile_id,
+                    revision,
+                    canonical_json(profile),
+                    digest,
+                    canonical_json(evidence),
+                    source,
+                    now,
+                ),
+            )
+            response = {
+                "profile_id": profile_id,
+                "revision": revision,
+                "content_sha256": digest,
+                "profile": profile,
+                "evidence": evidence,
+                "source": source,
+                "created_at": now,
+            }
+            self._idempotency_store_success(
+                connection,
+                scope=idempotency_scope,
+                key=idempotency_key,
+                request_sha256=request_sha256,
+                resource_type="creator_profile",
+                resource_id=f"{profile_id}:{revision}",
+                response=response,
+            )
+        return response, False
+
+    def latest_creative_briefs(self) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT brief.project_id,brief.revision,brief.brief_json
+                     FROM creative_briefs brief
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM creative_briefs newer
+                       WHERE newer.project_id=brief.project_id AND newer.revision>brief.revision)
+                    ORDER BY brief.project_id"""
+            ).fetchall()
+        return [
+            {
+                "project_id": str(row["project_id"]),
+                "brief_revision": int(row["revision"]),
+                "brief": _loads(row["brief_json"], {}),
+            }
+            for row in rows
+        ]
+
     def save_timeline(
         self,
         *,
@@ -1260,12 +1749,14 @@ class MediaRepository:
         provenance: dict[str, object],
         validation_status: str,
         validation_errors: list[dict[str, object]] | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, object]:
         serialized = canonical_json(timeline)
         brief_revision = int(provenance.get("brief_revision") or 1)
         parent_revision = revision - 1 if revision > 1 else None
-        with self.transaction(immediate=True) as connection:
-            connection.execute(
+
+        def insert(target: sqlite3.Connection) -> dict[str, object]:
+            target.execute(
                 """INSERT INTO timelines(id,project_id,revision,parent_revision,brief_revision,
                      schema_version,timeline_json,content_sha256,provenance_json,validation_status,
                      validation_errors_json,created_at) VALUES(?,?,?,?,?,'1.0',?,?,?,?,?,?)""",
@@ -1283,7 +1774,12 @@ class MediaRepository:
                     utc_now_iso(),
                 ),
             )
-        return self.get_timeline(timeline_id, revision) or {}
+            return self._get_timeline(target, timeline_id, revision) or {}
+
+        if connection is not None:
+            return insert(connection)
+        with self.transaction(immediate=True) as target:
+            return insert(target)
 
     def save_timeline_revision_cas(
         self,
@@ -1296,12 +1792,14 @@ class MediaRepository:
         provenance: dict[str, object],
         validation_status: str,
         validation_errors: list[dict[str, object]] | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, object]:
         revision = base_revision + 1
         serialized = canonical_json(timeline)
         brief_revision = int(provenance.get("brief_revision") or 1)
-        with self.transaction(immediate=True) as connection:
-            head = connection.execute(
+
+        def insert(target: sqlite3.Connection) -> dict[str, object]:
+            head = target.execute(
                 "SELECT revision,content_sha256 FROM timelines WHERE id=? ORDER BY revision DESC LIMIT 1",
                 (timeline_id,),
             ).fetchone()
@@ -1311,7 +1809,7 @@ class MediaRepository:
                 or str(head["content_sha256"]) != expected_base_sha256
             ):
                 raise RuntimeError(f"revision_conflict:{int(head['revision']) if head else 0}")
-            connection.execute(
+            target.execute(
                 """INSERT INTO timelines(id,project_id,revision,parent_revision,brief_revision,
                      schema_version,timeline_json,content_sha256,provenance_json,validation_status,
                      validation_errors_json,created_at) VALUES(?,?,?,?,?,'1.0',?,?,?,?,?,?)""",
@@ -1329,17 +1827,30 @@ class MediaRepository:
                     utc_now_iso(),
                 ),
             )
-        return self.get_timeline(timeline_id, revision) or {}
+            return self._get_timeline(target, timeline_id, revision) or {}
+
+        if connection is not None:
+            return insert(connection)
+        with self.transaction(immediate=True) as target:
+            return insert(target)
 
     def get_timeline(self, timeline_id: str, revision: int | None = None) -> dict[str, object] | None:
+        with self._connect() as connection:
+            return self._get_timeline(connection, timeline_id, revision)
+
+    @staticmethod
+    def _get_timeline(
+        connection: sqlite3.Connection,
+        timeline_id: str,
+        revision: int | None = None,
+    ) -> dict[str, object] | None:
         sql = "SELECT * FROM timelines WHERE id=?"
         params: list[object] = [timeline_id]
         if revision is not None:
             sql += " AND revision=?"
             params.append(revision)
         sql += " ORDER BY revision DESC LIMIT 1"
-        with self._connect() as connection:
-            row = connection.execute(sql, params).fetchone()
+        row = connection.execute(sql, params).fetchone()
         if not row:
             return None
         result = dict(row)
@@ -1395,8 +1906,17 @@ class MediaRepository:
             row = connection.execute("SELECT * FROM output_roots WHERE id=?", (root_id,)).fetchone()
         return dict(row) if row else None
 
-    def validate_output_root(self, root_id: str) -> tuple[dict[str, object], Path]:
-        root = self.get_output_root(root_id)
+    def validate_output_root(
+        self,
+        root_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> tuple[dict[str, object], Path]:
+        if connection is None:
+            root = self.get_output_root(root_id)
+        else:
+            row = connection.execute("SELECT * FROM output_roots WHERE id=?", (root_id,)).fetchone()
+            root = dict(row) if row else None
         if not root or root["status"] != "active":
             raise ValueError("Output root is unavailable.")
         stored = Path(str(root["canonical_path"]))
@@ -1404,12 +1924,12 @@ class MediaRepository:
         for part in stored.parts[1:]:
             current /= part
             if current.is_symlink():
-                self._set_output_root_status(root_id, "unavailable")
+                self._set_output_root_status(root_id, "unavailable", connection=connection)
                 raise ValueError("Output root identity changed.")
         try:
             resolved = stored.resolve(strict=True)
         except OSError as exc:
-            self._set_output_root_status(root_id, "unavailable")
+            self._set_output_root_status(root_id, "unavailable", connection=connection)
             raise ValueError("Output root is unavailable.") from exc
         held_descriptor = self._output_root_descriptors.get(root_id)
         if held_descriptor is not None:
@@ -1417,20 +1937,17 @@ class MediaRepository:
                 held_identity = os.fstat(held_descriptor)
                 current_identity = resolved.stat()
             except OSError as exc:
-                self._set_output_root_status(root_id, "unavailable")
+                self._set_output_root_status(root_id, "unavailable", connection=connection)
                 raise ValueError("Output root is unavailable.") from exc
-            if (
-                held_identity.st_dev != current_identity.st_dev
-                or held_identity.st_ino != current_identity.st_ino
-            ):
-                self._set_output_root_status(root_id, "unavailable")
+            if held_identity.st_dev != current_identity.st_dev or held_identity.st_ino != current_identity.st_ino:
+                self._set_output_root_status(root_id, "unavailable", connection=connection)
                 raise ValueError("Output root identity changed.")
         if (
             str(resolved) != str(stored)
             or not resolved.is_dir()
             or _permission_fingerprint(resolved) != root["permission_fingerprint"]
         ):
-            self._set_output_root_status(root_id, "unavailable")
+            self._set_output_root_status(root_id, "unavailable", connection=connection)
             raise ValueError("Output root identity changed.")
         return root, resolved
 
@@ -1450,12 +1967,24 @@ class MediaRepository:
             raise ValueError("Output root identity changed.")
         return root, path, descriptor
 
-    def _set_output_root_status(self, root_id: str, status: str) -> None:
-        with self.transaction(immediate=True) as connection:
-            connection.execute(
+    def _set_output_root_status(
+        self,
+        root_id: str,
+        status: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        def update(target: sqlite3.Connection) -> None:
+            target.execute(
                 "UPDATE output_roots SET status=?,updated_at=? WHERE id=?",
                 (status, utc_now_iso(), root_id),
             )
+
+        if connection is not None:
+            update(connection)
+            return
+        with self.transaction(immediate=True) as target:
+            update(target)
 
     def create_render_job(
         self,
@@ -1464,25 +1993,23 @@ class MediaRepository:
         timeline_revision: int,
         profile: str,
         output_root_id: str,
-        output_relative_path: str,
+        output_relative_path: str | None,
         timeline_content_sha256: str,
         export_grant_id: str | None = None,
         reuse_active: bool = False,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, object]:
-        timeline = self.get_timeline(timeline_id, timeline_revision)
-        if not timeline or timeline["content_sha256"] != timeline_content_sha256:
-            raise ValueError("Timeline content hash does not match the saved revision.")
-        root, _ = self.validate_output_root(output_root_id)
-        if profile == "preview-low" and root["kind"] != "app_preview":
-            raise ValueError("Preview renders must use the app-managed preview root.")
-        if profile == "export-1080p" and export_grant_id is None:
-            raise ValueError("Export requires an Electron-issued export grant.")
-        job_id = new_id("render")
-        now = utc_now_iso()
-        database_uuid = self.database_uuid
-        with self.transaction(immediate=True) as connection:
+        def insert(target: sqlite3.Connection) -> dict[str, object]:
+            timeline = self._get_timeline(target, timeline_id, timeline_revision)
+            if not timeline or timeline["content_sha256"] != timeline_content_sha256:
+                raise ValueError("Timeline content hash does not match the saved revision.")
+            root, _ = self.validate_output_root(output_root_id, connection=target)
+            if profile == "preview-low" and root["kind"] != "app_preview":
+                raise ValueError("Preview renders must use the app-managed preview root.")
+            if profile == "export-1080p" and export_grant_id is None:
+                raise ValueError("Export requires an Electron-issued export grant.")
             existing = (
-                connection.execute(
+                target.execute(
                     """SELECT id FROM render_jobs WHERE timeline_id=? AND timeline_revision=?
                          AND timeline_content_sha256=? AND profile=? AND output_root_id=?
                          AND status IN ('queued','running','cancelling') ORDER BY created_at LIMIT 1""",
@@ -1493,27 +2020,40 @@ class MediaRepository:
             )
             existing_id = str(existing["id"]) if existing else ""
             if not existing:
-                connection.execute(
-                """INSERT INTO render_jobs(id,database_uuid,timeline_id,timeline_revision,profile,
+                job_id = new_id("render")
+                filename = output_relative_path or f"{job_id}.mp4"
+                database_row = target.execute("SELECT database_uuid FROM database_meta WHERE singleton=1").fetchone()
+                if not database_row:
+                    raise MediaMigrationError("database_meta is missing.")
+                target.execute(
+                    """INSERT INTO render_jobs(id,database_uuid,timeline_id,timeline_revision,profile,
                      output_root_id,export_grant_id,output_relative_path,timeline_content_sha256,status,
                      stage,progress,attempt,cancel_requested,created_at)
                    VALUES(?,?,?,?,?,?,?, ?,?,'queued','queued',0,1,0,?)""",
                     (
                         job_id,
-                        database_uuid,
+                        str(database_row["database_uuid"]),
                         timeline_id,
                         timeline_revision,
                         profile,
                         output_root_id,
                         export_grant_id,
-                        output_relative_path,
+                        filename,
                         timeline_content_sha256,
-                        now,
+                        utc_now_iso(),
                     ),
                 )
-        result = self.get_render_job(existing_id or job_id) or {}
-        result["reused"] = bool(existing_id)
-        return result
+                selected_id = job_id
+            else:
+                selected_id = existing_id
+            result = self.get_render_job_in_transaction(target, selected_id) or {}
+            result["reused"] = bool(existing_id)
+            return result
+
+        if connection is not None:
+            return insert(connection)
+        with self.transaction(immediate=True) as target:
+            return insert(target)
 
     @staticmethod
     def _render_dict(row: sqlite3.Row) -> dict[str, object]:
@@ -1525,7 +2065,14 @@ class MediaRepository:
 
     def get_render_job(self, job_id: str) -> dict[str, object] | None:
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM render_jobs WHERE id=?", (job_id,)).fetchone()
+            return self.get_render_job_in_transaction(connection, job_id)
+
+    def get_render_job_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        job_id: str,
+    ) -> dict[str, object] | None:
+        row = connection.execute("SELECT * FROM render_jobs WHERE id=?", (job_id,)).fetchone()
         return self._render_dict(row) if row else None
 
     def list_render_jobs(self, *, active: bool, limit: int = 50) -> list[dict[str, object]]:
@@ -1621,17 +2168,28 @@ class MediaRepository:
             )
         return cursor.rowcount == 1
 
-    def request_render_cancel(self, job_id: str) -> bool:
-        with self.transaction(immediate=True) as connection:
-            cursor = connection.execute(
+    def request_render_cancel(
+        self,
+        job_id: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> bool:
+        def update(target: sqlite3.Connection) -> bool:
+            now = utc_now_iso()
+            cursor = target.execute(
                 """UPDATE render_jobs SET cancel_requested=1,status=CASE WHEN status='running'
                      THEN 'cancelling' ELSE 'cancelled' END,
                      stage=CASE WHEN status='running' THEN stage ELSE 'cancelled' END,
                      finished_at=CASE WHEN status='running' THEN finished_at ELSE ? END,heartbeat_at=?
                    WHERE id=? AND status IN ('queued','running','interrupted')""",
-                (utc_now_iso(), utc_now_iso(), job_id),
+                (now, now, job_id),
             )
-        return cursor.rowcount == 1
+            return cursor.rowcount == 1
+
+        if connection is not None:
+            return update(connection)
+        with self.transaction(immediate=True) as target:
+            return update(target)
 
     def resolve_render_artifact(self, job_id: str) -> tuple[dict[str, object], Path] | None:
         with self._connect() as connection:
@@ -1728,6 +2286,177 @@ class MediaRepository:
                 "SELECT COUNT(*) FROM render_jobs WHERE status IN ('queued','running','cancelling')"
             ).fetchone()[0]
         return int(media) + int(renders)
+
+    def execute_idempotent_write(
+        self,
+        *,
+        scope: str,
+        key: str,
+        request_sha256: str,
+        resource_type: str,
+        mutation: Callable[
+            [sqlite3.Connection],
+            tuple[dict[str, object], int, str | None],
+        ],
+    ) -> IdempotentWriteResult:
+        """Commit one domain mutation and its exact HTTP response in one transaction.
+
+        ``mutation`` is called only after the idempotency key has been checked. It
+        must use the supplied connection for every write and return
+        ``(response_body, response_status, resource_id)``. Any exception,
+        including a failure while freezing the response, rolls the domain write
+        back with the idempotency record.
+        """
+
+        with self.transaction(immediate=True) as connection:
+            replay = self._idempotency_replay_record(
+                connection,
+                scope=scope,
+                key=key,
+                request_sha256=request_sha256,
+            )
+            if replay is not None:
+                response, response_status, resource_id = replay
+                return IdempotentWriteResult(
+                    response=response,
+                    response_status=response_status,
+                    replayed=True,
+                    resource_id=resource_id,
+                )
+            response, response_status, resource_id = mutation(connection)
+            if not isinstance(response, dict):
+                raise TypeError("Idempotent mutation response must be a JSON object.")
+            if not isinstance(response_status, int) or isinstance(response_status, bool):
+                raise TypeError("Idempotent mutation response status must be an integer.")
+            if not 100 <= response_status <= 599:
+                raise ValueError("Idempotent mutation response status is invalid.")
+            self._idempotency_store_success(
+                connection,
+                scope=scope,
+                key=key,
+                request_sha256=request_sha256,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                response=response,
+                response_status=response_status,
+            )
+        return IdempotentWriteResult(
+            response=response,
+            response_status=response_status,
+            replayed=False,
+            resource_id=resource_id,
+        )
+
+    def replay_idempotent_write(
+        self,
+        *,
+        scope: str,
+        key: str,
+        request_sha256: str,
+    ) -> IdempotentWriteResult | None:
+        """Read a frozen response before doing fallible request preparation.
+
+        ``execute_idempotent_write`` deliberately performs the same check again,
+        so a miss here is safe under concurrent requests.
+        """
+
+        with self.transaction(immediate=True) as connection:
+            replay = self._idempotency_replay_record(
+                connection,
+                scope=scope,
+                key=key,
+                request_sha256=request_sha256,
+            )
+        if replay is None:
+            return None
+        response, response_status, resource_id = replay
+        return IdempotentWriteResult(
+            response=response,
+            response_status=response_status,
+            replayed=True,
+            resource_id=resource_id,
+        )
+
+    @staticmethod
+    def _idempotency_replay_record(
+        connection: sqlite3.Connection,
+        *,
+        scope: str,
+        key: str,
+        request_sha256: str,
+    ) -> tuple[dict[str, object], int, str | None] | None:
+        row = connection.execute(
+            "SELECT * FROM idempotency_records WHERE scope=? AND key=?",
+            (scope, key),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            expired = datetime.fromisoformat(str(row["expires_at"])) <= datetime.now(timezone.utc)
+        except ValueError:
+            expired = True
+        if expired:
+            connection.execute("DELETE FROM idempotency_records WHERE scope=? AND key=?", (scope, key))
+            return None
+        if row["request_sha256"] != request_sha256:
+            raise IdempotencyConflictError("Idempotency key was reused with a different request.")
+        if row["state"] not in {"completed", "failed"}:
+            raise IdempotencyInProgressError("An identical idempotent request is still in progress.")
+        response = _loads(row["response_json"], None)
+        if not isinstance(response, dict):
+            raise IdempotencyConflictError("The stored idempotent response is unavailable.")
+        response_status = row["response_status"]
+        if not isinstance(response_status, int):
+            raise IdempotencyConflictError("The stored idempotent response status is unavailable.")
+        resource_id = str(row["resource_id"]) if row["resource_id"] is not None else None
+        return response, response_status, resource_id
+
+    @staticmethod
+    def _idempotency_replay(
+        connection: sqlite3.Connection,
+        *,
+        scope: str,
+        key: str,
+        request_sha256: str,
+    ) -> dict[str, object] | None:
+        replay = MediaRepository._idempotency_replay_record(
+            connection,
+            scope=scope,
+            key=key,
+            request_sha256=request_sha256,
+        )
+        return replay[0] if replay is not None else None
+
+    @staticmethod
+    def _idempotency_store_success(
+        connection: sqlite3.Connection,
+        *,
+        scope: str,
+        key: str,
+        request_sha256: str,
+        resource_type: str,
+        resource_id: str | None,
+        response: dict[str, object],
+        response_status: int = 200,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        connection.execute(
+            """INSERT INTO idempotency_records(
+                   scope,key,request_sha256,state,resource_type,resource_id,response_status,
+                   response_json,created_at,expires_at)
+               VALUES(?,?,?,'completed',?,?,?,?,?,?)""",
+            (
+                scope,
+                key,
+                request_sha256,
+                resource_type,
+                resource_id,
+                response_status,
+                canonical_json(response),
+                now.isoformat(),
+                (now + timedelta(hours=24)).isoformat(),
+            ),
+        )
 
     def claim_idempotency(
         self,

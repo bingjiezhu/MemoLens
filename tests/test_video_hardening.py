@@ -304,6 +304,12 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
                 "analysis_revision": 4,
                 "score_components": {"lexical": 1.0, "semantic": None, "recency": 0.0},
                 "source_availability": "available",
+                "review": {
+                    "revision": 0,
+                    "inbox_state": "inbox",
+                    "favorite": False,
+                    "project_ready": False,
+                },
                 "provenance": ["local_keyframe", "sidecar_transcript"],
             },
             {
@@ -326,6 +332,12 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
                 "analysis_revision": None,
                 "score_components": {"lexical": 1.0, "semantic": None, "recency": 0.0},
                 "source_availability": "available",
+                "review": {
+                    "revision": 0,
+                    "inbox_state": "inbox",
+                    "favorite": False,
+                    "project_ready": False,
+                },
                 "provenance": ["image_index"],
             },
         ]
@@ -556,8 +568,13 @@ class RouteBoundaryHardeningTests(unittest.TestCase):
         self.assertEqual(len(authenticated.data), 16)
         authenticated.close()
 
-        payload = {"root_path": str(self.library), "recursive": False, "kinds": ["video"]}
         repository = self.app.extensions["media_repository"]
+        payload = {
+            "db_path": str(repository.db_path),
+            "root_path": str(self.library),
+            "recursive": False,
+            "kinds": ["video"],
+        }
         repository.claim_idempotency(
             scope="desktop:POST:/v1/assets/import",
             key="still-running",

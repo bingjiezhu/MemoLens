@@ -3,6 +3,33 @@
 All notable changes to MemoLens are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-08-12
+
+### Added
+
+- A unified photo/video Media Inbox with reversible Keep, Archive, Favorite, Ready, and Undo metadata that never moves or deletes original media.
+- A versioned Creator Memory profile whose platform, audience, format, tone, pace, and constraints are only applied after explicit confirmation and retain evidence-linked provenance.
+- Direct Codex tools for confirmed creator context and Inbox browsing through strict read-only SQLite, without another Agent runtime or model API key.
+- Spec 006, defining the App-owned state boundary, creator-facing information architecture, v3 migration, plugin contract, and non-destructive review model.
+
+### Changed
+
+- Reframed MemoLens as a complete private media home for short-video creators: drop material once, rediscover and review it naturally, then describe the next story in the App or Codex.
+- Made archived assets opt out of default discovery and creation while remaining locally recoverable and valid for historical projects.
+- Unified mixed photo/video provenance so Codex can turn either media type into an unsaved Timeline 1.0 draft.
+
+### Security
+
+- Kept all Inbox/profile writes behind the authenticated desktop session, idempotency keys, database binding, and optimistic revision checks; the Codex plugin remains zero-write and API-off by default.
+- Preserved the published v2 migration checksum while adding schema v3 as a separate, atomic migration.
+- Made import, brief, timeline, render, cancel, and resume writes freeze their exact response in the same SQLite transaction as the domain change, so a lost response cannot duplicate work.
+- Allowed trusted Chromium CORS preflights to complete without weakening token or database binding on the real media mutation.
+- Pinned every media request to one immutable runtime snapshot so a concurrent library switch cannot move an already-validated write into another database; retired runners now wait for in-flight requests to finish.
+
+### Tests
+
+- Added migration, CAS, crash-injected exact replay, CORS preflight, DB-binding, archive-filtering, profile-evidence, creator-context, Inbox pagination, zero-network plugin, responsive UI, and direct photo-to-timeline coverage.
+
 ## [0.4.0] - 2026-08-12
 
 ### Added
@@ -90,6 +117,7 @@ All notable changes to MemoLens are documented here. The project follows
 - Hardened the loopback API, backend identity checks, Electron sandbox/navigation/IPC boundaries, local file serving, and release build freshness.
 - Distinguished empty, partial, and failed indexing outcomes instead of presenting them as successful work.
 
+[0.5.0]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.5.0
 [0.4.0]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.4.0
 [0.3.1]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.3.1
 [0.3.0]: https://github.com/bingjiezhu/MemoLens/releases/tag/v0.3.0

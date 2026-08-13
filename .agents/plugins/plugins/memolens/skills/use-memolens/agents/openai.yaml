@@ -1,5 +1,5 @@
 interface:
   display_name: "MemoLens"
-  short_description: "Find private moments. Shape an unsaved story."
+  short_description: "Your private creator library, ready for the story."
   brand_color: "#426B5A"
-  default_prompt: "Use $use-memolens to find the strongest local photo and video moments for my idea, then shape them into an unsaved timeline draft for review."
+  default_prompt: "Use $use-memolens to read my confirmed creator context, find the strongest local photo and video moments, and shape an unsaved timeline draft for review."

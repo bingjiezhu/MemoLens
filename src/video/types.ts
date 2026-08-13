@@ -167,6 +167,12 @@ export interface CreativeBriefInput {
   candidate_refs?: string[];
 }
 
+export interface CreatorProfileReference {
+  profile_id: string;
+  revision: number;
+  content_sha256: string;
+}
+
 export interface CreativeBrief extends CreativeBriefInput {
   id: string;
   revision: number;
@@ -174,6 +180,8 @@ export interface CreativeBrief extends CreativeBriefInput {
   candidate_refs: string[];
   missing_assets: string[];
   assumptions: string[];
+  creator_profile_ref?: CreatorProfileReference | null;
+  applied_profile_fields?: string[];
 }
 
 export interface CreativeProject {
