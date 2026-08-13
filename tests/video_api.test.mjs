@@ -328,6 +328,12 @@ test("creative project adapters preserve candidate fallbacks and request bodies"
           candidate_refs: ["old-ref"],
         },
         selectedRefs: ["selected-ref"],
+        creatorProfileRef: {
+          profile_id: "default",
+          revision: 3,
+          content_sha256: "a".repeat(64),
+        },
+        appliedProfileFields: ["platform", "tone"],
         idempotencyKey: "idem-brief",
       });
       const restored = await fetchCreativeProject(
@@ -340,6 +346,12 @@ test("creative project adapters preserve candidate fallbacks and request bodies"
       assert.equal(requests[0].init.headers["Idempotency-Key"], "idem-brief");
       assert.equal(requestBody(requests[0]).candidate_refs[0], "selected-ref");
       assert.equal(requestBody(requests[0]).db_path, "/db/library.sqlite");
+      assert.deepEqual(requestBody(requests[0]).creator_profile_ref, {
+        profile_id: "default",
+        revision: 3,
+        content_sha256: "a".repeat(64),
+      });
+      assert.deepEqual(requestBody(requests[0]).applied_profile_fields, ["platform", "tone"]);
       assert.equal(project.id, "project-1");
       assert.equal(project.brief.id, "brief-1");
       assert.equal(project.brief.revision, 2);

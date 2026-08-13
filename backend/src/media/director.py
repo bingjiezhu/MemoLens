@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
-from core.media_db import MediaRepository
+from core.media_db import IdempotentWriteResult, MediaRepository
 
+from .creator_memory import PROFILE_FIELDS, CreatorMemoryService
 from .retrieval import MixedRetrievalService
 
 
@@ -17,11 +19,22 @@ class CreativeBriefError(ValueError):
 class CreativeDirector:
     """Rules-v1 director that freezes grounded retrieval references into an immutable brief."""
 
-    def __init__(self, repository: MediaRepository, retrieval: MixedRetrievalService):
+    def __init__(
+        self,
+        repository: MediaRepository,
+        retrieval: MixedRetrievalService,
+        creator_memory: CreatorMemoryService | None = None,
+    ):
         self.repository = repository
         self.retrieval = retrieval
+        self.creator_memory = creator_memory
 
-    def create_brief(self, payload: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+    def create_brief(
+        self,
+        payload: dict[str, object],
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> tuple[dict[str, object], dict[str, object]]:
         goal = str(payload.get("goal") or payload.get("prompt") or payload.get("query") or "").strip()
         if not goal:
             raise ValueError("`goal` must be a non-empty string.")
@@ -45,6 +58,7 @@ class CreativeDirector:
         )
         must_include = self._string_list(payload, "must_include")
         must_exclude = self._string_list(payload, "must_exclude")
+        creator_profile_ref, applied_profile_fields = self._creator_profile_context(payload)
         raw_refs = payload.get("candidate_refs")
         if raw_refs is not None and not isinstance(raw_refs, list):
             raise ValueError("`candidate_refs` must be a string array.")
@@ -87,9 +101,7 @@ class CreativeDirector:
                     excluded_terms=must_exclude,
                     top_k=24,
                 )
-                candidates = list(
-                    {str(item["id"]): item for item in [*supplemented, *candidates]}.values()
-                )[:12]
+                candidates = list({str(item["id"]): item for item in [*supplemented, *candidates]}.values())[:12]
                 conflicts = self.retrieval.constraint_conflicts(
                     [str(item["id"]) for item in candidates],
                     required_terms=must_include,
@@ -126,18 +138,54 @@ class CreativeDirector:
             "assumptions": ["Local rules-v1 director; no external model or media upload was used."],
             "director": {"profile": "rules-v1", "external_model": False, "search_revision": search["search_revision"]},
         }
+        if creator_profile_ref is not None:
+            brief["creator_profile_ref"] = creator_profile_ref
+            brief["applied_profile_fields"] = applied_profile_fields
+        provenance = {
+            "created_by": "rules-v1",
+            "search_revision": search["search_revision"],
+            "analysis_heads": search["analysis_heads"],
+            "external_model": False,
+        }
+        if creator_profile_ref is not None:
+            provenance["creator_profile_ref"] = creator_profile_ref
+            provenance["applied_profile_fields"] = applied_profile_fields
         project = self.repository.create_project(
             title,
             brief,
-            {
-                "created_by": "rules-v1",
-                "search_revision": search["search_revision"],
-                "analysis_heads": search["analysis_heads"],
-                "external_model": False,
-            },
+            provenance,
+            connection=connection,
         )
         project["candidates"] = candidates
         return project, search
+
+    def create_brief_idempotent(
+        self,
+        payload: dict[str, object],
+        *,
+        idempotency_scope: str,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> IdempotentWriteResult:
+        def mutation(connection: sqlite3.Connection) -> tuple[dict[str, object], int, str]:
+            project, search = self.create_brief(payload, connection=connection)
+            project_id = str(project["id"])
+            body = {
+                "object": "creative.project",
+                "schema_version": "1",
+                "project": project,
+                "search": search,
+                "id": project_id,
+            }
+            return body, 201, project_id
+
+        return self.repository.execute_idempotent_write(
+            scope=idempotency_scope,
+            key=idempotency_key,
+            request_sha256=request_sha256,
+            resource_type="creative_project",
+            mutation=mutation,
+        )
 
     @staticmethod
     def _short_text(payload: dict[str, object], key: str, default: str, *, limit: int = 200) -> str:
@@ -156,3 +204,37 @@ class CreativeDirector:
         if any(not isinstance(value, str) or not value.strip() or len(value.strip()) > 120 for value in raw):
             raise ValueError(f"`{key}` entries must be non-empty strings of at most 120 characters.")
         return list(dict.fromkeys(value.strip() for value in raw))
+
+    def _creator_profile_context(
+        self,
+        payload: dict[str, object],
+    ) -> tuple[dict[str, object] | None, list[str]]:
+        raw_ref = payload.get("creator_profile_ref")
+        raw_fields = payload.get("applied_profile_fields")
+        if raw_ref is None and raw_fields is None:
+            return None, []
+        if raw_ref is None or raw_fields is None:
+            raise ValueError("`creator_profile_ref` and `applied_profile_fields` must be provided together.")
+        if self.creator_memory is None:
+            raise ValueError("Creator Memory is unavailable in this runtime.")
+        if not isinstance(raw_fields, list) or len(raw_fields) > len(PROFILE_FIELDS):
+            raise ValueError("`applied_profile_fields` must be a bounded string array.")
+        if any(not isinstance(field, str) or field not in PROFILE_FIELDS for field in raw_fields):
+            raise ValueError("`applied_profile_fields` contains an unsupported preference field.")
+        fields = list(dict.fromkeys(raw_fields))
+        stored = self.creator_memory.resolve_profile_ref(raw_ref)
+        profile = stored["profile"]
+        if not isinstance(profile, dict):
+            raise ValueError("Creator profile snapshot is invalid.")
+        for field in fields:
+            if field not in profile or field not in payload:
+                raise ValueError(f"Applied creator preference `{field}` must be explicit in the brief payload.")
+            normalized = self.creator_memory.validate_profile({field: payload[field]})[field]
+            if normalized != profile[field]:
+                raise ValueError(f"Brief field `{field}` does not match the referenced creator profile revision.")
+        reference = {
+            "profile_id": stored["profile_id"],
+            "revision": stored["revision"],
+            "content_sha256": stored["content_sha256"],
+        }
+        return reference, fields

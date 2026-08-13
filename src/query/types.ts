@@ -424,6 +424,7 @@ export interface DesktopIndexingResult {
 export interface DesktopSettings {
   pythonCommand: string;
   autoStartBackend: boolean;
+  libraryConfigured: boolean;
   defaultLibraryDir: string | null;
   defaultDbPath: string | null;
 }

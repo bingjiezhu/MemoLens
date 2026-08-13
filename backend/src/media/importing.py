@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import sqlite3
 import stat
 import time
 from dataclasses import dataclass
@@ -17,34 +19,21 @@ from backend.src.media.video import (
 )
 from core.media_db import MediaRepository
 
+from .import_plan import (
+    MediaImportPlan,
+    MediaImportResult,
+    PreparedMediaAsset,
+    apply_import_plan,
+)
+
 
 MAX_IMPORT_FILES = 500
 MAX_IMPORT_BYTES = 20 * 1024 * 1024 * 1024
 IMPORT_TIMEOUT_SECONDS = 30.0
-ACTIVE_JOB_STATES = frozenset({"queued", "running", "cancelling"})
 
 
 class MediaJobSubmitter(Protocol):
     def submit(self, job_id: str) -> None: ...
-
-
-@dataclass(frozen=True)
-class MediaImportResult:
-    dry_run: bool
-    kinds: list[str]
-    assets: list[dict[str, object]]
-    jobs: list[dict[str, object]]
-    imported: int
-    skipped: int
-    rejected: list[dict[str, object]]
-
-    @property
-    def status(self) -> str:
-        if self.dry_run:
-            return "dry_run"
-        if self.rejected:
-            return "partial"
-        return "queued" if self.jobs else "succeeded"
 
 
 @dataclass(frozen=True)
@@ -85,6 +74,20 @@ class MediaImportService:
         root: Path,
         payload: Mapping[str, object],
     ) -> MediaImportResult:
+        plan = self.prepare_import(root=root, payload=payload)
+        with self.repository.transaction(immediate=True) as connection:
+            result = self.apply_prepared(connection, root_id=root_id, plan=plan)
+        self.submit_jobs(result.jobs)
+        return result
+
+    def prepare_import(
+        self,
+        *,
+        root: Path,
+        payload: Mapping[str, object],
+    ) -> MediaImportPlan:
+        """Freeze filesystem observations without reading or writing SQLite."""
+
         options = self._parse_options(payload)
         deadline = self._clock() + IMPORT_TIMEOUT_SECONDS
         paths = discover_media(
@@ -96,61 +99,21 @@ class MediaImportService:
             max_total_bytes=MAX_IMPORT_BYTES,
             deadline=deadline,
         )
-        assets: list[dict[str, object]] = []
-        jobs: list[dict[str, object]] = []
+        assets: list[PreparedMediaAsset] = []
         rejected: list[dict[str, object]] = []
-        imported_count = 0
-        skipped_count = 0
 
         for path in paths:
             self._require_time_remaining(deadline)
             relative_path = path.relative_to(root).as_posix()
             try:
-                metadata = path.lstat()
-                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-                    raise ValueError("Media source must be a regular non-symlink file.")
-                kind = "video" if path.suffix.casefold() in VIDEO_EXTENSIONS else "image"
-                digest = self._hash(path, deadline)
-                action = self._source_action(root_id, relative_path, digest)
-                if action == "unchanged":
-                    skipped_count += 1
-                else:
-                    imported_count += 1
-
-                if options.dry_run:
-                    assets.append(
-                        {
-                            "kind": kind,
-                            "filename": path.name,
-                            "relative_path": relative_path,
-                            "sha256": digest,
-                            "action": action,
-                        }
+                assets.append(
+                    self._prepare_asset(
+                        path,
+                        relative_path=relative_path,
+                        deadline=deadline,
+                        probe_image=not options.dry_run,
                     )
-                    continue
-
-                asset = self.repository.upsert_asset_source(
-                    root_id=root_id,
-                    relative_path=relative_path,
-                    filename=path.name,
-                    kind=kind,
-                    sha256=digest,
-                    mime_type=mime_type_for(path, kind),
-                    file_size=metadata.st_size,
-                    mtime_ns=metadata.st_mtime_ns,
-                    source_file_id=str(metadata.st_ino),
                 )
-                asset["action"] = action
-                assets.append(asset)
-                if kind == "image":
-                    rejection = self._probe_image(path, relative_path, asset)
-                    if rejection:
-                        rejected.append(rejection)
-                else:
-                    job = self._schedule_video(str(asset["id"]), action)
-                    if job:
-                        jobs.append(job)
-                        self.job_runner.submit(str(job["id"]))
             except (OSError, ValueError) as exc:
                 rejected.append(
                     {
@@ -161,15 +124,39 @@ class MediaImportService:
                     }
                 )
 
-        return MediaImportResult(
+        return MediaImportPlan(
             dry_run=options.dry_run,
             kinds=options.kinds,
             assets=assets,
-            jobs=jobs,
-            imported=imported_count,
-            skipped=skipped_count,
             rejected=rejected,
         )
+
+    @staticmethod
+    def apply_prepared(
+        connection: sqlite3.Connection,
+        *,
+        root_id: str,
+        plan: MediaImportPlan,
+    ) -> MediaImportResult:
+        return apply_import_plan(connection, root_id=root_id, plan=plan)
+
+    def submit_jobs(self, jobs: list[dict[str, object]]) -> None:
+        """Dispatch only committed work that still needs a process-local runner."""
+
+        submitted: set[str] = set()
+        for job in jobs:
+            job_id = str(job.get("id") or "")
+            if not job_id or job_id in submitted:
+                continue
+            submitted.add(job_id)
+            current = self.repository.get_media_job(job_id)
+            if (
+                current is None
+                or current.get("status") not in {"queued", "interrupted"}
+                or bool(current.get("cancel_requested"))
+            ):
+                continue
+            self.job_runner.submit(job_id)
 
     @staticmethod
     def _parse_options(payload: Mapping[str, object]) -> _ImportOptions:
@@ -200,64 +187,61 @@ class MediaImportService:
             kinds=list(dict.fromkeys(raw_kinds)),
         )
 
-    def _hash(self, path: Path, deadline: float) -> str:
+    def _prepare_asset(
+        self,
+        path: Path,
+        *,
+        relative_path: str,
+        deadline: float,
+        probe_image: bool,
+    ) -> PreparedMediaAsset:
         digest = hashlib.sha256()
         with path.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("Media source must be a regular non-symlink file.")
             while True:
                 self._require_time_remaining(deadline)
                 chunk = handle.read(1024 * 1024)
                 if not chunk:
                     break
                 digest.update(chunk)
-        return digest.hexdigest()
+            kind = "video" if path.suffix.casefold() in VIDEO_EXTENSIONS else "image"
+            width: int | None = None
+            height: int | None = None
+            probe_error: str | None = None
+            if kind == "image" and probe_image:
+                handle.seek(0)
+                try:
+                    with Image.open(handle) as source_image:
+                        width, height = ImageOps.exif_transpose(source_image).size
+                except (OSError, UnidentifiedImageError) as exc:
+                    probe_error = str(exc)
+            self._require_time_remaining(deadline)
+            after = os.fstat(handle.fileno())
 
-    def _source_action(self, root_id: str, relative_path: str, digest: str) -> str:
-        source_id = self.repository.source_id(root_id, relative_path)
-        existing_source = self.repository.get_asset_source(source_id)
-        if existing_source and existing_source.get("sha256") == digest:
-            return "unchanged"
-        return "rebound" if existing_source else "imported"
-
-    def _probe_image(
-        self,
-        path: Path,
-        relative_path: str,
-        asset: dict[str, object],
-    ) -> dict[str, object] | None:
-        try:
-            with Image.open(path) as source_image:
-                width, height = ImageOps.exif_transpose(source_image).size
-            self.repository.update_image_probe(str(asset["id"]), width=width, height=height)
-            asset["probe_status"] = "ready"
-        except (OSError, UnidentifiedImageError) as exc:
-            self.repository.mark_asset_failed(str(asset["id"]), "invalid_image")
-            return {
-                "relative_path": relative_path,
-                "code": "invalid_image",
-                "message": str(exc),
-                "retryable": False,
-            }
-        return None
-
-    def _schedule_video(self, asset_id: str, action: str) -> dict[str, object] | None:
-        current = self.repository.get_asset(asset_id)
-        has_head = bool(
-            current
-            and current.get("probe_status") == "ready"
-            and current.get("id")
-            and self.repository.has_analysis_head(asset_id)
+        current = path.lstat()
+        identities = {
+            (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns) for value in (before, after, current)
+        }
+        if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode) or len(identities) != 1:
+            raise ValueError("Media source changed while the import manifest was prepared.")
+        return PreparedMediaAsset(
+            kind=kind,
+            filename=path.name,
+            relative_path=relative_path,
+            sha256=digest.hexdigest(),
+            mime_type=mime_type_for(path, kind),
+            file_size=before.st_size,
+            mtime_ns=before.st_mtime_ns,
+            source_file_id=str(before.st_ino),
+            width=width,
+            height=height,
+            probe_error=probe_error,
         )
-        if has_head:
-            return None
-
-        prior_job = self.repository.latest_media_job_for_asset(asset_id)
-        if action == "unchanged" and prior_job is not None and prior_job.get("status") not in ACTIVE_JOB_STATES:
-            return None
-        return self.repository.create_analysis_job(asset_id=asset_id, reuse_active=True)
 
     def _require_time_remaining(self, deadline: float) -> None:
         if self._clock() > deadline:
             raise ValueError(
-                "import_manifest_timeout: synchronous import exceeded 30 seconds; "
-                "use smaller relative_paths batches."
+                "import_manifest_timeout: synchronous import exceeded 30 seconds; use smaller relative_paths batches."
             )

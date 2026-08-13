@@ -32,6 +32,17 @@ from memolens_core import (  # noqa: E402
 from memolens_contracts import PLUGIN_VERSION  # noqa: E402
 
 
+def _sqlite_source_state(path: Path) -> dict[str, object]:
+    return {
+        "directory_entries": sorted(item.name for item in path.parent.iterdir()),
+        "files": {
+            candidate.name: candidate.read_bytes()
+            for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm"))
+            if candidate.exists()
+        },
+    }
+
+
 class _MemoLensHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002, ANN001
         return
@@ -156,6 +167,7 @@ class PluginTests(unittest.TestCase):
         (self.library / "trip" / "sunset.jpg").write_bytes(b"not opened by plugin")
         self.db = self.root / "photo index.db"
         with closing(sqlite3.connect(self.db)) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
             connection.execute(
                 """
                 CREATE TABLE image_index (
@@ -256,6 +268,7 @@ class PluginTests(unittest.TestCase):
             timeout=1,
         )
 
+        source_before = _sqlite_source_state(self.db)
         status = gateway.status()
         self.assertEqual(status["mode"], "safe_default_read_only")
         self.assertEqual(status["source"], "sqlite_read_only")
@@ -263,8 +276,9 @@ class PluginTests(unittest.TestCase):
         self.assertFalse(status["local_api"]["authenticated"])
         self.assertFalse(status["local_api"]["checked"])
         self.assertIsNone(status["local_api"]["available"])
-        self.assertEqual(status["database"]["path"], str(self.db.resolve()))
-        self.assertEqual(status["library_dir"], str(self.library.resolve()))
+        self.assertNotIn("path", status["database"])
+        self.assertNotIn("library_dir", status)
+        self.assertNotIn(str(self.root), json.dumps(status))
 
         search = gateway.search("ocean sunset", limit=5)
         self.assertEqual(search["source"], "sqlite_read_only")
@@ -274,6 +288,7 @@ class PluginTests(unittest.TestCase):
             str((self.library / "trip" / "sunset.jpg").resolve()),
         )
         self.assertEqual(self.server.request_paths, [])
+        self.assertEqual(_sqlite_source_state(self.db), source_before)
         with self.assertRaisesRegex(MemoLensError, TRUST_LOCAL_API_ENV) as memories:
             gateway.memories()
         self.assertEqual(memories.exception.code, "local_api_not_trusted")
@@ -297,8 +312,9 @@ class PluginTests(unittest.TestCase):
         self.assertEqual(status["mode"], "opt_in_local_api")
         self.assertTrue(status["local_api"]["trusted_by_user"])
         self.assertFalse(status["local_api"]["authenticated"])
-        self.assertEqual(status["library_dir"], str(self.library))
-        self.assertEqual(status["database"]["path"], str(self.db.resolve()))
+        self.assertNotIn("library_dir", status)
+        self.assertNotIn("path", status["database"])
+        self.assertNotIn(str(self.root), json.dumps(status))
         self.assertEqual(status["database"]["index_stats"]["asset_count"], 2)
         self.assertEqual(gateway.library_dir, self.library.resolve())
         self.assertEqual(gateway.db_path, self.db.resolve())
@@ -431,10 +447,99 @@ class PluginTests(unittest.TestCase):
 
     def test_sqlite_connection_uses_uri_read_only_and_query_only(self) -> None:
         gateway = self.gateway(db_path=self.db, library_dir=self.library)
+        source_before = _sqlite_source_state(self.db)
         with closing(gateway._sqlite_connection()) as connection:
             self.assertEqual(connection.execute("PRAGMA query_only").fetchone()[0], 1)
+            self.assertEqual(connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+            self.assertEqual(connection.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
+            # A checkpointed source uses an immutable private snapshot. SQLite
+            # reports `delete` for that snapshot even though the validated source
+            # database header remains WAL-mode.
+            self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0], "delete")
             with self.assertRaises(sqlite3.OperationalError):
                 connection.execute("CREATE TABLE forbidden_write (id INTEGER)")
+        self.assertEqual(_sqlite_source_state(self.db), source_before)
+
+    def test_sqlite_requires_wal_and_rejects_unsafe_sidecars(self) -> None:
+        rollback = self.root / "rollback.db"
+        with closing(sqlite3.connect(rollback)) as connection:
+            connection.execute("CREATE TABLE image_index (id TEXT,filename TEXT,relative_path TEXT)")
+            connection.commit()
+        with self.assertRaises(MemoLensError) as required:
+            self.gateway(db_path=rollback)._sqlite_connection()
+        self.assertEqual(required.exception.code, "database_wal_required")
+
+        unsafe = self.root / "unsafe-wal.db"
+        with closing(sqlite3.connect(unsafe)) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("CREATE TABLE image_index (id TEXT,filename TEXT,relative_path TEXT)")
+            connection.commit()
+        Path(f"{unsafe}-wal").write_bytes(b"not-a-valid-wal")
+        Path(f"{unsafe}-shm").write_bytes(b"not-a-valid-shm")
+        with self.assertRaises(MemoLensError) as unsafe_error:
+            self.gateway(db_path=unsafe)._sqlite_connection()
+        self.assertEqual(unsafe_error.exception.code, "database_wal_unsafe")
+
+    def test_read_only_connection_consumes_a_valid_live_wal_without_writing(self) -> None:
+        writer = sqlite3.connect(self.db)
+        try:
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute(
+                "INSERT INTO image_index VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "wal_match",
+                    "wal.jpg",
+                    "trip/wal.jpg",
+                    None,
+                    None,
+                    None,
+                    "visible only through the live wal",
+                    '["live-wal"]',
+                    "live wal",
+                    0.5,
+                    0.5,
+                    "semantic_hash",
+                ),
+            )
+            writer.commit()
+            wal_path = Path(f"{self.db}-wal")
+            shm_path = Path(f"{self.db}-shm")
+            self.assertGreater(wal_path.stat().st_size, 32)
+            self.assertGreaterEqual(shm_path.stat().st_size, 32_768)
+            source_before = _sqlite_source_state(self.db)
+            result = self.gateway(
+                db_path=self.db, library_dir=self.library
+            ).search("live wal")
+            self.assertEqual(result["results"][0]["id"], "wal_match")
+            self.assertEqual(_sqlite_source_state(self.db), source_before)
+        finally:
+            writer.close()
+
+    def test_read_only_connection_rejects_a_live_wal_with_corrupt_frame(self) -> None:
+        database = self.root / "checksum.db"
+        writer = sqlite3.connect(database)
+        original_wal: bytes | None = None
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("CREATE TABLE image_index (id TEXT PRIMARY KEY)")
+            writer.execute("INSERT INTO image_index VALUES ('in-live-wal')")
+            writer.commit()
+
+            wal_path = Path(f"{database}-wal")
+            original_wal = wal_path.read_bytes()
+            self.assertGreater(len(original_wal), 56)
+            corrupt_wal = bytearray(original_wal)
+            corrupt_wal[56] ^= 0xFF
+            wal_path.write_bytes(corrupt_wal)
+
+            with self.assertRaises(MemoLensError) as unsafe_error:
+                self.gateway(db_path=database)._sqlite_connection()
+            self.assertEqual(unsafe_error.exception.code, "database_wal_unsafe")
+        finally:
+            if original_wal is not None:
+                Path(f"{database}-wal").write_bytes(original_wal)
+            writer.close()
 
     def test_sqlite_fallback_streams_past_ten_thousand_with_bounded_results(self) -> None:
         with closing(sqlite3.connect(self.db)) as connection:
@@ -655,7 +760,7 @@ class PluginTests(unittest.TestCase):
         responses = [json.loads(line) for line in stdout_lines]
         self.assertEqual(len(responses), 3)
         self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-06-18")
-        self.assertEqual(len(responses[1]["result"]["tools"]), 13)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 15)
         self.assertEqual(
             responses[2]["result"]["structuredContent"]["source"],
             "sqlite_read_only",

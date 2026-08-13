@@ -53,6 +53,16 @@ export async function pickLocalImageFolder(): Promise<DesktopFolderSelection | n
   return api.pickImageFolder();
 }
 
+export async function commitLocalLibrarySelection(
+  selection: DesktopFolderSelection,
+): Promise<DesktopSettings | null> {
+  const api = getDesktopApi();
+  if (api === null) {
+    return null;
+  }
+  return api.commitLibrarySelection(selection);
+}
+
 export async function startLocalIndexing(
   options: DesktopIndexingStartOptions,
 ): Promise<DesktopIndexingResult | null> {
@@ -87,4 +97,12 @@ export function subscribeToIndexingProgress(
     return null;
   }
   return api.onIndexingProgress(callback);
+}
+
+export async function openMemoLensInCodex(): Promise<boolean> {
+  const api = getDesktopApi();
+  if (api === null) {
+    return false;
+  }
+  return api.openInCodex();
 }

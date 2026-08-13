@@ -68,7 +68,10 @@ class MixedRetrievalService:
         excluded_terms: list[str],
     ) -> list[dict[str, object]]:
         """Evaluate authoritative brief constraints against explicit user selections."""
-        candidates, _ = self.repository.mixed_candidates()
+        # Explicit references remain resolvable after Archive so an existing
+        # project never loses provenance. The presented match carries its review
+        # state, allowing callers to ask the user for a replacement deliberately.
+        candidates, _ = self.repository.mixed_candidates(include_archived=True)
         return find_constraint_conflicts(
             candidates,
             match_ids,
@@ -77,5 +80,5 @@ class MixedRetrievalService:
         )
 
     def resolve_matches(self, match_ids: list[str]) -> list[dict[str, object]]:
-        candidates, _ = self.repository.mixed_candidates()
+        candidates, _ = self.repository.mixed_candidates(include_archived=True)
         return present_explicit_matches(candidates, match_ids)

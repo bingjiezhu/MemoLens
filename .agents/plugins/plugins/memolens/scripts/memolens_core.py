@@ -246,7 +246,6 @@ class MemoLensGateway:
                     "local_api": self._local_api_summary(available=None),
                     "database": {
                         "available": False,
-                        "path": str(self.db_path) if self.db_path else None,
                         "error": str(database_error),
                         "error_code": database_error.code,
                     },
@@ -265,14 +264,13 @@ class MemoLensGateway:
                 "mode": "safe_default_read_only",
                 "local_api": self._local_api_summary(available=None),
                 "database": database,
-                "library_dir": str(self.library_dir) if self.library_dir else None,
                 "capabilities": _capabilities(
                     database,
                     legacy_search=bool(database.get("legacy_search_available")),
                     local_api_reads=False,
                 ),
                 "warnings": [
-                    "Local API access is disabled by default; only read-only SQLite status and search are available."
+                    "Local API access is disabled by default; confirmed Creator Memory, Media Inbox, search, and timeline reads use SQLite read-only access."
                 ],
                 "safety": _safety_summary(),
             }
@@ -296,7 +294,6 @@ class MemoLensGateway:
                     ),
                     "database": {
                         "available": False,
-                        "path": str(self.db_path) if self.db_path else None,
                         "error": str(database_error),
                         "error_code": database_error.code,
                     },
@@ -317,14 +314,13 @@ class MemoLensGateway:
                     error_code=service_error.code,
                 ),
                 "database": database,
-                "library_dir": str(self.library_dir) if self.library_dir else None,
                 "capabilities": _capabilities(
                     database,
                     legacy_search=bool(database.get("legacy_search_available")),
                     local_api_reads=False,
                 ),
                 "warnings": [
-                    "The MemoLens service is offline; only status and lexical search are available."
+                    "The MemoLens service is offline; confirmed Creator Memory, Media Inbox, and deterministic media reads remain available through SQLite when indexed."
                 ],
                 "safety": _safety_summary(),
             }
@@ -339,7 +335,6 @@ class MemoLensGateway:
         except MemoLensError as database_error:
             database = {
                 "available": False,
-                "path": effective.get("db_path"),
                 "error": str(database_error),
                 "error_code": database_error.code,
             }
@@ -355,7 +350,6 @@ class MemoLensGateway:
                 available=True,
                 identity_verified=True,
             ),
-            "library_dir": effective.get("image_library_dir"),
             "database": database,
             "profiles": {
                 "vision": effective.get("vision_profile_name"),
@@ -506,7 +500,7 @@ class MemoLensGateway:
         branches: list[tuple[str, dict[str, Any]]] = []
         branch_errors: list[dict[str, str]] = []
         for kind, searcher in (
-            ("image", self.search),
+            ("image", self._sqlite_mixed_image_search),
             ("video_segment", self.video_search),
         ):
             try:
@@ -585,6 +579,32 @@ class MemoLensGateway:
         if not normalized_id or len(normalized_id) > 200:
             raise MemoLensError("asset_id is invalid.", code="invalid_argument")
         return self._sqlite_media_get(normalized_id)
+
+    def creator_context(self) -> dict[str, Any]:
+        """Read only the latest confirmed creator profile revision."""
+
+        return self._store.creator_context()
+
+    def inbox_list(
+        self,
+        *,
+        state: str = "inbox",
+        kinds: list[str] | None = None,
+        limit: int = 24,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_state = str(state or "inbox").strip().casefold()
+        if normalized_state not in {"inbox", "kept", "archived", "all"}:
+            raise MemoLensError(
+                "state must be inbox, kept, archived, or all.",
+                code="invalid_argument",
+            )
+        return self._store.inbox_list(
+            state=normalized_state,
+            kinds=_media_kinds(kinds),
+            limit=_bounded_int(limit, minimum=1, maximum=100, field="limit"),
+            cursor=_decode_cursor(cursor),
+        )
 
     def timeline_draft(
         self,
@@ -696,6 +716,11 @@ class MemoLensGateway:
 
     def _sqlite_search(self, query: str, limit: int) -> dict[str, Any]:
         return self._store.search(query, limit)
+
+    def _sqlite_mixed_image_search(
+        self, query: str, *, limit: int
+    ) -> dict[str, Any]:
+        return self._store.mixed_image_search(query, limit)
 
     def _sqlite_media_list(
         self, *, kinds: list[str], limit: int, cursor: str | None
