@@ -101,9 +101,11 @@ class MediaIndexReader:
             )
         return asset_columns, source_columns, segment_columns
 
-    @staticmethod
     def _media_select_parts(
-        asset_columns: set[str], source_columns: set[str]
+        self,
+        connection: sqlite3.Connection,
+        asset_columns: set[str],
+        source_columns: set[str],
     ) -> list[str]:
         desired = [
             "id",
@@ -145,7 +147,49 @@ class MediaIndexReader:
                 f'src."{availability_column}" AS "source_availability"',
             ]
         )
+        review_parts, _review_join, _archived_filter = self._review_projection(
+            connection
+        )
+        parts.extend(review_parts)
         return parts
+
+    def _review_projection(
+        self, connection: sqlite3.Connection
+    ) -> tuple[list[str], str, str]:
+        review_columns = self.database.columns(
+            connection, "asset_review_revisions"
+        )
+        if not {
+            "asset_id",
+            "revision",
+            "inbox_state",
+            "favorite",
+            "project_ready",
+        }.issubset(review_columns):
+            return (
+                [
+                    "0 AS review_revision",
+                    "'inbox' AS inbox_state",
+                    "0 AS favorite",
+                    "0 AS project_ready",
+                ],
+                "",
+                "",
+            )
+        return (
+            [
+                "COALESCE(rv.revision,0) AS review_revision",
+                "COALESCE(rv.inbox_state,'inbox') AS inbox_state",
+                "COALESCE(rv.favorite,0) AS favorite",
+                "COALESCE(rv.project_ready,0) AS project_ready",
+            ],
+            (
+                " LEFT JOIN asset_review_revisions rv ON rv.asset_id=a.id "
+                "AND rv.revision=(SELECT MAX(rv2.revision) "
+                "FROM asset_review_revisions rv2 WHERE rv2.asset_id=a.id)"
+            ),
+            "COALESCE(rv.inbox_state,'inbox')<>'archived'",
+        )
 
     @staticmethod
     def _source_join(
@@ -213,6 +257,7 @@ class MediaIndexReader:
         segment_columns: set[str],
         *,
         asset_id_filter: bool = False,
+        exclude_archived: bool = True,
     ) -> tuple[str, str]:
         mode = self._video_schema_mode(connection, asset_columns, segment_columns)
         if mode is None:
@@ -232,12 +277,19 @@ class MediaIndexReader:
             analysis_heads=mode.startswith("analysis_heads"),
         )
         from_sql = self._video_from_sql(mode, source_columns)
+        review_parts, review_join, archived_filter = self._review_projection(
+            connection
+        )
+        select_parts.extend(review_parts)
+        from_sql += review_join
         if self._active_library_roots_available(connection, source_columns):
             from_sql += (
                 " JOIN library_roots root ON root.id = src.library_root_id "
                 "AND root.status = 'active'"
             )
         where = ["a.kind = 'video'", "src.id IS NOT NULL"]
+        if exclude_archived and archived_filter:
+            where.append(archived_filter)
         if mode == "explicit_revision_head_compat":
             where.append("s.analysis_revision = a.current_analysis_revision")
         if asset_id_filter:
@@ -352,6 +404,11 @@ class MediaIndexReader:
             asset_columns, source_columns, _ = self._require_schema(connection)
             placeholders = ", ".join("?" for _kind in kinds)
             where = [f"a.kind IN ({placeholders})"]
+            _review_parts, review_join, archived_filter = self._review_projection(
+                connection
+            )
+            if archived_filter:
+                where.append(archived_filter)
             params: list[Any] = list(kinds)
             if cursor is not None:
                 where.append("a.id > ?")
@@ -359,8 +416,9 @@ class MediaIndexReader:
             params.append(limit + 1)
             try:
                 rows = connection.execute(
-                    f"SELECT {', '.join(self._media_select_parts(asset_columns, source_columns))} "
-                    f"FROM assets a {self._source_join(source_columns)} "
+                    f"SELECT {', '.join(self._media_select_parts(connection, asset_columns, source_columns))} "
+                    f"FROM assets a {self._source_join(source_columns)}"
+                    f"{review_join} "
                     f"WHERE {' AND '.join(where)} ORDER BY a.id ASC LIMIT ?",
                     params,
                 ).fetchall()
@@ -396,8 +454,9 @@ class MediaIndexReader:
             )
             try:
                 row = connection.execute(
-                    f"SELECT {', '.join(self._media_select_parts(asset_columns, source_columns))} "
-                    f"FROM assets a {self._source_join(source_columns)} WHERE a.id = ?",
+                    f"SELECT {', '.join(self._media_select_parts(connection, asset_columns, source_columns))} "
+                    f"FROM assets a {self._source_join(source_columns)}"
+                    f"{self._review_projection(connection)[1]} WHERE a.id = ?",
                     (asset_id,),
                 ).fetchone()
                 if row is None:
@@ -449,6 +508,7 @@ class MediaIndexReader:
                 source_columns,
                 segment_columns,
                 asset_id_filter=True,
+                exclude_archived=False,
             )
         except MemoLensError as exc:
             if exc.code != "video_index_unavailable":
@@ -588,6 +648,12 @@ class MediaIndexReader:
             "confidence": raw.get("confidence"),
             "analysis_run_id": raw.get("analysis_run_id"),
             "analysis_revision": raw.get("analysis_revision"),
+            "review": {
+                "revision": int(raw.get("review_revision") or 0),
+                "inbox_state": raw.get("inbox_state") or "inbox",
+                "favorite": bool(raw.get("favorite")),
+                "project_ready": bool(raw.get("project_ready")),
+            },
             "semantic": parse_json_object(raw.get("semantic_json")) or None,
             "provenance": [
                 source

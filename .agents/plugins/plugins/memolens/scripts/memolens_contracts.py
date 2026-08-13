@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 
-PLUGIN_VERSION = "0.4.0"
+PLUGIN_VERSION = "0.5.0"
 
 
 class MemoLensError(RuntimeError):
@@ -71,10 +71,34 @@ def compact_asset(raw: Any, library_dir: Path | None) -> dict[str, Any]:
             "quality_score",
             "technical_quality_score",
             "matched_terms",
+            "asset_id",
+            "asset_source_id",
+            "asset_sha256",
+            "source_availability",
+            "review_revision",
+            "inbox_state",
+            "favorite",
+            "project_ready",
         )
         if raw.get(key) is not None
     }
     asset["tags"] = parse_tags(raw.get("tags", raw.get("tags_json")))
+    if asset.get("asset_id") and asset.get("asset_source_id") and asset.get(
+        "asset_sha256"
+    ):
+        asset["provenance"] = {
+            "asset_id": asset["asset_id"],
+            "asset_source_id": asset["asset_source_id"],
+            "asset_sha256": asset["asset_sha256"],
+            "source_availability": asset.get("source_availability"),
+        }
+    if asset.get("review_revision") is not None:
+        asset["review"] = {
+            "revision": int(asset.pop("review_revision")),
+            "inbox_state": asset.pop("inbox_state", "inbox"),
+            "favorite": bool(asset.pop("favorite", False)),
+            "project_ready": bool(asset.pop("project_ready", False)),
+        }
     asset.update(safe_absolute_path(raw.get("relative_path"), library_dir))
     return asset
 
@@ -115,12 +139,22 @@ def compact_media_asset(raw: Any) -> dict[str, Any]:
             "analysis_run_id",
             "analysis_revision",
             "error_code",
+            "review_revision",
+            "inbox_state",
+            "favorite",
+            "project_ready",
         )
         if raw.get(key) is not None
     }
     asset["object"] = "memolens.media_asset"
     asset["schema_version"] = "1"
     asset["codec"] = parse_json_object(raw.get("codec_json"))
+    asset["review"] = {
+        "revision": int(asset.pop("review_revision", 0) or 0),
+        "inbox_state": asset.pop("inbox_state", "inbox"),
+        "favorite": bool(asset.pop("favorite", False)),
+        "project_ready": bool(asset.pop("project_ready", False)),
+    }
     return asset
 
 
@@ -246,6 +280,8 @@ def capabilities(
     media = bool(database.get("media_schema_available"))
     video = bool(database.get("video_search_available"))
     timelines = bool(database.get("timeline_read_available"))
+    creator_context = bool(database.get("creator_context_available"))
+    inbox = bool(database.get("inbox_available"))
     return {
         "status": True,
         "search": legacy_search,
@@ -259,6 +295,10 @@ def capabilities(
         "revise_timeline_draft": True,
         "validate_timeline": True,
         "read_timeline": timelines,
+        "creator_context": creator_context,
+        "list_inbox": inbox,
+        "write_inbox_review": False,
+        "write_creator_profile": False,
         "create_timeline": False,
         "save_timeline": False,
         "render_preview": False,

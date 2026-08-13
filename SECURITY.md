@@ -29,11 +29,21 @@ of the trust boundary. Browser and desktop calls use stricter origin/session
 checks. The Codex plugin keeps loopback API mode disabled unless you explicitly
 opt in; its default integration opens the SQLite index read-only.
 
-That explicit read-risk opt-in is not a write credential. It never authorizes
-Codex to save timelines, start FFmpeg, export files, or cancel jobs. Those actions
-require a separate short-lived capability issued through a visible desktop flow.
+Creator Memory and Media Inbox decisions live as immutable revisions in the
+active media database. New material has no review row and is treated as Inbox;
+Keep, Archive, Favorite, Ready, Reset, and Undo only change MemoLens metadata.
+They never move, overwrite, or delete a source file. Profile suggestions are
+read-only observations until a user confirms them in the desktop App.
 
-Video analysis in 0.3.0 is offline even when a cloud model key already exists.
+That explicit read-risk opt-in is not a write credential. It never authorizes
+Codex to edit a creator profile, apply Inbox decisions, save timelines, start
+FFmpeg, export files, or cancel jobs. In this release, App writes require the
+per-launch authenticated desktop session plus active-database binding and
+idempotency. The plugin exposes no write tool. Any future Codex-initiated write
+would require a separate short-lived, scope-limited capability issued through a
+visible desktop confirmation flow.
+
+Video analysis is offline even when a cloud model key already exists.
 No external-video opt-in or final-export grant flow is exposed in this release;
 both capabilities fail closed. Original media is never overwritten. Saving a
 completed preview requires the native desktop dialog and fails if the chosen

@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import {
+  activeCreatorPreferenceFields,
+  countCreatorPreferences,
+  deriveAppliedCreatorProfileFields,
+  mergeCreatorProfileIntoBrief,
+} from "./creator/model";
+import type { CreatorProfileContent } from "./creator/types";
+import type { CreatorProfileField } from "./creator/types";
+import {
   cancelRenderJob,
   applyTimelineInstruction,
   changeMediaJob,
@@ -82,6 +90,11 @@ interface VideoWorkbenchProps {
   canUseBackend: boolean;
   desktopRuntime: boolean;
   indexedAssetCount?: number;
+  creatorProfile?: CreatorProfileContent | null;
+  creatorProfileId?: string | null;
+  creatorProfileContentSha256?: string | null;
+  creatorProfileRevision?: number;
+  creatorPreferenceCount?: number;
 }
 
 interface PendingInstruction {
@@ -128,6 +141,11 @@ function VideoWorkbench({
   canUseBackend,
   desktopRuntime,
   indexedAssetCount = 0,
+  creatorProfile = null,
+  creatorProfileId = null,
+  creatorProfileContentSha256 = null,
+  creatorProfileRevision = 0,
+  creatorPreferenceCount = 0,
 }: VideoWorkbenchProps) {
   const scopeKey = createVideoScopeKey(imageLibraryDir, dbPath);
   const [state, dispatch] = useReducer(
@@ -150,11 +168,18 @@ function VideoWorkbench({
   const [materialsConfirmed, setMaterialsConfirmed] = useState(false);
   const [expandedStep, setExpandedStep] = useState<VideoWorkflowId>("idea");
   const [recoveredRenderJobs, setRecoveredRenderJobs] = useState<RenderJob[]>([]);
+  const [creatorMemoryEnabled, setCreatorMemoryEnabled] = useState(true);
+  const [briefEdited, setBriefEdited] = useState(false);
+  const [editedProfileFields, setEditedProfileFields] = useState<Set<CreatorProfileField>>(new Set());
+  const [prefilledProfileFields, setPrefilledProfileFields] = useState<Set<CreatorProfileField>>(new Set());
+  const [prefilledProfileRevision, setPrefilledProfileRevision] = useState(0);
   const scopeRef = useRef(scopeKey);
   const requestControllersRef = useRef(new Set<AbortController>());
   const mutationLedger = useMemo(() => new VideoMutationLedger(window.localStorage), []);
 
   const canWrite = desktopRuntime && canUseBackend;
+  const appliedCreatorProfile = creatorMemoryEnabled ? creatorProfile : null;
+  const appliedCreatorPreferenceCount = countCreatorPreferences(appliedCreatorProfile);
   const hasLibrary = Boolean(imageLibraryDir?.trim() && dbPath?.trim());
   const selectedMatch = state.searchResults.find((match) => match.id === state.selectedMatchId) ?? null;
   const timelineClips = useMemo(
@@ -345,7 +370,58 @@ function VideoWorkbench({
     setMaterialsConfirmed(false);
     setExpandedStep("idea");
     setRecoveredRenderJobs([]);
+    setBriefEdited(false);
+    setEditedProfileFields(new Set());
+    setPrefilledProfileFields(new Set());
+    setPrefilledProfileRevision(0);
+    setCreatorMemoryEnabled(true);
   }, [scopeKey]);
+
+  useEffect(() => {
+    if (state.project || !creatorMemoryEnabled) return;
+    const nextBrief = mergeCreatorProfileIntoBrief(
+      brief,
+      creatorProfile,
+      editedProfileFields,
+      INITIAL_BRIEF,
+    );
+    setBrief(nextBrief);
+    setMustIncludeText(nextBrief.must_include.join(", "));
+    setMustExcludeText(nextBrief.must_exclude.join(", "));
+    setPrefilledProfileFields(new Set(activeCreatorPreferenceFields(creatorProfile)));
+    setPrefilledProfileRevision(creatorProfile ? creatorProfileRevision : 0);
+  }, [creatorMemoryEnabled, creatorProfile, creatorProfileRevision, state.project]);
+
+  function updateBrief(
+    patch: Partial<CreativeBriefInput>,
+    profileField?: CreatorProfileField,
+  ): void {
+    setBriefEdited(true);
+    if (profileField) {
+      setEditedProfileFields((current) => new Set(current).add(profileField));
+    }
+    setBrief((current) => ({ ...current, ...patch }));
+  }
+
+  function appliedProfileFieldsForBrief(normalizedBrief: CreativeBriefInput): CreatorProfileField[] {
+    if (
+      !creatorMemoryEnabled
+      || !creatorProfile
+      || creatorProfileRevision < 1
+      || !creatorProfileId
+      || !creatorProfileContentSha256
+      || prefilledProfileRevision !== creatorProfileRevision
+    ) {
+      return [];
+    }
+    return deriveAppliedCreatorProfileFields(
+      normalizedBrief,
+      creatorProfile,
+      [...editedProfileFields, ...activeCreatorPreferenceFields(creatorProfile).filter(
+        (field) => !prefilledProfileFields.has(field),
+      )],
+    );
+  }
 
   useEffect(() => {
     setExpandedStep(workflow.currentId);
@@ -672,6 +748,14 @@ function VideoWorkbench({
       must_exclude: splitTerms(mustExcludeText),
       candidate_refs: [...selectedRefs],
     };
+    const appliedProfileFields = appliedProfileFieldsForBrief(normalizedBrief);
+    const creatorProfileRef = appliedProfileFields.length > 0
+      ? {
+          profile_id: creatorProfileId!,
+          revision: creatorProfileRevision,
+          content_sha256: creatorProfileContentSha256!,
+        }
+      : null;
     const mutationPayload: MutationJson = {
       goal: normalizedBrief.goal,
       audience: normalizedBrief.audience,
@@ -687,6 +771,10 @@ function VideoWorkbench({
         ? {}
         : { narrative_arc: normalizedBrief.narrative_arc }),
       db_path: dbPath,
+      ...(creatorProfileRef ? {
+        creator_profile_ref: creatorProfileRef,
+        applied_profile_fields: appliedProfileFields,
+      } : {}),
     };
     setIsWriting(true);
     dispatch({ type: "project_loading" });
@@ -702,6 +790,8 @@ function VideoWorkbench({
         dbPath,
         brief: normalizedBrief,
         selectedRefs,
+        creatorProfileRef,
+        appliedProfileFields,
         signal: controller.signal,
         idempotencyKey: lease.idempotencyKey,
       });
@@ -1157,6 +1247,47 @@ function VideoWorkbench({
         </div>
       </div>
 
+      {creatorPreferenceCount > 0 ? (
+        <div className="video-creator-context" role="note">
+          <div>
+            <p className="eyebrow">Creator Memory · revision {creatorProfileRevision}</p>
+            <strong>Using {appliedCreatorPreferenceCount} creator preferences</strong>
+            <span>
+              {briefEdited
+                ? "Your field edits take priority; unchanged preferences stay linked."
+                : "Confirmed defaults prefilled this unsaved brief."}
+            </span>
+          </div>
+          <label>
+            <input
+              type="checkbox"
+              checked={creatorMemoryEnabled}
+              onChange={(event) => {
+                const enabled = event.target.checked;
+                setCreatorMemoryEnabled(enabled);
+                const nextBrief = mergeCreatorProfileIntoBrief(
+                  brief,
+                  enabled ? creatorProfile : null,
+                  editedProfileFields,
+                  INITIAL_BRIEF,
+                );
+                setBrief(nextBrief);
+                setMustIncludeText(nextBrief.must_include.join(", "));
+                setMustExcludeText(nextBrief.must_exclude.join(", "));
+                if (enabled && creatorProfile) {
+                  setPrefilledProfileFields(new Set(activeCreatorPreferenceFields(creatorProfile)));
+                  setPrefilledProfileRevision(creatorProfileRevision);
+                } else {
+                  setPrefilledProfileFields(new Set());
+                  setPrefilledProfileRevision(0);
+                }
+              }}
+            />
+            <span>Use for this video</span>
+          </label>
+        </div>
+      ) : null}
+
       <ol className="video-stepper" aria-label="Video creation progress">
         {workflow.steps.map((step) => (
           <li key={step.id} className={`video-step-${step.status}`}>
@@ -1202,7 +1333,7 @@ function VideoWorkbench({
                 <span>What should this video become?</span>
                 <textarea
                   value={brief.goal}
-                  onChange={(event) => setBrief({ ...brief, goal: event.target.value })}
+                  onChange={(event) => updateBrief({ goal: event.target.value })}
                   placeholder="A concise memory film with a calm opening and a stronger finish"
                   required
                 />
@@ -1211,7 +1342,7 @@ function VideoWorkbench({
                 <span>Story direction</span>
                 <input
                   value={brief.narrative_arc}
-                  onChange={(event) => setBrief({ ...brief, narrative_arc: event.target.value })}
+                  onChange={(event) => updateBrief({ narrative_arc: event.target.value }, "narrative_arc")}
                   placeholder="Establish the place, reveal the human moment, finish with motion"
                 />
               </label>
@@ -1560,33 +1691,36 @@ function VideoWorkbench({
           >
             <label className="video-field video-field-wide">
               <span>Goal</span>
-              <textarea value={brief.goal} onChange={(event) => setBrief({ ...brief, goal: event.target.value })} required />
+              <textarea value={brief.goal} onChange={(event) => updateBrief({ goal: event.target.value })} required />
             </label>
             <label className="video-field">
               <span>Audience</span>
-              <input value={brief.audience} onChange={(event) => setBrief({ ...brief, audience: event.target.value })} />
+              <input value={brief.audience} onChange={(event) => updateBrief({ audience: event.target.value }, "audience")} />
             </label>
             <label className="video-field">
               <span>Platform</span>
-              <select value={brief.platform} onChange={(event) => setBrief({ ...brief, platform: event.target.value })}>
-                <option>Social video</option>
-                <option>Personal archive</option>
-                <option>Presentation</option>
-                <option>Landscape film</option>
-              </select>
+              <input
+                value={brief.platform}
+                onChange={(event) => updateBrief({ platform: event.target.value }, "platform")}
+                placeholder="Xiaohongshu, Douyin, YouTube"
+              />
             </label>
             <label className="video-field">
               <span>Target duration</span>
-              <select value={brief.duration_ms} onChange={(event) => setBrief({ ...brief, duration_ms: Number(event.target.value) })}>
-                <option value={10_000}>10 seconds</option>
-                <option value={15_000}>15 seconds</option>
-                <option value={30_000}>30 seconds</option>
-                <option value={60_000}>60 seconds</option>
-              </select>
+              <input
+                type="number"
+                min={1}
+                max={3600}
+                value={Math.max(1, Math.round(brief.duration_ms / 1000))}
+                onChange={(event) => updateBrief(
+                  { duration_ms: Math.max(1000, Number(event.target.value) * 1000) },
+                  "duration_ms",
+                )}
+              />
             </label>
             <label className="video-field">
               <span>Aspect ratio</span>
-              <select value={brief.aspect_ratio} onChange={(event) => setBrief({ ...brief, aspect_ratio: event.target.value })}>
+              <select value={brief.aspect_ratio} onChange={(event) => updateBrief({ aspect_ratio: event.target.value }, "aspect_ratio")}>
                 <option value="9:16">9:16 vertical</option>
                 <option value="16:9">16:9 landscape</option>
                 <option value="1:1">1:1 square</option>
@@ -1594,23 +1728,23 @@ function VideoWorkbench({
             </label>
             <label className="video-field">
               <span>Tone</span>
-              <input value={brief.tone} onChange={(event) => setBrief({ ...brief, tone: event.target.value })} />
+              <input value={brief.tone} onChange={(event) => updateBrief({ tone: event.target.value }, "tone")} />
             </label>
             <label className="video-field">
               <span>Pace</span>
-              <input value={brief.pace} onChange={(event) => setBrief({ ...brief, pace: event.target.value })} />
+              <input value={brief.pace} onChange={(event) => updateBrief({ pace: event.target.value }, "pace")} />
             </label>
             <label className="video-field">
               <span>Must include</span>
-              <input value={mustIncludeText} onChange={(event) => setMustIncludeText(event.target.value)} placeholder="people, beach, blue title" />
+              <input value={mustIncludeText} onChange={(event) => { setBriefEdited(true); setEditedProfileFields((current) => new Set(current).add("must_include")); setMustIncludeText(event.target.value); }} placeholder="people, beach, blue title" />
             </label>
             <label className="video-field">
               <span>Must exclude</span>
-              <input value={mustExcludeText} onChange={(event) => setMustExcludeText(event.target.value)} placeholder="black frames, faces" />
+              <input value={mustExcludeText} onChange={(event) => { setBriefEdited(true); setEditedProfileFields((current) => new Set(current).add("must_exclude")); setMustExcludeText(event.target.value); }} placeholder="black frames, faces" />
             </label>
             <label className="video-field video-field-wide">
               <span>Narrative arc</span>
-              <input value={brief.narrative_arc} onChange={(event) => setBrief({ ...brief, narrative_arc: event.target.value })} />
+              <input value={brief.narrative_arc} onChange={(event) => updateBrief({ narrative_arc: event.target.value }, "narrative_arc")} />
             </label>
             <div className="video-form-actions video-field-wide">
               <button type="submit" className="primary-button" disabled={!canWrite || isWriting || !brief.goal.trim()}>

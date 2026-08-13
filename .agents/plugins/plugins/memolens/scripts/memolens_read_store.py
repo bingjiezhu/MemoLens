@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from memolens_contracts import MemoLensError
+from memolens_creator_store import CreatorMemoryReader
 from memolens_media_store import MediaIndexReader
 from memolens_photo_store import PhotoIndexReader
 from memolens_sqlite import ReadOnlyDatabase
@@ -22,6 +23,7 @@ class ReadOnlyMemoLensStore:
         self.photos = PhotoIndexReader(self.database, library_dir)
         self.media = MediaIndexReader(self.database)
         self.timelines = TimelineIndexReader(self.database)
+        self.creator = CreatorMemoryReader(self.database)
 
     @property
     def db_path(self) -> Path | None:
@@ -55,6 +57,12 @@ class ReadOnlyMemoLensStore:
                     source_columns=source_columns,
                     segment_columns=segment_columns,
                 )
+                creator_capabilities = self.creator.schema_capabilities(connection)
+                creator_capabilities["inbox_available"] = bool(
+                    creator_capabilities["inbox_available"]
+                    and self.media.schema_available(asset_columns, source_columns)
+                )
+                counts.update(creator_capabilities)
             except sqlite3.Error as exc:
                 raise MemoLensError(
                     "The MemoLens SQLite index could not be queried.",
@@ -62,7 +70,6 @@ class ReadOnlyMemoLensStore:
                 ) from exc
         return {
             "available": True,
-            "path": str(self.database.path),
             "open_mode": "read_only",
             **counts,
             "legacy_search_available": bool(image_columns),
@@ -111,6 +118,14 @@ class ReadOnlyMemoLensStore:
     def search(self, query: str, limit: int) -> dict[str, Any]:
         return self.photos.search(query, limit)
 
+    def mixed_image_search(self, query: str, limit: int) -> dict[str, Any]:
+        return self.photos.search(
+            query,
+            limit,
+            require_media_provenance=True,
+            include_paths=False,
+        )
+
     def media_list(
         self, *, kinds: list[str], limit: int, cursor: str | None
     ) -> dict[str, Any]:
@@ -121,6 +136,24 @@ class ReadOnlyMemoLensStore:
 
     def video_search(self, query: str, limit: int) -> dict[str, Any]:
         return self.media.video_search(query, limit)
+
+    def creator_context(self) -> dict[str, Any]:
+        return self.creator.creator_context()
+
+    def inbox_list(
+        self,
+        *,
+        state: str,
+        kinds: list[str],
+        limit: int,
+        cursor: str | None,
+    ) -> dict[str, Any]:
+        return self.creator.inbox_list(
+            state=state,
+            kinds=kinds,
+            limit=limit,
+            cursor=cursor,
+        )
 
     def timeline_list(
         self, *, project_id: str | None, limit: int, cursor: str | None

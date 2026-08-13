@@ -7,16 +7,19 @@ import os
 import re
 import sqlite3
 import stat
+import tempfile
 import uuid
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 
-from flask import Blueprint, Response, abort, current_app, jsonify, request, send_file
+from flask import Blueprint, Response, abort, current_app, g, jsonify, request, send_file
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from core.app_settings import load_persisted_app_settings, save_persisted_app_settings
+from core.config import Settings, _load_yaml, _resolve_vlm_profile
 from core.db import ImageIndexRepository
-from core.media_db import IdempotencyConflictError, canonical_json
+from core.media_db import IdempotencyConflictError, IdempotencyInProgressError, canonical_json
 from core.local_model_runtime import detect_local_model_runtime
 from core.photo_atlas import (
     AtlasFilters,
@@ -31,12 +34,20 @@ from core.schemas import RetrievedImageSummary, parse_indexing_request, parse_re
 from backend.src import (
     MEMOLENS_API_VERSION,
     MEMOLENS_SERVICE_ID,
-    reload_runtime,
+    build_runtime_extensions,
+    shutdown_runtime_extensions,
+    swap_runtime,
 )
+from backend.src.runtime import RuntimeLease, RuntimeManager
 from indexing.files import ensure_heif_support
 from backend.src.media.importing import MediaImportService
 from backend.src.media.render import ffmpeg_encode_capability
 from backend.src.media.director import CreativeBriefError
+from backend.src.media.creator_memory import ProfileRevisionConflictError
+from backend.src.media.inbox import (
+    InboxAssetNotFoundError,
+    ReviewRevisionConflictError,
+)
 from backend.src.media.timeline import TimelineValidationError
 from backend.src.media.video import (
     IMAGE_EXTENSIONS,
@@ -113,7 +124,29 @@ def _require_media_read_access():
 
 
 def _media_repository():
-    return current_app.extensions["media_repository"]
+    return _runtime_extension("media_repository")
+
+
+def _runtime_extension(name: str):
+    lease = getattr(g, "memolens_runtime_lease", None)
+    if isinstance(lease, RuntimeLease):
+        return lease.bundle.extension(name)
+    # Small unit-test apps may register this blueprint without create_app.
+    return current_app.extensions[name]
+
+
+def _runtime_extension_optional(name: str):
+    lease = getattr(g, "memolens_runtime_lease", None)
+    if isinstance(lease, RuntimeLease):
+        return lease.bundle.extensions.get(name)
+    return current_app.extensions.get(name)
+
+
+def _runtime_settings():
+    lease = getattr(g, "memolens_runtime_lease", None)
+    if isinstance(lease, RuntimeLease):
+        return lease.bundle.settings
+    return current_app.config["SETTINGS"]
 
 
 MEDIA_ROUTE_PREFIXES = (
@@ -126,18 +159,74 @@ MEDIA_ROUTE_PREFIXES = (
     "/v1/creative/",
     "/v1/timelines/",
     "/v1/renders",
+    "/v1/inbox",
+    "/v1/creator/",
 )
+
+MEDIA_MUTATION_ENDPOINTS = frozenset(
+    {
+        "cancel_media_index_job",
+        "cancel_timeline_render",
+        "create_creative_brief",
+        "create_project_timeline",
+        "import_media_assets",
+        "resume_media_index_job",
+        "revise_timeline",
+        "start_timeline_render",
+        "update_creator_profile",
+        "update_media_inbox_asset",
+    }
+)
+MEDIA_PRIVILEGED_ENDPOINTS = MEDIA_MUTATION_ENDPOINTS | frozenset(
+    {
+        "download_timeline_render",
+        "stream_media_asset",
+        "validate_timeline",
+    }
+)
+
+
+@api_blueprint.before_request
+def _pin_runtime_bundle():
+    manager = current_app.extensions.get("runtime_manager")
+    if isinstance(manager, RuntimeManager):
+        g.memolens_runtime_lease = manager.acquire()
+    return None
+
+
+@api_blueprint.teardown_request
+def _release_runtime_bundle(_error: BaseException | None):
+    lease = g.pop("memolens_runtime_lease", None)
+    if isinstance(lease, RuntimeLease):
+        lease.release()
 
 
 @api_blueprint.before_request
 def _verify_media_database_binding():
     if not request.path.startswith(MEDIA_ROUTE_PREFIXES):
         return None
+    # A browser preflight carries neither the JSON body nor query parameters
+    # of the eventual write. The app-level security boundary has already
+    # validated its Origin; token and database binding belong to the real
+    # request, not to OPTIONS.
+    if request.method == "OPTIONS":
+        return None
+    endpoint = (request.endpoint or "").rsplit(".", 1)[-1]
+    if endpoint in MEDIA_PRIVILEGED_ENDPOINTS:
+        denied = _require_media_desktop_token()
+        if denied:
+            return denied
     raw_path = request.args.get("db_path")
     if raw_path is None and request.is_json:
         payload = request.get_json(silent=True)
         if isinstance(payload, dict):
             raw_path = payload.get("db_path")
+    if raw_path is None and endpoint in MEDIA_MUTATION_ENDPOINTS:
+        return _media_error(
+            "database_binding_required",
+            "Media writes require the active MemoLens database path.",
+            409,
+        )
     if raw_path is None:
         return None
     if not isinstance(raw_path, str) or not raw_path.strip():
@@ -162,62 +251,26 @@ def _json_object() -> dict[str, object]:
     return payload
 
 
-def _idempotency_begin(scope: str, payload: dict[str, object]):
+def _atomic_idempotency_context(scope: str, payload: dict[str, object]) -> tuple[str, str, str]:
+    """Validate a key without opening the legacy claim/write/finish transaction gap."""
     key = request.headers.get("Idempotency-Key", "").strip()
     if not key or len(key) > 200:
         raise ValueError("A valid `Idempotency-Key` header is required.")
     request_hash = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
-    existing = _media_repository().claim_idempotency(
-        scope=f"desktop:{scope}",
-        key=key,
-        request_sha256=request_hash,
-        resource_type=scope,
-        resource_id=None,
-    )
-    if existing and existing.get("state") in {"completed", "failed"}:
-        return key, existing
-    if existing and existing.get("state") == "in_progress":
-        return key, existing
-    return key, None
+    return f"desktop:{scope}", key, request_hash
 
 
-def _idempotency_finish(scope: str, key: str, body: dict[str, object], status: int) -> None:
-    _media_repository().complete_idempotency(
-        scope=f"desktop:{scope}",
-        key=key,
-        response_status=status,
-        response=body,
-        failed=status >= 400,
-    )
-
-
-def _idempotency_failure(
-    scope: str | None,
-    key: str | None,
-    code: str,
-    message: str,
-    status: int,
-    *,
-    details: object | None = None,
-):
-    body = _media_error_payload(code, message, status, details=details)
-    if scope and key:
-        _idempotency_finish(scope, key, body, status)
-    return jsonify(body), status
-
-
-def _replay_idempotency(existing: dict[str, object]):
-    response = existing.get("response")
-    if isinstance(response, dict):
-        return jsonify(response), int(existing.get("response_status") or 200)
-    body = _media_error_payload(
-        "request_in_progress",
-        "An identical request is still in progress.",
-        409,
-        details={"retry_after_seconds": 1},
-    )
-    body["error"]["retryable"] = True
-    return jsonify(body), 409
+def _idempotency_exception(exc: IdempotencyConflictError):
+    if isinstance(exc, IdempotencyInProgressError):
+        body = _media_error_payload(
+            "request_in_progress",
+            str(exc),
+            409,
+            details={"retry_after_seconds": 1},
+        )
+        body["error"]["retryable"] = True
+        return jsonify(body), 409
+    return _media_error("idempotency_conflict", str(exc), 409)
 
 
 def _public_job(job: dict[str, object], *, render: bool = False) -> dict[str, object]:
@@ -342,6 +395,106 @@ def _validate_db_path_for_settings(path: Path) -> None:
         raise ValueError("`db_path` must point to a SQLite file, not a directory.")
 
 
+def _candidate_settings_for_update(
+    settings: Settings,
+    payload: dict[str, object],
+) -> Settings:
+    """Resolve a complete candidate without changing process or persisted state."""
+
+    candidate = replace(
+        settings,
+        image_library_dir=Path(payload.get("image_library_dir", settings.image_library_dir)).resolve(),
+        db_path=Path(payload.get("db_path", settings.db_path)).resolve(),
+        process_image_width=int(payload.get("process_image_width", settings.process_image_width)),
+    )
+    if not ({"vision_profile_name", "query_profile_name"} & payload.keys()):
+        return candidate
+
+    config = _load_yaml(settings.config_path)
+    vlm_config = config.get("vlm") if isinstance(config.get("vlm"), dict) else {}
+    raw_profiles = vlm_config.get("profiles") if isinstance(vlm_config.get("profiles"), dict) else {}
+    if "vision_profile_name" in payload:
+        vision = _resolve_vlm_profile(
+            raw_profiles=raw_profiles,
+            profile_name=str(payload["vision_profile_name"]),
+            role="vision",
+            model_override_env="VISION_MODEL",
+            legacy_model_override_env="VLM_MODEL",
+            base_url_override_env="VISION_BASE_URL",
+            legacy_base_url_override_env="OPENAI_BASE_URL",
+        )
+        candidate = replace(
+            candidate,
+            vision_base_url=vision.base_url,
+            vision_api_key=vision.api_key,
+            vision_model=vision.model,
+            vision_provider=vision.provider,
+            vision_profile_name=vision.name,
+            vision_temperature=vision.temperature,
+            vision_max_tokens=vision.max_tokens,
+            vision_response_format=vision.response_format,
+        )
+    if "query_profile_name" in payload:
+        query = _resolve_vlm_profile(
+            raw_profiles=raw_profiles,
+            profile_name=str(payload["query_profile_name"]),
+            role="query",
+            model_override_env="QUERY_MODEL",
+            legacy_model_override_env=None,
+            base_url_override_env="QUERY_BASE_URL",
+            legacy_base_url_override_env=None,
+        )
+        candidate = replace(
+            candidate,
+            query_base_url=query.base_url,
+            query_api_key=query.api_key,
+            query_model=query.model,
+            query_provider=query.provider,
+            query_profile_name=query.name,
+            query_temperature=query.temperature,
+            query_max_tokens=query.max_tokens,
+            query_response_format=query.response_format,
+        )
+    return candidate
+
+
+def _settings_file_snapshot(path: Path) -> tuple[bool, bytes]:
+    try:
+        return True, path.read_bytes()
+    except FileNotFoundError:
+        return False, b""
+
+
+def _save_settings_atomically(
+    settings: Settings,
+    payload: dict[str, object],
+):
+    merged = load_persisted_app_settings(settings.app_state_dir).to_dict()
+    merged.update(payload)
+    settings.app_state_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".memolens-settings-commit-",
+        dir=settings.app_state_dir,
+    ) as temporary:
+        temporary_state_dir = Path(temporary)
+        persisted = save_persisted_app_settings(temporary_state_dir, merged)
+        source_path = temporary_state_dir / settings.persisted_settings_path.name
+        settings.persisted_settings_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source_path, settings.persisted_settings_path)
+    return persisted
+
+
+def _restore_settings_file(path: Path, snapshot: tuple[bool, bytes]) -> None:
+    existed, content = snapshot
+    if not existed:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rollback_path = path.with_name(f".{path.name}.rollback-{uuid.uuid4().hex}")
+    rollback_path.write_bytes(content)
+    os.replace(rollback_path, path)
+
+
 def _resolve_existing_db_path(raw_value: str) -> Path:
     path = Path(raw_value).expanduser().resolve()
     if not path.exists():
@@ -384,7 +537,7 @@ def _open_library_file(relative_path: str, *, root_path_override: str | None):
     if Path(relative_path).suffix.lower() not in SUPPORTED_LIBRARY_FILE_EXTENSIONS:
         abort(404)
 
-    settings = current_app.config["SETTINGS"]
+    settings = _runtime_settings()
     library_root = settings.image_library_dir.resolve(strict=True)
     if root_path_override is not None:
         if not isinstance(root_path_override, str) or not root_path_override.strip():
@@ -468,7 +621,7 @@ def _parse_copywriter_images(payload: object) -> list[RetrievedImageSummary]:
 
 def _atlas_service_for_db_path(raw_db_path: object) -> PhotoAtlasService:
     if raw_db_path is None:
-        return current_app.extensions["photo_atlas_service"]
+        return _runtime_extension("photo_atlas_service")
     if not isinstance(raw_db_path, str) or not raw_db_path.strip():
         raise ValueError("`db_path` must be a non-empty string when set.")
     repository = ImageIndexRepository(_resolve_existing_db_path(raw_db_path))
@@ -533,7 +686,7 @@ def healthz():
 def get_index_status():
     raw_db_path = request.args.get("db_path")
     if raw_db_path is None:
-        repository = current_app.extensions["image_index_repository"]
+        repository = _runtime_extension("image_index_repository")
         resolved_db_path = repository.db_path.resolve()
     else:
         if not raw_db_path.strip():
@@ -560,7 +713,7 @@ def get_index_status():
 
 @api_blueprint.route("/v1/settings", methods=["GET"])
 def get_settings():
-    settings = current_app.config["SETTINGS"]
+    settings = _runtime_settings()
     persisted = load_persisted_app_settings(settings.app_state_dir)
     local_model_runtime = detect_local_model_runtime(settings.vlm_profile_catalog)
     return jsonify(
@@ -580,7 +733,7 @@ def get_settings():
             "available_vlm_profiles": list(settings.available_vlm_profiles),
             "vlm_profile_catalog": [entry.to_dict() for entry in settings.vlm_profile_catalog],
             "local_model_runtime": local_model_runtime.to_dict(),
-            "index_stats": current_app.extensions["image_index_repository"].summarize_index_health(),
+            "index_stats": _runtime_extension("image_index_repository").summarize_index_health(),
         }
     )
 
@@ -590,7 +743,7 @@ def update_settings():
     if not _request_is_local():
         return _local_only_error()
 
-    media_repository = current_app.extensions.get("media_repository")
+    media_repository = _runtime_extension_optional("media_repository")
     if media_repository is not None and media_repository.active_job_count() > 0:
         return _media_error(
             "media_jobs_active",
@@ -598,7 +751,7 @@ def update_settings():
             409,
         )
 
-    settings = current_app.config["SETTINGS"]
+    settings = _runtime_settings()
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
         return (
@@ -632,7 +785,11 @@ def update_settings():
 
     process_image_width = payload.get("process_image_width")
     if process_image_width is not None:
-        if not isinstance(process_image_width, int) or process_image_width <= 0:
+        if (
+            isinstance(process_image_width, bool)
+            or not isinstance(process_image_width, int)
+            or process_image_width <= 0
+        ):
             return _error_response("`process_image_width` must be a positive integer when set.")
         normalized_payload["process_image_width"] = process_image_width
 
@@ -646,29 +803,83 @@ def update_settings():
             return _error_response(f"`{profile_key}` must be one of: " + ", ".join(settings.available_vlm_profiles))
         normalized_payload[profile_key] = value.strip()
 
+    candidate_extensions: dict[str, object] | None = None
     try:
-        persisted = save_persisted_app_settings(settings.app_state_dir, normalized_payload)
-        reloaded = reload_runtime(current_app)
-    except ValueError as exc:
+        candidate_settings = _candidate_settings_for_update(settings, normalized_payload)
+        _validate_existing_image_library(
+            candidate_settings.image_library_dir,
+            field_name="image_library_dir",
+        )
+        candidate_extensions = build_runtime_extensions(candidate_settings)
+        local_model_runtime = detect_local_model_runtime(candidate_settings.vlm_profile_catalog).to_dict()
+    except sqlite3.DatabaseError:
+        if candidate_extensions is not None:
+            shutdown_runtime_extensions(candidate_extensions)
+        return _error_response("`db_path` must point to a valid MemoLens SQLite database.")
+    except (OSError, ValueError) as exc:
+        if candidate_extensions is not None:
+            shutdown_runtime_extensions(candidate_extensions)
         return _error_response(str(exc))
+    except Exception:
+        if candidate_extensions is not None:
+            shutdown_runtime_extensions(candidate_extensions)
+        return _media_error(
+            "settings_preflight_failed",
+            "MemoLens could not validate the requested runtime settings.",
+            500,
+        )
+
+    try:
+        settings_snapshot = _settings_file_snapshot(settings.persisted_settings_path)
+    except OSError:
+        shutdown_runtime_extensions(candidate_extensions)
+        return _media_error(
+            "settings_persist_failed",
+            "MemoLens could not persist the requested settings; the previous runtime is still active.",
+            500,
+        )
+
+    try:
+        persisted = _save_settings_atomically(settings, normalized_payload)
+    except ValueError as exc:
+        shutdown_runtime_extensions(candidate_extensions)
+        return _error_response(str(exc))
+    except OSError:
+        shutdown_runtime_extensions(candidate_extensions)
+        return _media_error(
+            "settings_persist_failed",
+            "MemoLens could not persist the requested settings; the previous runtime is still active.",
+            500,
+        )
+
+    try:
+        swap_runtime(current_app, candidate_settings, candidate_extensions)
+    except Exception:
+        _restore_settings_file(settings.persisted_settings_path, settings_snapshot)
+        shutdown_runtime_extensions(candidate_extensions)
+        return _media_error(
+            "settings_reload_failed",
+            "MemoLens kept the previous settings because the runtime swap failed.",
+            500,
+        )
 
     return jsonify(
         {
             "object": "memolens.settings",
             "effective": {
-                "image_library_dir": str(reloaded.image_library_dir),
-                "db_path": str(reloaded.db_path),
-                "app_state_dir": str(reloaded.app_state_dir),
-                "settings_path": str(reloaded.persisted_settings_path),
-                "process_image_width": reloaded.process_image_width,
-                "vision_profile_name": reloaded.vision_profile_name,
-                "query_profile_name": reloaded.query_profile_name,
-                "embedding_backend": reloaded.embedding_backend,
+                "image_library_dir": str(candidate_settings.image_library_dir),
+                "db_path": str(candidate_settings.db_path),
+                "app_state_dir": str(candidate_settings.app_state_dir),
+                "settings_path": str(candidate_settings.persisted_settings_path),
+                "process_image_width": candidate_settings.process_image_width,
+                "vision_profile_name": candidate_settings.vision_profile_name,
+                "query_profile_name": candidate_settings.query_profile_name,
+                "embedding_backend": candidate_settings.embedding_backend,
             },
             "persisted": persisted.to_dict(),
-            "available_vlm_profiles": list(reloaded.available_vlm_profiles),
-            "vlm_profile_catalog": [entry.to_dict() for entry in reloaded.vlm_profile_catalog],
-            "local_model_runtime": detect_local_model_runtime(reloaded.vlm_profile_catalog).to_dict(),
+            "available_vlm_profiles": list(candidate_settings.available_vlm_profiles),
+            "vlm_profile_catalog": [entry.to_dict() for entry in candidate_settings.vlm_profile_catalog],
+            "local_model_runtime": local_model_runtime,
         }
     )
 
@@ -683,7 +894,7 @@ def create_indexing_job():
         payload = {}
     if not isinstance(payload, dict):
         return _error_response("Indexing payload must be a JSON object.")
-    settings = current_app.config["SETTINGS"]
+    settings = _runtime_settings()
     include_records = payload.get("include_records", False)
     if not isinstance(include_records, bool):
         return (
@@ -715,7 +926,7 @@ def create_indexing_job():
             400,
         )
 
-    indexing_service = current_app.extensions["indexing_service"]
+    indexing_service = _runtime_extension("indexing_service")
     db_path_override = indexing_request.db_path
 
     try:
@@ -723,15 +934,15 @@ def create_indexing_job():
             repository = ImageIndexRepository(_resolve_index_db_path(db_path_override))
             repository.ensure_schema()
             media_repository = None
-            if repository.db_path.resolve() == current_app.extensions["media_repository"].db_path.resolve():
-                media_repository = current_app.extensions["media_repository"]
+            if repository.db_path.resolve() == _media_repository().db_path.resolve():
+                media_repository = _media_repository()
             indexing_service = indexing_service.__class__(
                 settings=settings,
                 repository=repository,
-                vision_client=current_app.extensions["vision_client"],
-                embedding_service=current_app.extensions["embedding_service"],
-                text_embedding_service=current_app.extensions["text_embedding_service"],
-                geocoder=current_app.extensions["geocoder"],
+                vision_client=_runtime_extension("vision_client"),
+                embedding_service=_runtime_extension("embedding_service"),
+                text_embedding_service=_runtime_extension("text_embedding_service"),
+                geocoder=_runtime_extension("geocoder"),
                 media_repository=media_repository,
             )
         result = indexing_service.run(indexing_request)
@@ -769,7 +980,7 @@ def create_retrieval_query():
         payload = {}
     if not isinstance(payload, dict):
         return _error_response("Retrieval payload must be a JSON object.")
-    settings = current_app.config["SETTINGS"]
+    settings = _runtime_settings()
     include_copy = payload.get("include_copy", True)
 
     if not isinstance(include_copy, bool):
@@ -801,16 +1012,16 @@ def create_retrieval_query():
             repository = ImageIndexRepository(_resolve_existing_db_path(db_path_override))
         except (FileNotFoundError, ValueError) as exc:
             return _error_response(str(exc))
-        retrieval_service = current_app.extensions["retrieval_service"].__class__(
+        retrieval_service = _runtime_extension("retrieval_service").__class__(
             settings=settings,
             repository=repository,
-            planner=current_app.extensions["query_planner"],
-            text_embedding_service=current_app.extensions["text_embedding_service"],
+            planner=_runtime_extension("query_planner"),
+            text_embedding_service=_runtime_extension("text_embedding_service"),
         )
     else:
-        retrieval_service = current_app.extensions["retrieval_service"]
+        retrieval_service = _runtime_extension("retrieval_service")
 
-    copywriter = current_app.extensions["retrieval_copywriter"]
+    copywriter = _runtime_extension("retrieval_copywriter")
     result = retrieval_service.run(retrieval_request)
     body = result.to_response()
     body["candidate_count"] = len(result.data)
@@ -844,7 +1055,7 @@ def create_retrieval_copy():
         return _local_only_error()
 
     payload = request.get_json(silent=True) or {}
-    settings = current_app.config["SETTINGS"]
+    settings = _runtime_settings()
     query_text = payload.get("query_text")
 
     if not isinstance(query_text, str) or not query_text.strip():
@@ -860,7 +1071,7 @@ def create_retrieval_copy():
     except (FileNotFoundError, ValueError) as exc:
         return _error_response(str(exc))
 
-    copywriter = current_app.extensions["retrieval_copywriter"]
+    copywriter = _runtime_extension("retrieval_copywriter")
     try:
         generated_copy = copywriter.generate(
             query_text=query_text.strip(),
@@ -921,7 +1132,7 @@ def generate_search_inspiration():
         if not isinstance(memories, list):
             memories = []
         context_assets = service.assets_by_ids(context_asset_ids) if context_asset_ids else []
-        planner = current_app.extensions["query_planner"]
+        planner = _runtime_extension("query_planner")
         suggestions = planner.generate_search_suggestions(
             library_summary=library_summary,
             memories=[memory for memory in memories if isinstance(memory, dict)],
@@ -1252,14 +1463,14 @@ def generate_from_atlas():
         return _error_response("`include_copy` must be a boolean when set.")
 
     if include_copy and result.get("data"):
-        settings = current_app.config["SETTINGS"]
+        settings = _runtime_settings()
         try:
             image_library_dir = _resolve_image_library_dir(
                 settings=settings,
                 raw_value=payload.get("image_library_dir"),
                 allow_remote_override=True,
             )
-            generated_copy = current_app.extensions["retrieval_copywriter"].generate(
+            generated_copy = _runtime_extension("retrieval_copywriter").generate(
                 query_text=text.strip(),
                 retrieved_images=_parse_copywriter_images(result.get("data")),
                 image_library_dir=image_library_dir,
@@ -1344,6 +1555,139 @@ def get_library_preview(relative_path: str):
 # Video Creative Workbench -------------------------------------------------
 
 
+@api_blueprint.route("/v1/inbox", methods=["GET"])
+def get_media_inbox():
+    denied = _require_media_read_access()
+    if denied:
+        return denied
+    try:
+        limit = int(request.args.get("limit", "50"))
+        page = _runtime_extension("media_inbox_service").list_assets(
+            state=request.args.get("state", "inbox"),
+            kinds=request.args.get("kinds"),
+            limit=limit,
+            cursor=request.args.get("cursor"),
+        )
+    except (TypeError, ValueError) as exc:
+        return _media_error("invalid_inbox_query", str(exc), 400)
+    return jsonify(
+        {
+            "object": "media.inbox",
+            "schema_version": "1",
+            "data": page.items,
+            "items": page.items,
+            "summary": page.summary,
+            "next_cursor": page.next_cursor,
+            "has_more": page.has_more,
+        }
+    )
+
+
+@api_blueprint.route("/v1/inbox/assets/<asset_id>", methods=["PUT"])
+def update_media_inbox_asset(asset_id: str):
+    denied = _require_media_desktop_token()
+    if denied:
+        return denied
+    scope = f"PUT:/v1/inbox/assets/{asset_id}"
+    try:
+        payload = _json_object()
+        idempotency_scope, key, request_hash = _atomic_idempotency_context(scope, payload)
+        review, _ = _runtime_extension("media_inbox_service").update_review(
+            asset_id,
+            payload,
+            idempotency_scope=idempotency_scope,
+            idempotency_key=key,
+            request_sha256=request_hash,
+        )
+    except IdempotencyConflictError as exc:
+        return _idempotency_exception(exc)
+    except ReviewRevisionConflictError as exc:
+        return _media_error(
+            "review_revision_conflict",
+            str(exc),
+            409,
+            details={"current_review": exc.current_review},
+        )
+    except InboxAssetNotFoundError as exc:
+        return _media_error("asset_not_found", str(exc), 404)
+    except ValueError as exc:
+        return _media_error("invalid_asset_review", str(exc), 400)
+    return jsonify(
+        {
+            "object": "asset.review",
+            "schema_version": "1",
+            "asset_id": asset_id,
+            "review": review,
+        }
+    )
+
+
+@api_blueprint.route("/v1/creator/profile", methods=["GET"])
+def get_creator_profile():
+    denied = _require_media_read_access()
+    if denied:
+        return denied
+    profile = _runtime_extension("creator_memory_service").current_profile()
+    return jsonify(
+        {
+            "object": "creator.profile",
+            "schema_version": "1",
+            "profile": profile,
+        }
+    )
+
+
+@api_blueprint.route("/v1/creator/profile", methods=["PUT"])
+def update_creator_profile():
+    denied = _require_media_desktop_token()
+    if denied:
+        return denied
+    scope = "PUT:/v1/creator/profile"
+    try:
+        payload = _json_object()
+        idempotency_scope, key, request_hash = _atomic_idempotency_context(scope, payload)
+        profile, _ = _runtime_extension("creator_memory_service").update_profile(
+            payload,
+            idempotency_scope=idempotency_scope,
+            idempotency_key=key,
+            request_sha256=request_hash,
+        )
+    except IdempotencyConflictError as exc:
+        return _idempotency_exception(exc)
+    except ProfileRevisionConflictError as exc:
+        return _media_error(
+            "profile_revision_conflict",
+            str(exc),
+            409,
+            details={"current_profile": exc.current_profile},
+        )
+    except ValueError as exc:
+        return _media_error("invalid_creator_profile", str(exc), 400)
+    return jsonify(
+        {
+            "object": "creator.profile",
+            "schema_version": "1",
+            "profile": profile,
+        }
+    )
+
+
+@api_blueprint.route("/v1/creator/profile/suggestions", methods=["GET"])
+def get_creator_profile_suggestions():
+    denied = _require_media_read_access()
+    if denied:
+        return denied
+    suggestions = _runtime_extension("creator_memory_service").suggestions()
+    return jsonify(
+        {
+            "object": "creator.profile.suggestion.list",
+            "schema_version": "1",
+            "data": suggestions,
+            "suggestions": suggestions,
+        }
+    )
+
+
 @api_blueprint.route("/v1/media/capabilities", methods=["GET"])
 def get_media_capabilities():
     denied = _require_media_read_access()
@@ -1380,28 +1724,10 @@ def get_media_capabilities():
                 "verified_preview_save_as": ready,
                 "direct_export_requires_export_grant": True,
             },
-            "preview_root_id": current_app.extensions["app_preview_root_id"],
+            "preview_root_id": _runtime_extension("app_preview_root_id"),
             "write_requires_desktop_token": True,
         }
     )
-
-
-def _import_root(payload: dict[str, object]) -> tuple[str, Path]:
-    repository = _media_repository()
-    root_id = payload.get("library_root_id")
-    if isinstance(root_id, str) and root_id:
-        root = repository.library_root(root_id)
-        if not root or root.get("status") != "active":
-            raise ValueError("Approved library root is unavailable.")
-        return root_id, repository.validate_library_root(root_id)
-    # Compatibility bridge: only the already persisted Settings root is accepted.
-    raw_path = payload.get("root_path")
-    configured = current_app.config["SETTINGS"].image_library_dir.resolve(strict=True)
-    if raw_path is not None:
-        if not isinstance(raw_path, str) or Path(raw_path).expanduser().resolve(strict=True) != configured:
-            raise ValueError("`root_path` must equal the directory already approved in MemoLens Settings.")
-    registered = repository.register_library_root(configured)
-    return str(registered["id"]), configured
 
 
 @api_blueprint.route("/v1/assets/import", methods=["POST"])
@@ -1410,41 +1736,95 @@ def import_media_assets():
     if denied:
         return denied
     scope = "POST:/v1/assets/import"
-    idempotency_key: str | None = None
     try:
         payload = _json_object()
-        idempotency_key, existing = _idempotency_begin(scope, payload)
-        if existing:
-            return _replay_idempotency(existing)
-        root_id, root = _import_root(payload)
-        result = MediaImportService(
-            _media_repository(),
-            current_app.extensions["media_job_runner"],
-        ).import_assets(root_id=root_id, root=root, payload=payload)
-        jobs = [_public_job(job) for job in result.jobs]
-        body: dict[str, object] = {
-            "object": "asset.import",
-            "schema_version": "1",
-            "id": f"import_{uuid.uuid4().hex}",
-            "status": result.status,
-            "dry_run": result.dry_run,
-            "kinds": result.kinds,
-            "assets": result.assets,
-            "asset_ids": [str(value.get("id")) for value in result.assets if value.get("id")],
-            "jobs": jobs,
-            "job": jobs[0] if jobs else None,
-            "job_id": jobs[0]["id"] if jobs else None,
-            "imported": result.imported,
-            "skipped": result.skipped,
-            "rejected": result.rejected,
-            "external_analysis": False,
-        }
-        _idempotency_finish(scope, idempotency_key, body, 202 if jobs else 200)
-        return jsonify(body), 202 if jobs else 200
+        idempotency_scope, idempotency_key, request_hash = _atomic_idempotency_context(
+            scope,
+            payload,
+        )
+        repository = _media_repository()
+        replay = repository.replay_idempotent_write(
+            scope=idempotency_scope,
+            key=idempotency_key,
+            request_sha256=request_hash,
+        )
+        if replay is not None:
+            service = MediaImportService(
+                repository,
+                _runtime_extension("media_job_runner"),
+            )
+            frozen_jobs = replay.response.get("jobs")
+            service.submit_jobs(
+                [dict(job) for job in frozen_jobs if isinstance(job, dict)] if isinstance(frozen_jobs, list) else []
+            )
+            return jsonify(replay.response), replay.response_status
+
+        raw_root_id = payload.get("library_root_id")
+        if isinstance(raw_root_id, str) and raw_root_id:
+            root_id = raw_root_id
+            root_record = repository.library_root(root_id)
+            if not root_record or root_record.get("status") != "active":
+                raise ValueError("Approved library root is unavailable.")
+            root = repository.validate_library_root(root_id)
+        else:
+            raw_path = payload.get("root_path")
+            configured = _runtime_settings().image_library_dir.resolve(strict=True)
+            if raw_path is not None and (
+                not isinstance(raw_path, str) or Path(raw_path).expanduser().resolve(strict=True) != configured
+            ):
+                raise ValueError("`root_path` must equal the directory already approved in MemoLens Settings.")
+            root_id = repository._root_id(configured)
+            root_record = repository.library_root(root_id)
+            if not root_record or root_record.get("status") != "active":
+                raise ValueError("Approved library root is unavailable.")
+            root = repository.validate_library_root(root_id)
+
+        service = MediaImportService(
+            repository,
+            _runtime_extension("media_job_runner"),
+        )
+        plan = service.prepare_import(root=root, payload=payload)
+        operation_material = f"{idempotency_scope}\0{idempotency_key}\0{request_hash}"
+        operation_id = f"import_{hashlib.sha256(operation_material.encode()).hexdigest()[:24]}"
+
+        def apply_import(connection: sqlite3.Connection):
+            result = service.apply_prepared(connection, root_id=root_id, plan=plan)
+            jobs = [_public_job(job) for job in result.jobs]
+            body: dict[str, object] = {
+                "object": "asset.import",
+                "schema_version": "1",
+                "id": operation_id,
+                "status": result.status,
+                "dry_run": result.dry_run,
+                "kinds": result.kinds,
+                "assets": result.assets,
+                "asset_ids": [str(value.get("id")) for value in result.assets if value.get("id")],
+                "jobs": jobs,
+                "job": jobs[0] if jobs else None,
+                "job_id": jobs[0]["id"] if jobs else None,
+                "imported": result.imported,
+                "skipped": result.skipped,
+                "rejected": result.rejected,
+                "external_analysis": False,
+            }
+            return body, 202 if jobs else 200, operation_id
+
+        committed = repository.execute_idempotent_write(
+            scope=idempotency_scope,
+            key=idempotency_key,
+            request_sha256=request_hash,
+            resource_type="asset_import",
+            mutation=apply_import,
+        )
+        frozen_jobs = committed.response.get("jobs")
+        service.submit_jobs(
+            [dict(job) for job in frozen_jobs if isinstance(job, dict)] if isinstance(frozen_jobs, list) else []
+        )
+        return jsonify(committed.response), committed.response_status
     except IdempotencyConflictError as exc:
-        return _media_error("idempotency_conflict", str(exc), 409)
+        return _idempotency_exception(exc)
     except (FileNotFoundError, OSError, ValueError) as exc:
-        return _idempotency_failure(scope, idempotency_key, "invalid_import", str(exc), 400)
+        return _media_error("invalid_import", str(exc), 400)
 
 
 @api_blueprint.route("/v1/index/jobs/<job_id>", methods=["GET"])
@@ -1478,23 +1858,29 @@ def cancel_media_index_job(job_id: str):
     if denied:
         return denied
     scope = f"POST:/v1/index/jobs/{job_id}/cancel"
-    idempotency_key: str | None = None
     try:
         payload = request.get_json(silent=True) or {}
-        idempotency_key, existing = _idempotency_begin(scope, payload)
-        if existing:
-            return _replay_idempotency(existing)
-        if not current_app.extensions["media_job_runner"].cancel(job_id):
-            return _idempotency_failure(
-                scope, idempotency_key, "job_not_cancellable", "Media job cannot be cancelled.", 409
-            )
-        job = _media_repository().get_media_job(job_id)
-        body = {"job": _public_job(job)}
-        _idempotency_finish(scope, idempotency_key, body, 202)
-        return jsonify(body), 202
-    except (IdempotencyConflictError, ValueError) as exc:
-        code = "idempotency_conflict" if isinstance(exc, IdempotencyConflictError) else "invalid_cancel_request"
-        return _idempotency_failure(scope, idempotency_key, code, str(exc), 409)
+        idempotency_scope, key, request_hash = _atomic_idempotency_context(scope, payload)
+        repository = _media_repository()
+
+        def mutation(connection):
+            if not repository.request_media_job_cancel(job_id, connection=connection):
+                raise ValueError("Media job cannot be cancelled.")
+            job = repository.get_media_job_in_transaction(connection, job_id)
+            return {"job": _public_job(job)}, 202, job_id
+
+        result = repository.execute_idempotent_write(
+            scope=idempotency_scope,
+            key=key,
+            request_sha256=request_hash,
+            resource_type="media_job_cancel",
+            mutation=mutation,
+        )
+        return jsonify(result.response), result.response_status
+    except IdempotencyConflictError as exc:
+        return _idempotency_exception(exc)
+    except ValueError as exc:
+        return _media_error("job_not_cancellable", str(exc), 409)
 
 
 @api_blueprint.route("/v1/index/jobs/<job_id>/resume", methods=["POST"])
@@ -1503,23 +1889,32 @@ def resume_media_index_job(job_id: str):
     if denied:
         return denied
     scope = f"POST:/v1/index/jobs/{job_id}/resume"
-    idempotency_key: str | None = None
     try:
         payload = request.get_json(silent=True) or {}
-        idempotency_key, existing = _idempotency_begin(scope, payload)
-        if existing:
-            return _replay_idempotency(existing)
-        if not current_app.extensions["media_job_runner"].resume(job_id):
-            return _idempotency_failure(
-                scope, idempotency_key, "job_not_resumable", "Media job cannot be resumed.", 409
-            )
-        job = _media_repository().get_media_job(job_id)
-        body = {"job": _public_job(job)}
-        _idempotency_finish(scope, idempotency_key, body, 202)
-        return jsonify(body), 202
-    except (IdempotencyConflictError, ValueError) as exc:
-        code = "idempotency_conflict" if isinstance(exc, IdempotencyConflictError) else "invalid_resume_request"
-        return _idempotency_failure(scope, idempotency_key, code, str(exc), 409)
+        idempotency_scope, key, request_hash = _atomic_idempotency_context(scope, payload)
+        repository = _media_repository()
+
+        def mutation(connection):
+            if not repository.reset_media_job_for_resume(job_id, connection=connection):
+                raise ValueError("Media job cannot be resumed.")
+            job = repository.get_media_job_in_transaction(connection, job_id)
+            return {"job": _public_job(job)}, 202, job_id
+
+        result = repository.execute_idempotent_write(
+            scope=idempotency_scope,
+            key=key,
+            request_sha256=request_hash,
+            resource_type="media_job_resume",
+            mutation=mutation,
+        )
+        current = repository.get_media_job(job_id)
+        if current and current.get("status") in {"queued", "interrupted"} and not current.get("cancel_requested"):
+            _runtime_extension("media_job_runner").submit(job_id)
+        return jsonify(result.response), result.response_status
+    except IdempotencyConflictError as exc:
+        return _idempotency_exception(exc)
+    except ValueError as exc:
+        return _media_error("job_not_resumable", str(exc), 409)
 
 
 @api_blueprint.route("/v1/search/mixed", methods=["POST"])
@@ -1528,7 +1923,7 @@ def mixed_media_search():
     if denied:
         return denied
     try:
-        result = current_app.extensions["mixed_retrieval_service"].search(_json_object())
+        result = _runtime_extension("mixed_retrieval_service").search(_json_object())
     except ValueError as exc:
         return _media_error("invalid_search", str(exc), 400)
     return jsonify(result)
@@ -1618,7 +2013,7 @@ def _keyframe_file(keyframe_id: str) -> Path | None:
         row = connection.execute("SELECT cache_key,sha256 FROM keyframes WHERE id=?", (keyframe_id,)).fetchone()
     if not row:
         return None
-    root = current_app.config["SETTINGS"].app_state_dir / "media-cache"
+    root = _runtime_settings().app_state_dir / "media-cache"
     path = root.joinpath(str(row["cache_key"])).resolve()
     try:
         path.relative_to(root.resolve())
@@ -1660,28 +2055,22 @@ def create_creative_brief():
     if denied:
         return denied
     scope = "POST:/v1/creative/briefs"
-    idempotency_key: str | None = None
     try:
         payload = _json_object()
-        idempotency_key, existing = _idempotency_begin(scope, payload)
-        if existing:
-            return _replay_idempotency(existing)
-        project, search = current_app.extensions["creative_director"].create_brief(payload)
-        body = {
-            "object": "creative.project",
-            "schema_version": "1",
-            "project": project,
-            "search": search,
-            "id": project["id"],
-        }
-        _idempotency_finish(scope, idempotency_key, body, 201)
-        return jsonify(body), 201
+        idempotency_scope, key, request_hash = _atomic_idempotency_context(scope, payload)
+        result = _runtime_extension("creative_director").create_brief_idempotent(
+            payload,
+            idempotency_scope=idempotency_scope,
+            idempotency_key=key,
+            request_sha256=request_hash,
+        )
+        return jsonify(result.response), result.response_status
     except IdempotencyConflictError as exc:
-        return _media_error("idempotency_conflict", str(exc), 409)
+        return _idempotency_exception(exc)
     except CreativeBriefError as exc:
-        return _idempotency_failure(scope, idempotency_key, exc.code, str(exc), 400, details=exc.details)
+        return _media_error(exc.code, str(exc), 400, details=exc.details)
     except ValueError as exc:
-        return _idempotency_failure(scope, idempotency_key, "invalid_brief", str(exc), 400)
+        return _media_error("invalid_brief", str(exc), 400)
 
 
 @api_blueprint.route("/v1/creative/projects/<project_id>", methods=["GET"])
@@ -1702,29 +2091,28 @@ def create_project_timeline(project_id: str):
     if denied:
         return denied
     scope = f"POST:/v1/creative/projects/{project_id}/timelines"
-    idempotency_key: str | None = None
     try:
         payload = _json_object()
-        idempotency_key, existing = _idempotency_begin(scope, payload)
-        if existing:
-            return _replay_idempotency(existing)
+        idempotency_scope, key, request_hash = _atomic_idempotency_context(scope, payload)
         brief_revision = payload.get("brief_revision")
         if not isinstance(brief_revision, int) or isinstance(brief_revision, bool):
             raise ValueError("`brief_revision` must be a positive integer.")
-        result = current_app.extensions["timeline_service"].create_from_project(
-            project_id, brief_revision=brief_revision
+        result = _runtime_extension("timeline_service").create_from_project_idempotent(
+            project_id,
+            brief_revision=brief_revision,
+            idempotency_scope=idempotency_scope,
+            idempotency_key=key,
+            request_sha256=request_hash,
         )
-        body = {"object": "timeline.revision", "schema_version": "1", "id": result["timeline"]["id"], **result}
-        _idempotency_finish(scope, idempotency_key, body, 201)
-        return jsonify(body), 201
+        return jsonify(result.response), result.response_status
     except IdempotencyConflictError as exc:
-        return _media_error("idempotency_conflict", str(exc), 409)
+        return _idempotency_exception(exc)
     except LookupError as exc:
-        return _idempotency_failure(scope, idempotency_key, "project_not_found", str(exc), 404)
+        return _media_error("project_not_found", str(exc), 404)
     except TimelineValidationError as exc:
-        return _idempotency_failure(scope, idempotency_key, "invalid_timeline", str(exc), 422, details=exc.errors)
+        return _media_error("invalid_timeline", str(exc), 422, details=exc.errors)
     except ValueError as exc:
-        return _idempotency_failure(scope, idempotency_key, "invalid_timeline_request", str(exc), 400)
+        return _media_error("invalid_timeline_request", str(exc), 400)
 
 
 @api_blueprint.route("/v1/timelines/<timeline_id>", methods=["GET"])
@@ -1781,7 +2169,7 @@ def validate_timeline(timeline_id: str):
             if not row:
                 return _media_error("timeline_not_found", "Timeline revision does not exist.", 404)
             timeline = row["timeline"]
-        result = current_app.extensions["timeline_service"].validate(timeline)
+        result = _runtime_extension("timeline_service").validate(timeline)
         return jsonify(result), 200 if result["valid"] else 422
     except ValueError as exc:
         return _media_error("invalid_validation_request", str(exc), 400)
@@ -1793,7 +2181,6 @@ def revise_timeline(timeline_id: str):
     if denied:
         return denied
     scope = f"POST:/v1/timelines/{timeline_id}/revise"
-    idempotency_key: str | None = None
     try:
         payload = _json_object()
         base_revision = payload.get("base_revision")
@@ -1805,7 +2192,7 @@ def revise_timeline(timeline_id: str):
             isinstance(raw_operations, list) and raw_operations
         ):
             raise ValueError("Provide exactly one of `instruction` or non-empty `operations`.")
-        service = current_app.extensions["timeline_service"]
+        service = _runtime_extension("timeline_service")
         operations = (
             service.instruction_operations(timeline_id, base_revision, instruction.strip())
             if isinstance(instruction, str)
@@ -1814,8 +2201,12 @@ def revise_timeline(timeline_id: str):
         apply_revision = payload.get("apply", True)
         if not isinstance(apply_revision, bool):
             raise ValueError("`apply` must be a boolean.")
-        preview = service.preview_revision(timeline_id, base_revision=base_revision, operations=operations)
         if not apply_revision:
+            preview = service.preview_revision(
+                timeline_id,
+                base_revision=base_revision,
+                operations=operations,
+            )
             return jsonify(
                 {
                     "object": "timeline.revision_preview",
@@ -1826,25 +2217,28 @@ def revise_timeline(timeline_id: str):
                     "diff": preview["diff"],
                 }
             )
-        idempotency_key, existing = _idempotency_begin(scope, payload)
-        if existing:
-            return _replay_idempotency(existing)
-        result = service.revise(timeline_id, base_revision=base_revision, operations=operations)
-        body = {"object": "timeline.revision", "schema_version": "1", "id": timeline_id, **result}
-        _idempotency_finish(scope, idempotency_key, body, 201)
-        return jsonify(body), 201
+        idempotency_scope, key, request_hash = _atomic_idempotency_context(scope, payload)
+        result = service.revise_idempotent(
+            timeline_id,
+            base_revision=base_revision,
+            operations=operations,
+            idempotency_scope=idempotency_scope,
+            idempotency_key=key,
+            request_sha256=request_hash,
+        )
+        return jsonify(result.response), result.response_status
     except IdempotencyConflictError as exc:
-        return _media_error("idempotency_conflict", str(exc), 409)
+        return _idempotency_exception(exc)
     except RuntimeError as exc:
         if str(exc).startswith("revision_conflict:"):
-            return _idempotency_failure(scope, idempotency_key, "revision_conflict", str(exc), 409)
+            return _media_error("revision_conflict", str(exc), 409)
         raise
     except LookupError as exc:
-        return _idempotency_failure(scope, idempotency_key, "timeline_not_found", str(exc), 404)
+        return _media_error("timeline_not_found", str(exc), 404)
     except TimelineValidationError as exc:
-        return _idempotency_failure(scope, idempotency_key, "invalid_timeline", str(exc), 422, details=exc.errors)
+        return _media_error("invalid_timeline", str(exc), 422, details=exc.errors)
     except ValueError as exc:
-        return _idempotency_failure(scope, idempotency_key, "invalid_revision_request", str(exc), 400)
+        return _media_error("invalid_revision_request", str(exc), 400)
 
 
 @api_blueprint.route("/v1/renders", methods=["POST"])
@@ -1853,27 +2247,32 @@ def start_timeline_render():
     if denied:
         return denied
     scope = "POST:/v1/renders"
-    idempotency_key: str | None = None
     try:
         payload = _json_object()
-        idempotency_key, existing = _idempotency_begin(scope, payload)
-        if existing:
-            return _replay_idempotency(existing)
+        idempotency_scope, key, request_hash = _atomic_idempotency_context(scope, payload)
+        repository = _media_repository()
+        replay = repository.replay_idempotent_write(
+            scope=idempotency_scope,
+            key=key,
+            request_sha256=request_hash,
+        )
+        if replay is not None:
+            job_id = str(replay.resource_id or replay.response.get("id") or "")
+            current = repository.get_render_job(job_id)
+            if current and current.get("status") in {"queued", "interrupted"} and not current.get("cancel_requested"):
+                _runtime_extension("render_job_runner").submit(job_id)
+            return jsonify(replay.response), replay.response_status
         timeline_id = str(payload.get("timeline_id") or "")
         revision = payload.get("timeline_revision")
         expected_hash = payload.get("expected_timeline_sha256")
         profile = str(payload.get("profile") or "preview-low")
         if not timeline_id or not isinstance(revision, int) or isinstance(revision, bool):
             raise ValueError("`timeline_id` and integer `timeline_revision` are required.")
-        row = _media_repository().get_timeline(timeline_id, revision)
+        row = repository.get_timeline(timeline_id, revision)
         if not row:
-            return _idempotency_failure(
-                scope, idempotency_key, "timeline_not_found", "Timeline revision does not exist.", 404
-            )
+            return _media_error("timeline_not_found", "Timeline revision does not exist.", 404)
         if not isinstance(expected_hash, str) or expected_hash != row["content_sha256"]:
-            return _idempotency_failure(
-                scope,
-                idempotency_key,
+            return _media_error(
                 "timeline_hash_mismatch",
                 "Expected timeline SHA-256 does not match.",
                 409,
@@ -1883,11 +2282,9 @@ def start_timeline_render():
         output = payload["output"]
         root_id = output.get("root_id")
         if root_id == "app-preview-root":
-            root_id = current_app.extensions["app_preview_root_id"]
-        if root_id != current_app.extensions["app_preview_root_id"]:
-            return _idempotency_failure(
-                scope,
-                idempotency_key,
+            root_id = _runtime_extension("app_preview_root_id")
+        if root_id != _runtime_extension("app_preview_root_id"):
+            return _media_error(
                 "export_grant_required",
                 "Only app-managed render artifacts are supported.",
                 403,
@@ -1895,39 +2292,42 @@ def start_timeline_render():
         if profile not in {"preview-low", "export-1080p"}:
             raise ValueError("Unsupported render profile.")
         if profile == "export-1080p":
-            return _idempotency_failure(
-                scope,
-                idempotency_key,
+            return _media_error(
                 "export_grant_required",
                 "Final 1080p export requires an Electron-issued export grant and is not exposed in this release.",
                 403,
             )
-        job_id = f"render_{uuid.uuid4().hex}"
-        job = _media_repository().create_render_job(
-            timeline_id=timeline_id,
-            timeline_revision=revision,
-            profile=profile,
-            output_root_id=str(root_id),
-            output_relative_path=f"{job_id}.mp4",
-            timeline_content_sha256=str(expected_hash),
-            reuse_active=True,
+
+        def mutation(connection):
+            job = repository.create_render_job(
+                timeline_id=timeline_id,
+                timeline_revision=revision,
+                profile=profile,
+                output_root_id=str(root_id),
+                output_relative_path=None,
+                timeline_content_sha256=str(expected_hash),
+                reuse_active=True,
+                connection=connection,
+            )
+            public = _public_job(job, render=True)
+            return {"job": public, **public}, 202, str(job["id"])
+
+        result = repository.execute_idempotent_write(
+            scope=idempotency_scope,
+            key=key,
+            request_sha256=request_hash,
+            resource_type="render_job",
+            mutation=mutation,
         )
-        # Repository owns the real id; use it in the safe app-managed filename.
-        if job["output_relative_path"] != f"{job['id']}.mp4":
-            with _media_repository().transaction(immediate=True) as connection:
-                connection.execute(
-                    "UPDATE render_jobs SET output_relative_path=? WHERE id=?", (f"{job['id']}.mp4", job["id"])
-                )
-            job = _media_repository().get_render_job(str(job["id"]))
-        current_app.extensions["render_job_runner"].submit(str(job["id"]))
-        public = _public_job(job, render=True)
-        body = {"job": public, **public}
-        _idempotency_finish(scope, idempotency_key, body, 202)
-        return jsonify(body), 202
+        job_id = str(result.resource_id or result.response.get("id") or "")
+        current = repository.get_render_job(job_id)
+        if current and current.get("status") in {"queued", "interrupted"} and not current.get("cancel_requested"):
+            _runtime_extension("render_job_runner").submit(job_id)
+        return jsonify(result.response), result.response_status
     except IdempotencyConflictError as exc:
-        return _media_error("idempotency_conflict", str(exc), 409)
+        return _idempotency_exception(exc)
     except ValueError as exc:
-        return _idempotency_failure(scope, idempotency_key, "invalid_render_request", str(exc), 400)
+        return _media_error("invalid_render_request", str(exc), 400)
 
 
 @api_blueprint.route("/v1/renders/<job_id>", methods=["GET"])
@@ -1962,24 +2362,30 @@ def cancel_timeline_render(job_id: str):
     if denied:
         return denied
     scope = f"POST:/v1/renders/{job_id}/cancel"
-    idempotency_key: str | None = None
     try:
         payload = request.get_json(silent=True) or {}
-        idempotency_key, existing = _idempotency_begin(scope, payload)
-        if existing:
-            return _replay_idempotency(existing)
-        if not current_app.extensions["render_job_runner"].cancel(job_id):
-            return _idempotency_failure(
-                scope, idempotency_key, "render_not_cancellable", "Render cannot be cancelled.", 409
-            )
-        job = _media_repository().get_render_job(job_id)
-        public = _public_job(job, render=True)
-        body = {"job": public, **public}
-        _idempotency_finish(scope, idempotency_key, body, 202)
-        return jsonify(body), 202
-    except (IdempotencyConflictError, ValueError) as exc:
-        code = "idempotency_conflict" if isinstance(exc, IdempotencyConflictError) else "invalid_cancel_request"
-        return _idempotency_failure(scope, idempotency_key, code, str(exc), 409)
+        idempotency_scope, key, request_hash = _atomic_idempotency_context(scope, payload)
+        repository = _media_repository()
+
+        def mutation(connection):
+            if not repository.request_render_cancel(job_id, connection=connection):
+                raise ValueError("Render cannot be cancelled.")
+            job = repository.get_render_job_in_transaction(connection, job_id)
+            public = _public_job(job, render=True)
+            return {"job": public, **public}, 202, job_id
+
+        result = repository.execute_idempotent_write(
+            scope=idempotency_scope,
+            key=key,
+            request_sha256=request_hash,
+            resource_type="render_job_cancel",
+            mutation=mutation,
+        )
+        return jsonify(result.response), result.response_status
+    except IdempotencyConflictError as exc:
+        return _idempotency_exception(exc)
+    except ValueError as exc:
+        return _media_error("render_not_cancellable", str(exc), 409)
 
 
 @api_blueprint.route("/v1/renders/<job_id>/download", methods=["GET"])

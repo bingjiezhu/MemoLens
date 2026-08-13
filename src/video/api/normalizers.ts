@@ -159,6 +159,10 @@ export function normalizeProject(rawValue: unknown): CreativeProject {
       candidate_refs: asStringList(brief.candidate_refs),
       missing_assets: asStringList(brief.missing_assets),
       assumptions: asStringList(brief.assumptions),
+      creator_profile_ref: Object.keys(asRecord(brief.creator_profile_ref)).length > 0
+        ? asRecord(brief.creator_profile_ref) as unknown as CreativeProject["brief"]["creator_profile_ref"]
+        : null,
+      applied_profile_fields: asStringList(brief.applied_profile_fields),
     },
     candidates: candidates.map(normalizeMatch),
     latest_timeline_id: asNullableString(raw.latest_timeline_id ?? latestTimeline.id),

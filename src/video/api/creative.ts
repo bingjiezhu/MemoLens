@@ -1,4 +1,8 @@
-import type { CreativeBriefInput, CreativeProject } from "../types";
+import type {
+  CreativeBriefInput,
+  CreativeProject,
+  CreatorProfileReference,
+} from "../types";
 import { asRecord, normalizeProject } from "./normalizers";
 import { requestJson } from "./transport";
 
@@ -7,6 +11,8 @@ export async function createCreativeBrief(input: {
   dbPath?: string | null;
   brief: CreativeBriefInput;
   selectedRefs?: string[];
+  creatorProfileRef?: CreatorProfileReference | null;
+  appliedProfileFields?: string[];
   signal?: AbortSignal;
   idempotencyKey: string;
 }): Promise<CreativeProject> {
@@ -18,6 +24,10 @@ export async function createCreativeBrief(input: {
       candidate_refs: input.selectedRefs?.length
         ? input.selectedRefs
         : input.brief.candidate_refs,
+      creator_profile_ref: input.creatorProfileRef ?? undefined,
+      applied_profile_fields: input.creatorProfileRef
+        ? input.appliedProfileFields ?? []
+        : undefined,
     },
     signal: input.signal,
     timeoutMs: 60_000,

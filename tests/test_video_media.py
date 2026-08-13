@@ -200,8 +200,15 @@ class MediaRepositoryContractTests(unittest.TestCase):
                 "SELECT schema_version FROM database_meta WHERE singleton=1"
             ).fetchone()
 
-        self.assertEqual(migrations, [(1, "image_index_baseline"), (2, "video_creative_workbench")])
-        self.assertEqual(meta, (2,))
+        self.assertEqual(
+            migrations,
+            [
+                (1, "image_index_baseline"),
+                (2, "video_creative_workbench"),
+                (3, "creator_memory_media_inbox"),
+            ],
+        )
+        self.assertEqual(meta, (3,))
         self.assertTrue(
             {
                 "image_index",
@@ -215,6 +222,8 @@ class MediaRepositoryContractTests(unittest.TestCase):
                 "media_jobs",
                 "render_jobs",
                 "idempotency_records",
+                "asset_review_revisions",
+                "creator_profile_revisions",
             }.issubset(tables)
         )
 
@@ -658,6 +667,67 @@ class MediaRouteSecurityContractTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 401)
                 self.assertEqual(response.json["code"], "desktop_auth_required")
 
+        for path in (
+            "/v1/assets/not-found/media?db_path=/tmp/not-memolens.db",
+            "/v1/timelines/not-found/validate?db_path=/tmp/not-memolens.db",
+            "/v1/renders/not-found/download?db_path=/tmp/not-memolens.db",
+        ):
+            with self.subTest(path=path):
+                response = self.client.open(
+                    path,
+                    method="POST" if "/validate" in path else "GET",
+                    json={} if "/validate" in path else None,
+                )
+                self.assertEqual(response.status_code, 401)
+                self.assertEqual(response.json["code"], "desktop_auth_required")
+
+    def test_every_media_mutation_accepts_a_trusted_browser_preflight_without_a_json_body(self) -> None:
+        mutation_paths = (
+            ("PUT", "/v1/inbox/assets/not-found"),
+            ("PUT", "/v1/creator/profile"),
+            ("POST", "/v1/assets/import"),
+            ("POST", "/v1/index/jobs/not-found/cancel"),
+            ("POST", "/v1/index/jobs/not-found/resume"),
+            ("POST", "/v1/creative/briefs"),
+            ("POST", "/v1/creative/projects/not-found/timelines"),
+            ("POST", "/v1/timelines/not-found/revise"),
+            ("POST", "/v1/renders"),
+            ("POST", "/v1/renders/not-found/cancel"),
+        )
+        for method, path in mutation_paths:
+            with self.subTest(method=method, path=path):
+                response = self.client.options(
+                    path,
+                    headers={
+                        "Origin": "http://127.0.0.1:5173",
+                        "Access-Control-Request-Method": method,
+                        "Access-Control-Request-Headers": (
+                            "content-type, idempotency-key, x-memolens-desktop-token"
+                        ),
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.headers["Access-Control-Allow-Origin"],
+                    "http://127.0.0.1:5173",
+                )
+                allowed_headers = response.headers["Access-Control-Allow-Headers"].casefold()
+                self.assertIn("idempotency-key", allowed_headers)
+                self.assertIn("x-memolens-desktop-token", allowed_headers)
+
+        packaged_renderer = self.client.options(
+            "/v1/inbox/assets/not-found",
+            headers={
+                "Origin": "null",
+                "Access-Control-Request-Method": "PUT",
+                "Access-Control-Request-Headers": (
+                    "content-type, idempotency-key, x-memolens-desktop-token"
+                ),
+            },
+        )
+        self.assertEqual(packaged_renderer.status_code, 200)
+        self.assertEqual(packaged_renderer.headers["Access-Control-Allow-Origin"], "null")
+
     def test_read_only_media_surfaces_keep_loopback_codex_and_trusted_browser_access(self) -> None:
         requests = (
             ("GET", "/v1/media/capabilities", None, 200),
@@ -701,7 +771,11 @@ class MediaRouteSecurityContractTests(unittest.TestCase):
     def test_trusted_browser_origin_does_not_turn_read_access_into_write_authority(self) -> None:
         response = self.client.post(
             "/v1/assets/import",
-            json={"relative_paths": [], "recursive": False},
+            json={
+                "db_path": str(self.app.extensions["media_repository"].db_path),
+                "relative_paths": [],
+                "recursive": False,
+            },
             headers={"Origin": "http://127.0.0.1:5173", "Idempotency-Key": "no-authority"},
         )
         self.assertEqual(response.status_code, 401)
@@ -710,7 +784,11 @@ class MediaRouteSecurityContractTests(unittest.TestCase):
     def test_authenticated_write_requires_idempotency_key(self) -> None:
         response = self.client.post(
             "/v1/assets/import",
-            json={"relative_paths": [], "recursive": False},
+            json={
+                "db_path": str(self.app.extensions["media_repository"].db_path),
+                "relative_paths": [],
+                "recursive": False,
+            },
             headers={DESKTOP_TOKEN_HEADER: self.token},
         )
         self.assertEqual(response.status_code, 400)
@@ -1164,13 +1242,18 @@ class RealVideoPipelineContractTests(unittest.TestCase):
         app = create_app(Settings.from_env())
         client = app.test_client()
         auth = {DESKTOP_TOKEN_HEADER: token}
+        db_path = str(app.extensions["media_repository"].db_path)
         try:
             capabilities = client.get("/v1/media/capabilities", headers=auth)
             self.assertEqual(capabilities.status_code, 200)
             self.assertEqual(capabilities.json["status"], "ready")
             self.assertTrue(capabilities.json["write_requires_desktop_token"])
 
-            import_payload = {"relative_paths": [copied_video.name], "recursive": False}
+            import_payload = {
+                "db_path": db_path,
+                "relative_paths": [copied_video.name],
+                "recursive": False,
+            }
             import_headers = {**auth, "Idempotency-Key": "real-import-1"}
             imported = client.post(
                 "/v1/assets/import",
@@ -1189,7 +1272,11 @@ class RealVideoPipelineContractTests(unittest.TestCase):
             self.assertEqual(replay.json, imported.json)
             conflict = client.post(
                 "/v1/assets/import",
-                json={"relative_paths": [copied_video.name], "recursive": True},
+                json={
+                    "db_path": db_path,
+                    "relative_paths": [copied_video.name],
+                    "recursive": True,
+                },
                 headers=import_headers,
             )
             self.assertEqual(conflict.status_code, 409)
@@ -1225,6 +1312,7 @@ class RealVideoPipelineContractTests(unittest.TestCase):
             brief = client.post(
                 "/v1/creative/briefs",
                 json={
+                    "db_path": db_path,
                     "title": "Vertical city cut",
                     "goal": "vertical city story",
                     "duration_ms": 1_000,
@@ -1237,7 +1325,7 @@ class RealVideoPipelineContractTests(unittest.TestCase):
             project_id = brief.json["project"]["id"]
             timeline_response = client.post(
                 f"/v1/creative/projects/{project_id}/timelines",
-                json={"brief_revision": 1},
+                json={"db_path": db_path, "brief_revision": 1},
                 headers={**auth, "Idempotency-Key": "real-timeline-1"},
             )
             self.assertEqual(timeline_response.status_code, 201, timeline_response.json)
@@ -1254,6 +1342,7 @@ class RealVideoPipelineContractTests(unittest.TestCase):
             preview_revision = client.post(
                 f"/v1/timelines/{timeline['id']}/revise",
                 json={
+                    "db_path": db_path,
                     "base_revision": 1,
                     "apply": False,
                     "operations": [
@@ -1274,6 +1363,7 @@ class RealVideoPipelineContractTests(unittest.TestCase):
             applied = client.post(
                 f"/v1/timelines/{timeline['id']}/revise",
                 json={
+                    "db_path": db_path,
                     "base_revision": 1,
                     "apply": True,
                     "operations": [
@@ -1290,6 +1380,7 @@ class RealVideoPipelineContractTests(unittest.TestCase):
             self.assertEqual(applied.json["timeline"]["revision"], 2)
 
             render_payload = {
+                "db_path": db_path,
                 "timeline_id": timeline["id"],
                 "timeline_revision": 2,
                 "expected_timeline_sha256": applied.json["content_sha256"],
