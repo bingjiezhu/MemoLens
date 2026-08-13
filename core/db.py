@@ -322,6 +322,19 @@ class ImageIndexRepository:
         if date_to:
             where_clauses.append("taken_at IS NOT NULL AND taken_at <= ?")
             params.append(date_to)
+        # Media Inbox is an additive schema layered over the legacy image index.
+        # Keep this repository usable for old/index-only databases, while ensuring
+        # archived assets disappear from the default photo retrieval path as soon
+        # as schema v3 is present.
+        with self._connect() as connection:
+            has_review_view = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='view' AND name='current_asset_reviews'"
+            ).fetchone()
+        if has_review_view:
+            where_clauses.append(
+                "NOT EXISTS (SELECT 1 FROM current_asset_reviews review "
+                "WHERE review.asset_id=image_index.id AND review.inbox_state='archived')"
+            )
 
         sql = """
             SELECT

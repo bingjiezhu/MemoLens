@@ -29,6 +29,9 @@ contextBridge.exposeInMainWorld("memolensDesktop", {
   pickImageFolder(): Promise<DesktopFolderSelection | null> {
     return ipcRenderer.invoke("memolens:pick-image-folder");
   },
+  commitLibrarySelection(selection: DesktopFolderSelection): Promise<DesktopSettings> {
+    return ipcRenderer.invoke("memolens:commit-library-selection", selection);
+  },
   startIndexing(options: DesktopIndexingStartOptions): Promise<DesktopIndexingResult> {
     return ipcRenderer.invoke("memolens:start-indexing", options);
   },
@@ -40,6 +43,9 @@ contextBridge.exposeInMainWorld("memolensDesktop", {
   },
   saveVideoArtifact(request: DesktopArtifactSaveRequest): Promise<DesktopArtifactSaveResult> {
     return ipcRenderer.invoke("memolens:save-video-artifact", request);
+  },
+  openInCodex(): Promise<boolean> {
+    return ipcRenderer.invoke("memolens:open-in-codex");
   },
   onIndexingProgress(callback: (progress: DesktopIndexingProgress) => void): () => void {
     const listener = (_event: Electron.IpcRendererEvent, progress: DesktopIndexingProgress) => {

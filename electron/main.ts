@@ -14,6 +14,7 @@ import {
   stopManagedBackend,
 } from "./backendManager.js";
 import {
+  commitDesktopLibrarySelection,
   DEFAULT_BACKEND_URL,
   loadDesktopSettings,
   resolveLibraryDbPath,
@@ -25,6 +26,7 @@ import {
   parseArtifactIntegrityProof,
 } from "./artifactIntegrity.js";
 import { DesktopIndexingCoordinator } from "./indexingCoordinator.js";
+import { buildMemoLensCodexUrl } from "./codexIntegration.js";
 
 import type {
   DesktopSettings,
@@ -38,7 +40,7 @@ import type {
 } from "../src/video/types.js";
 
 const require = createRequire(import.meta.url);
-const { app, BrowserWindow, dialog, ipcMain } =
+const { app, BrowserWindow, dialog, ipcMain, shell } =
   require("electron") as typeof Electron.CrossProcessExports;
 
 const CURRENT_FILE = fileURLToPath(import.meta.url);
@@ -371,7 +373,7 @@ ipcMain.handle("memolens:pick-image-folder", async (event) => {
   const settings = await loadDesktopSettings(PROJECT_ROOT);
   const result = await dialog.showOpenDialog({
     properties: ["openDirectory"],
-    title: "Select local image folder",
+    title: "Select local media folder",
     defaultPath: settings.defaultLibraryDir ?? undefined,
   });
   if (result.canceled || result.filePaths.length === 0) {
@@ -380,17 +382,20 @@ ipcMain.handle("memolens:pick-image-folder", async (event) => {
 
   const folderPath = resolve(result.filePaths[0]);
   const dbPath = resolveSelectedDbPath(folderPath);
-  await saveDesktopSettings(PROJECT_ROOT, {
-    ...settings,
-    defaultLibraryDir: folderPath,
-    defaultDbPath: dbPath,
-  });
   const selection: DesktopFolderSelection = {
     folderPath,
     dbPath,
   };
   return selection;
 });
+
+ipcMain.handle(
+  "memolens:commit-library-selection",
+  async (event, selection: DesktopFolderSelection): Promise<DesktopSettings> => {
+    assertTrustedIpcSender(event);
+    return commitDesktopLibrarySelection(PROJECT_ROOT, selection);
+  },
+);
 
 ipcMain.handle("memolens:get-settings", async (event): Promise<DesktopSettings> => {
   assertTrustedIpcSender(event);
@@ -442,6 +447,12 @@ ipcMain.handle("memolens:pause-indexing", async (event): Promise<boolean> => {
 ipcMain.handle("memolens:resume-indexing", async (event): Promise<boolean> => {
   assertTrustedIpcSender(event);
   return indexingCoordinator.resume();
+});
+
+ipcMain.handle("memolens:open-in-codex", async (event): Promise<boolean> => {
+  assertTrustedIpcSender(event);
+  await shell.openExternal(buildMemoLensCodexUrl(PROJECT_ROOT));
+  return true;
 });
 
 app.whenReady().then(async () => {

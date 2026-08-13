@@ -38,6 +38,17 @@ IMAGE_SHA = "b" * 64
 AUDIO_SHA = "c" * 64
 
 
+def _sqlite_source_state(path: Path) -> dict[str, object]:
+    return {
+        "directory_entries": sorted(item.name for item in path.parent.iterdir()),
+        "files": {
+            candidate.name: candidate.read_bytes()
+            for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm"))
+            if candidate.exists()
+        },
+    }
+
+
 def _draft_items() -> list[dict[str, object]]:
     return [
         {
@@ -82,6 +93,7 @@ class VideoTimelineTests(unittest.TestCase):
             timeline, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
         with closing(sqlite3.connect(path)) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(
                 """
                 CREATE TABLE library_roots (
@@ -91,6 +103,7 @@ class VideoTimelineTests(unittest.TestCase):
                 );
                 CREATE TABLE image_index (
                     id INTEGER PRIMARY KEY,
+                    sha256 TEXT,
                     relative_path TEXT,
                     filename TEXT,
                     description TEXT,
@@ -166,6 +179,27 @@ class VideoTimelineTests(unittest.TestCase):
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(id, revision)
                 );
+                CREATE TABLE asset_review_revisions (
+                    asset_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    inbox_state TEXT NOT NULL,
+                    favorite INTEGER NOT NULL DEFAULT 0,
+                    project_ready INTEGER NOT NULL DEFAULT 0,
+                    note TEXT,
+                    provenance_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(asset_id,revision)
+                );
+                CREATE TABLE creator_profile_revisions (
+                    profile_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    profile_json TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL DEFAULT '[]',
+                    source TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(profile_id,revision)
+                );
                 """
             )
             connection.execute(
@@ -173,9 +207,10 @@ class VideoTimelineTests(unittest.TestCase):
                 ("root_media", "/private/not-returned", "active"),
             )
             connection.execute(
-                "INSERT INTO image_index VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO image_index VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     1,
+                    IMAGE_SHA,
                     "image/海边.jpg",
                     "海边.jpg",
                     "海边日落照片",
@@ -327,6 +362,58 @@ class VideoTimelineTests(unittest.TestCase):
                     "2026-08-12T12:00:00Z",
                 ),
             )
+            connection.executemany(
+                "INSERT INTO asset_review_revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        "asset_video",
+                        1,
+                        "kept",
+                        1,
+                        1,
+                        "strong opening",
+                        '{"source":"user"}',
+                        "2026-08-12T12:00:00Z",
+                    ),
+                    (
+                        "asset_audio",
+                        1,
+                        "archived",
+                        0,
+                        0,
+                        None,
+                        '{"source":"user"}',
+                        "2026-08-12T12:01:00Z",
+                    ),
+                ],
+            )
+            connection.execute(
+                "INSERT INTO creator_profile_revisions VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "default",
+                    2,
+                    json.dumps(
+                        {
+                            "platform": "Xiaohongshu",
+                            "audience": "Design-minded creators",
+                            "aspect_ratio": "9:16",
+                            "pace": "calm",
+                            "must_exclude": ["black frames"],
+                            "raw_prompt": "must never be exposed",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "d" * 64,
+                    json.dumps(
+                        [
+                            {"kind": "creative_brief", "project_id": "proj_demo"},
+                            {"kind": "review", "asset_id": "asset_video"},
+                        ]
+                    ),
+                    "confirmed_suggestion",
+                    "2026-08-12T12:02:00Z",
+                ),
+            )
             connection.commit()
 
     def gateway(self, path: Path | None = None, *, trust: bool = False) -> MemoLensGateway:
@@ -366,6 +453,123 @@ class VideoTimelineTests(unittest.TestCase):
         self.assertTrue(
             all(item["rank_score"] > 0 for item in result["results"])
         )
+        image = next(
+            item for item in result["results"] if item["result_type"] == "image"
+        )
+        self.assertEqual(image["asset_id"], "asset_image")
+        self.assertEqual(image["asset_source_id"], "src_image")
+        self.assertEqual(image["asset_sha256"], IMAGE_SHA)
+        self.assertNotIn("absolute_path", image)
+        self.assertNotIn("path_status", image)
+
+        draft = self.gateway().timeline_draft(
+            project_id="proj_image",
+            items=[
+                {
+                    "kind": "image",
+                    "asset_id": image["asset_id"],
+                    "asset_source_id": image["asset_source_id"],
+                    "asset_sha256": image["asset_sha256"],
+                    "timeline_duration_ms": 3000,
+                    "match_id": image["asset_id"],
+                }
+            ],
+            created_at="2026-08-12T14:00:00Z",
+        )
+        self.assertTrue(draft["validation"]["valid"])
+
+    def test_creator_context_is_confirmed_sanitized_and_legacy_safe(self) -> None:
+        context = self.gateway().creator_context()
+        self.assertEqual(context["status"], "completed")
+        self.assertEqual(context["profile_revision"], 2)
+        self.assertEqual(context["profile_source"], "confirmed_suggestion")
+        self.assertEqual(context["profile"]["platform"], "Xiaohongshu")
+        self.assertNotIn("raw_prompt", context["profile"])
+        self.assertEqual(context["evidence_summary"]["count"], 2)
+        self.assertFalse(context["evidence_summary"]["raw_references_included"])
+        self.assertTrue(context["learning"]["confirmed_only"])
+        self.assertFalse(context["learning"]["hidden_inference"])
+
+        legacy = self.root / "legacy-profile.db"
+        with closing(sqlite3.connect(legacy)) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.executescript(
+                """
+                CREATE TABLE image_index (
+                    id TEXT PRIMARY KEY,filename TEXT,relative_path TEXT
+                );
+                """
+            )
+            connection.commit()
+        unavailable = self.gateway(legacy).creator_context()
+        self.assertEqual(unavailable["status"], "capability_unavailable")
+        self.assertEqual(unavailable["profile"], {})
+        self.assertFalse(unavailable["capability_available"])
+        empty_inbox = self.gateway(legacy).inbox_list()
+        self.assertEqual(empty_inbox["status"], "capability_unavailable")
+        self.assertEqual(empty_inbox["assets"], [])
+
+    def test_inbox_filters_paginates_and_marks_archived_explicit_details(self) -> None:
+        inbox = self.gateway().inbox_list(state="inbox")
+        self.assertEqual([item["asset_id"] for item in inbox["assets"]], ["asset_image"])
+        kept = self.gateway().inbox_list(state="kept", kinds=["video"])
+        self.assertEqual([item["asset_id"] for item in kept["assets"]], ["asset_video"])
+        self.assertTrue(kept["assets"][0]["review"]["has_note"])
+        archived = self.gateway().inbox_list(state="archived")
+        self.assertEqual([item["asset_id"] for item in archived["assets"]], ["asset_audio"])
+        self.assertNotIn("relative_path", archived["assets"][0])
+        self.assertEqual(
+            archived["assets"][0]["provenance"]["asset_sha256"], AUDIO_SHA
+        )
+
+        first = self.gateway().inbox_list(state="all", limit=1)
+        self.assertEqual(first["result_count"], 1)
+        self.assertIsNotNone(first["next_cursor"])
+        second = self.gateway().inbox_list(
+            state="all", limit=10, cursor=first["next_cursor"]
+        )
+        self.assertEqual(second["result_count"], 2)
+        self.assertTrue(
+            {item["asset_id"] for item in first["assets"]}.isdisjoint(
+                {item["asset_id"] for item in second["assets"]}
+            )
+        )
+
+        explicit = self.gateway().media_get("asset_audio")
+        self.assertEqual(explicit["asset"]["review"]["inbox_state"], "archived")
+
+    def test_archived_assets_are_excluded_from_default_photo_and_video_search(self) -> None:
+        with closing(sqlite3.connect(self.db)) as connection:
+            connection.executemany(
+                "INSERT INTO asset_review_revisions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        "asset_image",
+                        1,
+                        "archived",
+                        0,
+                        0,
+                        None,
+                        "{}",
+                        "2026-08-12T15:00:00Z",
+                    ),
+                    (
+                        "asset_video",
+                        2,
+                        "archived",
+                        1,
+                        1,
+                        None,
+                        "{}",
+                        "2026-08-12T15:00:00Z",
+                    ),
+                ],
+            )
+            connection.commit()
+        self.assertEqual(self.gateway().search("海边日落")["results"], [])
+        mixed = self.gateway().mixed_search("海边日落")
+        self.assertEqual(mixed["results"], [])
+        self.assertEqual(self.gateway().video_search("海边日落")["results"], [])
 
     def test_failed_higher_analysis_revision_is_never_searchable(self) -> None:
         result = self.gateway().video_search("幽灵")
@@ -392,6 +596,7 @@ class VideoTimelineTests(unittest.TestCase):
     def test_legacy_explicit_head_compatibility_does_not_use_max_revision(self) -> None:
         legacy = self.root / "legacy.db"
         with closing(sqlite3.connect(legacy)) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript(
                 """
                 CREATE TABLE assets (
@@ -421,12 +626,14 @@ class VideoTimelineTests(unittest.TestCase):
 
     def test_media_list_is_mixed_read_only_and_path_minimal(self) -> None:
         result = self.gateway().media_list(limit=10)
-        self.assertEqual({item["kind"] for item in result["assets"]}, {"image", "video", "audio"})
+        self.assertEqual({item["kind"] for item in result["assets"]}, {"image", "video"})
         self.assertEqual(
             {item["asset_source_id"] for item in result["assets"]},
-            {"src_image", "src_video", "src_audio"},
+            {"src_image", "src_video"},
         )
         self.assertTrue(all("absolute_path" not in item for item in result["assets"]))
+        archived = self.gateway().media_get("asset_audio")["asset"]
+        self.assertEqual(archived["review"]["inbox_state"], "archived")
 
     def test_media_get_returns_only_current_video_segments(self) -> None:
         detail = self.gateway().media_get("asset_video")
@@ -578,7 +785,7 @@ class VideoTimelineTests(unittest.TestCase):
         self.assertTrue(detail["validation"]["valid"])
 
     def test_safe_default_denies_network_and_never_writes_sqlite(self) -> None:
-        before = self.db.read_bytes()
+        before = _sqlite_source_state(self.db)
         gateway = self.gateway()
         with mock.patch(
             "memolens_core.socket.getaddrinfo",
@@ -588,10 +795,12 @@ class VideoTimelineTests(unittest.TestCase):
             side_effect=AssertionError("socket attempted"),
         ):
             gateway.status()
+            gateway.creator_context()
+            gateway.inbox_list(state="all")
             gateway.video_search("日落")
             gateway.media_list()
             gateway.timeline_list()
-        self.assertEqual(self.db.read_bytes(), before)
+        self.assertEqual(_sqlite_source_state(self.db), before)
 
     def test_api_opt_in_still_never_grants_write_render_or_export(self) -> None:
         gateway = self.gateway(trust=True)
@@ -614,12 +823,14 @@ class VideoTimelineTests(unittest.TestCase):
         expected_titles = {
             "memolens_status": "Check MemoLens readiness",
             "memolens_search": "Find photo memories",
+            "memolens_creator_context": "Read confirmed creator context",
             "memolens_mixed_search": "Find photos and video moments",
             "memolens_memories": "Explore memory themes",
             "memolens_cleanup": "Review cleanup suggestions",
             "memolens_video_search": "Find moments inside videos",
             "memolens_media_list": "Browse indexed media",
             "memolens_media_get": "Open media details",
+            "memolens_inbox_list": "Review the media inbox",
             "memolens_timeline_draft": "Shape an unsaved story timeline",
             "memolens_timeline_revise_draft": (
                 "Refine the unsaved story timeline"
@@ -649,6 +860,11 @@ class VideoTimelineTests(unittest.TestCase):
                     "openWorldHint": False,
                 },
             )
+        exact = {
+            tool["name"]: tool["outputSchema"] for tool in TOOLS
+        }
+        self.assertFalse(exact["memolens_creator_context"]["additionalProperties"])
+        self.assertFalse(exact["memolens_inbox_list"]["additionalProperties"])
 
     def test_cli_video_search_is_clean_json_from_non_repo_cwd(self) -> None:
         env = os.environ.copy()

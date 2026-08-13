@@ -15,6 +15,7 @@ import {
   verifyBackendHealthPayload,
 } from "../electron-dist/electron/backendManager.js";
 import {
+  commitDesktopLibrarySelection,
   loadDesktopSettings,
   resolveLibraryDbPath,
   saveDesktopSettings,
@@ -30,6 +31,7 @@ const identity = {
 const autoStartSettings = {
   pythonCommand: "python-custom",
   autoStartBackend: true,
+  libraryConfigured: false,
   defaultLibraryDir: null,
   defaultDbPath: null,
 };
@@ -159,6 +161,9 @@ test("uses an opaque stable app-state database and persists the selected library
   process.env.MEMOLENS_APP_STATE_DIR = appStateDir;
 
   try {
+    const cleanSettings = await loadDesktopSettings(process.cwd());
+    assert.equal(cleanSettings.libraryConfigured, false);
+
     const libraryPath = join(appStateDir, "outside", "photos");
     const equivalentPath = join(libraryPath, "child", "..");
     const dbPath = resolveLibraryDbPath(libraryPath);
@@ -174,8 +179,30 @@ test("uses an opaque stable app-state database and persists the selected library
       defaultDbPath: dbPath,
     });
     const restored = await loadDesktopSettings(process.cwd());
+    assert.equal(restored.libraryConfigured, true);
     assert.equal(restored.defaultLibraryDir, libraryPath);
     assert.equal(restored.defaultDbPath, dbPath);
+
+    const nextLibraryPath = join(appStateDir, "outside", "videos-and-photos");
+    const nextDbPath = resolveLibraryDbPath(nextLibraryPath);
+    await assert.rejects(
+      commitDesktopLibrarySelection(process.cwd(), {
+        folderPath: nextLibraryPath,
+        dbPath,
+      }),
+      /unexpected database path/,
+    );
+    const afterRejectedCommit = await loadDesktopSettings(process.cwd());
+    assert.equal(afterRejectedCommit.defaultLibraryDir, libraryPath);
+    assert.equal(afterRejectedCommit.defaultDbPath, dbPath);
+
+    const committed = await commitDesktopLibrarySelection(process.cwd(), {
+      folderPath: nextLibraryPath,
+      dbPath: nextDbPath,
+    });
+    assert.equal(committed.libraryConfigured, true);
+    assert.equal(committed.defaultLibraryDir, nextLibraryPath);
+    assert.equal(committed.defaultDbPath, nextDbPath);
   } finally {
     if (previousAppStateDir === undefined) {
       delete process.env.MEMOLENS_APP_STATE_DIR;

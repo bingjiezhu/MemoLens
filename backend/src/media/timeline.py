@@ -3,10 +3,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import re
+import sqlite3
 from datetime import datetime, timezone
 from typing import Iterable
 
-from core.media_db import MediaRepository, canonical_json, new_id
+from core.media_db import IdempotentWriteResult, MediaRepository, canonical_json, new_id
 from .timeline_operations import TimelineEditor, operation_summary, reflow_timeline
 from .timeline_validation import MAX_TIMELINE_DURATION_MS, TimelineValidator
 
@@ -38,7 +39,13 @@ class TimelineService:
         self._validator = TimelineValidator(repository)
         self._editor = TimelineEditor(repository, self._clip_from_match)
 
-    def create_from_project(self, project_id: str, *, brief_revision: int = 1) -> dict[str, object]:
+    def create_from_project(
+        self,
+        project_id: str,
+        *,
+        brief_revision: int = 1,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
         project = self.repository.get_project(project_id)
         brief_row = self.repository.get_brief(project_id, brief_revision)
         if project is None or brief_row is None:
@@ -119,6 +126,7 @@ class TimelineService:
             timeline=timeline,
             provenance=timeline["provenance"],
             validation_status="valid",
+            connection=connection,
         )
         return {
             "timeline": saved["timeline"],
@@ -126,6 +134,38 @@ class TimelineService:
             "validation": validation,
             "diff": [],
         }
+
+    def create_from_project_idempotent(
+        self,
+        project_id: str,
+        *,
+        brief_revision: int,
+        idempotency_scope: str,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> IdempotentWriteResult:
+        def mutation(connection: sqlite3.Connection) -> tuple[dict[str, object], int, str]:
+            result = self.create_from_project(
+                project_id,
+                brief_revision=brief_revision,
+                connection=connection,
+            )
+            timeline_id = str(result["timeline"]["id"])
+            body = {
+                "object": "timeline.revision",
+                "schema_version": "1",
+                "id": timeline_id,
+                **result,
+            }
+            return body, 201, timeline_id
+
+        return self.repository.execute_idempotent_write(
+            scope=idempotency_scope,
+            key=idempotency_key,
+            request_sha256=request_sha256,
+            resource_type="timeline",
+            mutation=mutation,
+        )
 
     def _clip_from_match(
         self,
@@ -364,7 +404,14 @@ class TimelineService:
             "content_sha256": hashlib.sha256(canonical_json(timeline).encode()).hexdigest(),
         }
 
-    def revise(self, timeline_id: str, *, base_revision: int, operations: list[dict[str, object]]) -> dict[str, object]:
+    def revise(
+        self,
+        timeline_id: str,
+        *,
+        base_revision: int,
+        operations: list[dict[str, object]],
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
         preview = self.preview_revision(timeline_id, base_revision=base_revision, operations=operations)
         timeline = preview["timeline"]
         current = self.repository.get_timeline(timeline_id, base_revision)
@@ -378,8 +425,43 @@ class TimelineService:
             timeline=timeline,
             provenance=timeline["provenance"],
             validation_status="valid",
+            connection=connection,
         )
         return {**preview, "timeline": saved["timeline"], "content_sha256": saved["content_sha256"]}
+
+    def revise_idempotent(
+        self,
+        timeline_id: str,
+        *,
+        base_revision: int,
+        operations: list[dict[str, object]],
+        idempotency_scope: str,
+        idempotency_key: str,
+        request_sha256: str,
+    ) -> IdempotentWriteResult:
+        def mutation(connection: sqlite3.Connection) -> tuple[dict[str, object], int, str]:
+            result = self.revise(
+                timeline_id,
+                base_revision=base_revision,
+                operations=operations,
+                connection=connection,
+            )
+            body = {
+                "object": "timeline.revision",
+                "schema_version": "1",
+                "id": timeline_id,
+                **result,
+            }
+            return body, 201, f"{timeline_id}:{result['timeline']['revision']}"
+
+        return self.repository.execute_idempotent_write(
+            scope=idempotency_scope,
+            key=idempotency_key,
+            request_sha256=request_sha256,
+            resource_type="timeline_revision",
+            mutation=mutation,
+        )
+
 
 def clips_in_render_order(timeline: dict[str, object]) -> Iterable[dict[str, object]]:
     tracks = timeline.get("tracks") if isinstance(timeline.get("tracks"), list) else []

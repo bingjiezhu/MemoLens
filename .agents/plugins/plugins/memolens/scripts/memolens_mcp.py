@@ -38,6 +38,231 @@ def _output_schema(
     }
 
 
+def _exact_output_schema(
+    properties: dict[str, Any], required: list[str]
+) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": False,
+    }
+
+
+def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+SAFETY_OUTPUT = _exact_output_schema(
+    {
+        "read_only": {"const": True},
+        "photos_opened_by_plugin": {"const": False},
+        "photos_modified": {"const": False},
+        "media_modified": {"const": False},
+        "timeline_persisted": {"const": False},
+        "rendered": {"const": False},
+        "exported": {"const": False},
+        "remote_network_allowed": {"const": False},
+    },
+    [
+        "read_only",
+        "photos_opened_by_plugin",
+        "photos_modified",
+        "media_modified",
+        "timeline_persisted",
+        "rendered",
+        "exported",
+        "remote_network_allowed",
+    ],
+)
+
+
+PROFILE_OUTPUT = {
+    "type": "object",
+    "properties": {
+        "platform": {"type": "string"},
+        "audience": {"type": "string"},
+        "default_duration_ms": {"type": "integer"},
+        "duration_ms": {"type": "integer"},
+        "aspect_ratio": {"type": "string"},
+        "tone": {"type": "string"},
+        "pace": {"type": "string"},
+        "narrative_arc": {"type": "string"},
+        "must_include": {"type": "array", "items": {"type": "string"}},
+        "must_exclude": {"type": "array", "items": {"type": "string"}},
+    },
+    "additionalProperties": False,
+}
+
+
+CREATOR_CONTEXT_OUTPUT = _exact_output_schema(
+    {
+        "object": {"const": "memolens.creator_context"},
+        "schema_version": {"const": "1"},
+        "status": {"enum": ["completed", "capability_unavailable"]},
+        "source": {"const": "sqlite_read_only"},
+        "mode": {"const": "safe_default_read_only"},
+        "capability_available": {"type": "boolean"},
+        "profile_id": _nullable({"type": "string"}),
+        "profile_revision": {"type": "integer", "minimum": 0},
+        "profile_content_sha256": _nullable(
+            {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}
+        ),
+        "profile_source": _nullable(
+            {"enum": ["user_edit", "confirmed_suggestion", "reset"]}
+        ),
+        "profile": PROFILE_OUTPUT,
+        "evidence_summary": _exact_output_schema(
+            {
+                "count": {"type": "integer", "minimum": 0},
+                "by_kind": {
+                    "type": "object",
+                    "additionalProperties": {"type": "integer", "minimum": 0},
+                },
+                "project_reference_count": {"type": "integer", "minimum": 0},
+                "asset_reference_count": {"type": "integer", "minimum": 0},
+                "raw_references_included": {"const": False},
+            },
+            [
+                "count",
+                "by_kind",
+                "project_reference_count",
+                "asset_reference_count",
+                "raw_references_included",
+            ],
+        ),
+        "learning": _exact_output_schema(
+            {
+                "policy": {"const": "confirmed_only"},
+                "confirmed_only": {"const": True},
+                "hidden_inference": {"const": False},
+                "accepted_sources": {
+                    "type": "array",
+                    "items": {
+                        "enum": ["user_edit", "confirmed_suggestion", "reset"]
+                    },
+                },
+            },
+            ["policy", "confirmed_only", "hidden_inference", "accepted_sources"],
+        ),
+        "write_boundary": {"type": "string"},
+        "safety": SAFETY_OUTPUT,
+    },
+    [
+        "object",
+        "schema_version",
+        "status",
+        "source",
+        "mode",
+        "capability_available",
+        "profile_id",
+        "profile_revision",
+        "profile_content_sha256",
+        "profile_source",
+        "profile",
+        "evidence_summary",
+        "learning",
+        "write_boundary",
+        "safety",
+    ],
+)
+
+
+INBOX_ASSET_OUTPUT = _exact_output_schema(
+    {
+        "asset_id": {"type": "string"},
+        "media_kind": {"enum": ["image", "video", "audio"]},
+        "filename": {"type": "string"},
+        "captured_at": _nullable({"type": "string"}),
+        "dimensions": _exact_output_schema(
+            {
+                "width": _nullable({"type": "integer", "minimum": 1}),
+                "height": _nullable({"type": "integer", "minimum": 1}),
+            },
+            ["width", "height"],
+        ),
+        "timing": _exact_output_schema(
+            {"duration_ms": _nullable({"type": "integer", "minimum": 1})},
+            ["duration_ms"],
+        ),
+        "review": _exact_output_schema(
+            {
+                "revision": {"type": "integer", "minimum": 0},
+                "inbox_state": {"enum": ["inbox", "kept", "archived"]},
+                "favorite": {"type": "boolean"},
+                "project_ready": {"type": "boolean"},
+                "has_note": {"type": "boolean"},
+            },
+            [
+                "revision",
+                "inbox_state",
+                "favorite",
+                "project_ready",
+                "has_note",
+            ],
+        ),
+        "provenance": _exact_output_schema(
+            {
+                "asset_source_id": {"type": "string"},
+                "asset_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-fA-F]{64}$",
+                },
+                "source_availability": {"type": "string"},
+            },
+            ["asset_source_id", "asset_sha256", "source_availability"],
+        ),
+    },
+    [
+        "asset_id",
+        "media_kind",
+        "filename",
+        "captured_at",
+        "dimensions",
+        "timing",
+        "review",
+        "provenance",
+    ],
+)
+
+
+INBOX_LIST_OUTPUT = _exact_output_schema(
+    {
+        "object": {"const": "memolens.inbox_list"},
+        "schema_version": {"const": "1"},
+        "status": {"enum": ["completed", "capability_unavailable"]},
+        "source": {"const": "sqlite_read_only"},
+        "mode": {"const": "safe_default_read_only"},
+        "capability_available": {"type": "boolean"},
+        "state": {"enum": ["inbox", "kept", "archived", "all"]},
+        "kinds": {
+            "type": "array",
+            "items": {"enum": ["image", "video", "audio"]},
+        },
+        "result_count": {"type": "integer", "minimum": 0},
+        "assets": {"type": "array", "items": INBOX_ASSET_OUTPUT},
+        "next_cursor": _nullable({"type": "string"}),
+        "review_boundary": {"type": "string"},
+        "safety": SAFETY_OUTPUT,
+    },
+    [
+        "object",
+        "schema_version",
+        "status",
+        "source",
+        "mode",
+        "capability_available",
+        "state",
+        "kinds",
+        "result_count",
+        "assets",
+        "next_cursor",
+        "review_boundary",
+        "safety",
+    ],
+)
+
+
 COMMON_OUTPUT = _output_schema(
     {
         "object": {"type": "string"},
@@ -102,6 +327,23 @@ TOOLS: list[dict[str, Any]] = [
         ),
         "annotations": {
             "title": "Find photo memories",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
+        "name": "memolens_creator_context",
+        "title": "Read confirmed creator context",
+        "description": (
+            "Read the latest user-confirmed Creator Memory profile and evidence summary "
+            "directly from local SQLite. Never returns raw prompts or hidden inferences."
+        ),
+        "inputSchema": _schema(),
+        "outputSchema": CREATOR_CONTEXT_OUTPUT,
+        "annotations": {
+            "title": "Read confirmed creator context",
             "readOnlyHint": True,
             "destructiveHint": False,
             "idempotentHint": True,
@@ -298,6 +540,43 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "memolens_inbox_list",
+        "title": "Review the media inbox",
+        "description": (
+            "List current local photo, video, and audio review state with stable source, "
+            "hash, and timing provenance. Suggestions must be confirmed in the MemoLens app."
+        ),
+        "inputSchema": _schema(
+            {
+                "state": {
+                    "enum": ["inbox", "kept", "archived", "all"],
+                    "default": "inbox",
+                },
+                "kinds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": True,
+                    "items": {"enum": ["image", "video", "audio"]},
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 24,
+                },
+                "cursor": {"type": "string", "minLength": 1, "maxLength": 512},
+            }
+        ),
+        "outputSchema": INBOX_LIST_OUTPUT,
+        "annotations": {
+            "title": "Review the media inbox",
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    },
+    {
         "name": "memolens_timeline_draft",
         "title": "Shape an unsaved story timeline",
         "description": (
@@ -469,12 +748,14 @@ def call_tool(name: str, arguments: Any, gateway: MemoLensGateway) -> dict[str, 
     allowed: dict[str, set[str]] = {
         "memolens_status": set(),
         "memolens_search": {"query", "limit"},
+        "memolens_creator_context": set(),
         "memolens_mixed_search": {"query", "limit"},
         "memolens_memories": {"query", "limit"},
         "memolens_cleanup": set(),
         "memolens_video_search": {"query", "limit"},
         "memolens_media_list": {"kinds", "limit", "cursor"},
         "memolens_media_get": {"asset_id"},
+        "memolens_inbox_list": {"state", "kinds", "limit", "cursor"},
         "memolens_timeline_draft": {
             "project_id",
             "items",
@@ -505,6 +786,8 @@ def call_tool(name: str, arguments: Any, gateway: MemoLensGateway) -> dict[str, 
         if not isinstance(query, str):
             raise MemoLensError("query must be a string.", code="invalid_argument")
         return gateway.search(query, limit=args.get("limit", 12))
+    if name == "memolens_creator_context":
+        return gateway.creator_context()
     if name == "memolens_mixed_search":
         query = args.get("query")
         if not isinstance(query, str):
@@ -530,6 +813,13 @@ def call_tool(name: str, arguments: Any, gateway: MemoLensGateway) -> dict[str, 
         )
     if name == "memolens_media_get":
         return gateway.media_get(args.get("asset_id"))
+    if name == "memolens_inbox_list":
+        return gateway.inbox_list(
+            state=args.get("state", "inbox"),
+            kinds=args.get("kinds"),
+            limit=args.get("limit", 24),
+            cursor=args.get("cursor"),
+        )
     if name == "memolens_timeline_draft":
         return gateway.timeline_draft(
             project_id=args.get("project_id"),
@@ -588,8 +878,9 @@ def handle_message(message: Any, gateway: MemoLensGateway) -> dict[str, Any] | N
                 "serverInfo": SERVER_INFO,
                 "instructions": (
                     "All MemoLens tools are local and read-only. The safe default never contacts "
-                    "localhost and supports SQLite media search/read plus in-memory timeline "
-                    "drafting and validation. Do not enable local API trust for the user. "
+                    "localhost and supports confirmed Creator Memory, Media Inbox, SQLite media "
+                    "search/read, and in-memory timeline drafting and validation. Do not enable "
+                    "local API trust for the user. Inbox decisions require app confirmation. "
                     "No save, render, export, delete, or arbitrary-path tool is exposed."
                 ),
             },

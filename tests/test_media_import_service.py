@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,9 +21,27 @@ from core.media_db import MediaRepository
 class RecordingJobRunner:
     def __init__(self) -> None:
         self.submitted: list[str] = []
+        self.submit_attempts: list[str] = []
 
     def submit(self, job_id: str) -> None:
-        self.submitted.append(job_id)
+        self.submit_attempts.append(job_id)
+        # Match MediaJobRunner's process-local job-id deduplication contract.
+        if job_id not in self.submitted:
+            self.submitted.append(job_id)
+
+
+class FailOnceJobRunner(RecordingJobRunner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failed = False
+
+    def submit(self, job_id: str) -> None:
+        self.submit_attempts.append(job_id)
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("simulated process exit before job dispatch")
+        if job_id not in self.submitted:
+            self.submitted.append(job_id)
 
 
 class MediaImportServiceTests(unittest.TestCase):
@@ -67,9 +87,35 @@ class MediaImportServiceTests(unittest.TestCase):
         self.assertEqual(result.jobs, [])
         self.assertEqual(result.rejected, [])
         self.assertEqual(self.runner.submitted, [])
-        self.assertIsNone(
-            self.repository.get_asset_source(self.repository.source_id(self.root_id, image_path.name))
+        self.assertIsNone(self.repository.get_asset_source(self.repository.source_id(self.root_id, image_path.name)))
+
+    def test_prepare_is_filesystem_only_and_never_dispatches(self) -> None:
+        image_path = self.library / "prepared.jpg"
+        Image.new("RGB", (24, 12), "purple").save(image_path)
+        video_path = self.library / "prepared.mp4"
+        video_path.write_bytes(b"prepared-video")
+        with sqlite3.connect(self.repository.db_path) as connection:
+            before = {
+                table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("assets", "asset_sources", "analysis_runs", "media_jobs")
+            }
+
+        plan = self.service.prepare_import(
+            root=self.library,
+            payload={
+                "relative_paths": [image_path.name, video_path.name],
+                "recursive": False,
+            },
         )
+
+        self.assertEqual(len(plan.assets), 2)
+        with sqlite3.connect(self.repository.db_path) as connection:
+            after = {
+                table: connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                for table in ("assets", "asset_sources", "analysis_runs", "media_jobs")
+            }
+        self.assertEqual(after, before)
+        self.assertEqual(self.runner.submit_attempts, [])
 
     def test_imported_unchanged_rebound_and_invalid_image_results_are_stable(self) -> None:
         image_path = self.library / "still.jpg"
@@ -143,7 +189,8 @@ class MediaImportServiceTests(unittest.TestCase):
         self.assertEqual(second.assets[0]["action"], "unchanged")
         self.assertEqual(second.jobs[0]["id"], first.jobs[0]["id"])
         self.assertTrue(second.jobs[0]["reused"])
-        self.assertEqual(self.runner.submitted, [first.jobs[0]["id"], first.jobs[0]["id"]])
+        self.assertEqual(self.runner.submitted, [first.jobs[0]["id"]])
+        self.assertEqual(self.runner.submit_attempts, [first.jobs[0]["id"]] * 2)
 
     def test_video_only_discovery_does_not_charge_photos_to_manifest_limit(self) -> None:
         for index in range(501):
@@ -231,22 +278,18 @@ class MediaImportServiceTests(unittest.TestCase):
                 self.service.import_assets(root_id=self.root_id, root=self.library, payload=payload)
 
     def test_route_keeps_http_status_public_jobs_and_idempotent_replay(self) -> None:
-        app = Flask(__name__)
-        app.config.update(
-            DESKTOP_SESSION_TOKEN="desktop-token",
-            SETTINGS=SimpleNamespace(image_library_dir=self.library),
-        )
-        app.extensions["media_repository"] = self.repository
-        app.extensions["media_job_runner"] = self.runner
-        app.register_blueprint(api_blueprint)
-        client = app.test_client()
-        auth = {"X-MemoLens-Desktop-Token": "desktop-token"}
+        app, client, auth = self._route_client(self.runner)
 
         image_path = self.library / "still.jpg"
         Image.new("RGB", (16, 9), "green").save(image_path)
         dry_run = client.post(
             "/v1/assets/import",
-            json={"relative_paths": [image_path.name], "recursive": False, "dry_run": True},
+            json={
+                "db_path": str(self.repository.db_path),
+                "relative_paths": [image_path.name],
+                "recursive": False,
+                "dry_run": True,
+            },
             headers={**auth, "Idempotency-Key": "dry-run"},
         )
         self.assertEqual(dry_run.status_code, 200)
@@ -257,6 +300,7 @@ class MediaImportServiceTests(unittest.TestCase):
         video_path = self.library / "clip.mp4"
         video_path.write_bytes(b"route-video")
         video_payload = {
+            "db_path": str(self.repository.db_path),
             "relative_paths": [video_path.name],
             "recursive": False,
             "kinds": ["video"],
@@ -272,6 +316,14 @@ class MediaImportServiceTests(unittest.TestCase):
         self.assertNotIn("database_uuid", queued.json["job"])
         self.assertEqual(self.runner.submitted, [queued.json["job_id"]])
 
+        # Exact replay is resolved before touching the source filesystem, and a
+        # job already owned by a running worker is not dispatched again.
+        self.repository.update_media_job(
+            queued.json["job_id"],
+            status="running",
+            stage="probing",
+        )
+        video_path.unlink()
         replay = client.post(
             "/v1/assets/import",
             json=video_payload,
@@ -280,6 +332,146 @@ class MediaImportServiceTests(unittest.TestCase):
         self.assertEqual(replay.status_code, 202)
         self.assertEqual(replay.json, queued.json)
         self.assertEqual(self.runner.submitted, [queued.json["job_id"]])
+        self.assertEqual(self.runner.submit_attempts, [queued.json["job_id"]])
+
+        conflict = client.post(
+            "/v1/assets/import",
+            json={**video_payload, "recursive": True},
+            headers={**auth, "Idempotency-Key": "queue-video"},
+        )
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json["code"], "idempotency_conflict")
+
+        with sqlite3.connect(self.repository.db_path) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM media_jobs WHERE asset_id=?",
+                    (queued.json["asset_ids"][0],),
+                ).fetchone()[0],
+                1,
+            )
+
+    def test_route_rolls_back_domain_and_snapshot_when_apply_fails(self) -> None:
+        _, client, auth = self._route_client(self.runner, testing=False)
+        video_path = self.library / "rollback.mp4"
+        video_path.write_bytes(b"rollback-video")
+        payload = {
+            "db_path": str(self.repository.db_path),
+            "relative_paths": [video_path.name],
+            "recursive": False,
+            "kinds": ["video"],
+        }
+        original_apply = MediaImportService.apply_prepared
+
+        def fail_after_apply(connection, *, root_id, plan):
+            original_apply(connection, root_id=root_id, plan=plan)
+            raise RuntimeError("simulated domain/store crash")
+
+        with patch.object(MediaImportService, "apply_prepared", side_effect=fail_after_apply):
+            response = client.post(
+                "/v1/assets/import",
+                json=payload,
+                headers={**auth, "Idempotency-Key": "rollback-import"},
+            )
+        self.assertEqual(response.status_code, 500)
+        source_id = self.repository.source_id(self.root_id, video_path.name)
+        self.assertIsNone(self.repository.get_asset_source(source_id))
+        with sqlite3.connect(self.repository.db_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM media_jobs").fetchone()[0], 0)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM idempotency_records WHERE scope=? AND key=?",
+                    ("desktop:POST:/v1/assets/import", "rollback-import"),
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_route_rolls_back_domain_when_snapshot_freeze_fails(self) -> None:
+        _, client, auth = self._route_client(self.runner, testing=False)
+        video_path = self.library / "freeze-failure.mp4"
+        video_path.write_bytes(b"freeze-failure-video")
+        payload = {
+            "db_path": str(self.repository.db_path),
+            "relative_paths": [video_path.name],
+            "recursive": False,
+            "kinds": ["video"],
+        }
+        with patch.object(
+            MediaRepository,
+            "_idempotency_store_success",
+            side_effect=RuntimeError("simulated snapshot store crash"),
+        ):
+            response = client.post(
+                "/v1/assets/import",
+                json=payload,
+                headers={**auth, "Idempotency-Key": "freeze-failure"},
+            )
+        self.assertEqual(response.status_code, 500)
+        source_id = self.repository.source_id(self.root_id, video_path.name)
+        self.assertIsNone(self.repository.get_asset_source(source_id))
+        with sqlite3.connect(self.repository.db_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM media_jobs").fetchone()[0], 0)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM idempotency_records WHERE scope=? AND key=?",
+                    ("desktop:POST:/v1/assets/import", "freeze-failure"),
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_route_replay_recovers_commit_before_submit_without_duplicate_job(self) -> None:
+        runner = FailOnceJobRunner()
+        _, client, auth = self._route_client(runner, testing=False)
+        video_path = self.library / "recover.mp4"
+        video_path.write_bytes(b"recover-video")
+        payload = {
+            "db_path": str(self.repository.db_path),
+            "relative_paths": [video_path.name],
+            "recursive": False,
+            "kinds": ["video"],
+        }
+        headers = {**auth, "Idempotency-Key": "recover-import"}
+
+        lost_response = client.post("/v1/assets/import", json=payload, headers=headers)
+        self.assertEqual(lost_response.status_code, 500)
+        with sqlite3.connect(self.repository.db_path) as connection:
+            row = connection.execute(
+                """SELECT response_json,response_status
+                     FROM idempotency_records WHERE scope=? AND key=?""",
+                ("desktop:POST:/v1/assets/import", "recover-import"),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            frozen = json.loads(row[0])
+            self.assertEqual(row[1], 202)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM media_jobs").fetchone()[0], 1)
+
+        # A retry after process restart must not need the source to still exist.
+        video_path.unlink()
+        recovered = client.post("/v1/assets/import", json=payload, headers=headers)
+        self.assertEqual(recovered.status_code, 202)
+        self.assertEqual(recovered.json, frozen)
+        self.assertEqual(runner.submitted, [recovered.json["job_id"]])
+        with sqlite3.connect(self.repository.db_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM media_jobs").fetchone()[0], 1)
+
+    def _route_client(
+        self,
+        runner: RecordingJobRunner,
+        *,
+        testing: bool = True,
+    ):
+        app = Flask(__name__)
+        app.config.update(
+            DESKTOP_SESSION_TOKEN="desktop-token",
+            SETTINGS=SimpleNamespace(image_library_dir=self.library),
+            TESTING=testing,
+        )
+        app.extensions["media_repository"] = self.repository
+        app.extensions["media_job_runner"] = runner
+        app.register_blueprint(api_blueprint)
+        if not testing:
+            app.logger.disabled = True
+        return app, app.test_client(), {"X-MemoLens-Desktop-Token": "desktop-token"}
 
 
 if __name__ == "__main__":
