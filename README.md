@@ -5,20 +5,12 @@
 Drop photos and videos into one private library. MemoLens remembers the material, helps you review it without turning memories into a cleanup chore, and brings back the right source-grounded moments when you are ready to make a post. Use the focused desktop app for organizing, confirmation, and preview; use Codex as the conversational creative surface without adding another agent system or model key.
 
 <p align="center">
-  <video
-    src="https://github.com/bingjiezhu/MemoLens/releases/download/promo/memolens-promo.mp4"
-    poster="docs/assets/memolens-home-v050.jpg"
-    controls
-    playsinline
-    preload="metadata"
-    width="100%">
-    <a href="https://github.com/bingjiezhu/MemoLens/releases/download/promo/memolens-promo.mp4">
-      <img src="docs/assets/memolens-home-v050.jpg" alt="MemoLens 50-second walkthrough — remember locally, review Inbox, find a moment, make a first cut" width="100%" />
-    </a>
-  </video>
+  <a href="https://github.com/bingjiezhu/MemoLens/releases/download/promo/memolens-promo.mp4">
+    <img src="docs/assets/memolens-promo-poster.jpg" alt="Watch the 50-second MemoLens walkthrough — remember locally, review Inbox, find a moment, make a first cut" width="100%" />
+  </a>
 </p>
 
-<p align="center"><sub>50-second walkthrough (English captions, instrumental score, no voiceover). <a href="docs/assets/memolens-promo.mp4">Download MP4</a> · one private workspace from remembered media to a reviewable first cut.</sub></p>
+<p align="center"><sub>▶ 50-second walkthrough (English captions, instrumental score, no voiceover). <a href="https://github.com/bingjiezhu/MemoLens/releases/download/promo/memolens-promo.mp4">Play MP4</a> · <a href="docs/assets/memolens-promo.mp4">download</a></sub></p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
@@ -73,6 +65,10 @@ Original files, indexes, keyframes, previews, and timelines stay local in the de
 When an external vision profile is unavailable, MemoLens can fall back to metadata-derived descriptions and keep query / copy flowing through the configured text profile.
 
 Reverse geocoding is implemented but **off by default** (`geocode.enabled: false` / `ENABLE_REVERSE_GEOCODE=false`). Enabling it sends each GPS-tagged photo's precise latitude/longitude to OpenStreetMap Nominatim, whose privacy and retention terms then apply.
+
+<p align="center">
+  <img src="docs/assets/memolens-home-v050.jpg" alt="MemoLens 0.5 home workspace with Media Inbox and Creator Memory summaries" width="100%" />
+</p>
 
 <p align="center">
   <img src="docs/assets/memolens-inbox-v050.jpg" alt="MemoLens 0.5 Media Inbox with reversible photo and video review" width="72%" />
