@@ -20,7 +20,7 @@ body:
       options:
         - Electron desktop app
         - Browser + local backend
-        - Codex plugin
+        - Local MCP plugin
         - Photon Bot
         - Indexing or retrieval backend
     validations:

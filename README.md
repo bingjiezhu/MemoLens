@@ -2,7 +2,7 @@
 
 **A private media home for creators — remembered locally, ready when inspiration arrives.**
 
-Drop photos and videos into one private library. MemoLens remembers the material, helps you review it without turning memories into a cleanup chore, and brings back the right source-grounded moments when you are ready to make a post. Use the focused desktop app for organizing, confirmation, and preview; use Codex as the conversational creative surface without adding another agent system or model key.
+Drop photos and videos into one private library. MemoLens remembers the material, helps you review it without turning memories into a cleanup chore, and brings back the right source-grounded moments when you are ready to make a post. Organize, confirm, and preview in the desktop app. Originals never leave your machine unless you choose a cloud vision profile for photos.
 
 <p align="center">
   <a href="https://github.com/bingjiezhu/MemoLens/releases/download/promo/memolens-promo.mp4">
@@ -40,7 +40,6 @@ People remember media by scene, mood, action, place, and intent — not by filen
 | A map of what your library *is about* | Builds Memory Workbench + Keyword Galaxy from the same SQLite index |
 | Captions you can trust | Grounds titles / captions / highlights in retrieved evidence |
 | “Make this feel like my usual short videos” | Applies only the creator preferences you pinned or confirmed, with visible evidence |
-| Codex access without another model key or agent | Reads the same SQLite memory and prepares an unsaved, source-grounded story locally |
 
 Original files, indexes, keyframes, previews, and timelines stay local in the desktop/browser workflow. Photo indexing may send a resized working copy to an API-based vision profile after the existing disclosure. Video remains stricter: frames, audio, and transcripts stay offline even when a cloud key is configured; no video-egress authorization flow is exposed yet. Query, inspiration, directing, and timeline planning operate on indexed facts rather than silently uploading the library. Photon image replies deliberately upload selected copies to Discord; see its privacy boundary below.
 
@@ -56,8 +55,7 @@ Original files, indexes, keyframes, previews, and timelines stay local in the de
 - **Director** — turn audience, platform, duration, aspect ratio, tone, and constraints into a grounded brief and storyboard
 - **Editor** — reorder, replace, trim, resize, crop, and fit clips through typed, reversible hard-cut timeline revisions
 - **Local Preview + Safe Save As** — validate sources, render a bounded 720p H.264/AAC preview, inspect it, then save that verified artifact through Electron without touching originals
-- **Codex Plugin** — offline creator context, Inbox browsing, mixed-media search, and in-memory timeline drafting; the App remains the only confirmation and write surface
-- **AI Inspire** — fresh search prompts from sanitized library summaries
+- **Inspire** — fresh search prompts from sanitized library summaries
 - **Browser-safe previews** — JPEG preview endpoints for camera formats (including HEIC when `pillow-heif` is installed)
 - **Desktop shell** — Electron manages the local Flask backend, folder picking, and indexing progress
 - **Photon Bot** — Discord bridge over the same retrieval API (iMessage helpers exist as experimental / doctor tooling)
@@ -116,8 +114,8 @@ npm run electron
 
 1. Open **Library**, choose the folder where you already save creator material, and build its private local **photo** index.
 2. Index videos from **Create → Video first cut** so they join the same library. Then review new photos and videos in **Inbox**: Keep, Archive from MemoLens, Favorite, or mark Ready. Every action is reversible and leaves the file untouched.
-3. Confirm the small **Creator Memory** profile you want MemoLens and Codex to reuse; unconfirmed observations never become defaults.
-4. Open **Memories** to rediscover themes, or **Create** to describe the next photo story or video first cut. Codex can search the same read-only memory when conversation is the more natural surface.
+3. Confirm the small **Creator Memory** profile you want MemoLens to reuse; unconfirmed observations never become defaults.
+4. Open **Memories** to rediscover themes, or **Create** to describe the next photo story or video first cut.
 
 Managed desktop state lives under:
 
@@ -158,23 +156,6 @@ Verify before you ship changes:
 ```bash
 npm run verify:local
 ```
-
----
-
-## Codex Plugin
-
-This repository includes a local-first Codex plugin for MemoLens status, confirmed creator context, Media Inbox browsing, mixed photo/video search, memory discovery, timeline drafting/revision, and offline validation. It is deliberately a Skill plus a narrow stdio MCP server—not another agent runtime. It needs no model API key and never deletes, moves, or modifies original media. Its bundled tools create timeline drafts in memory; they do not change Inbox decisions, start FFmpeg, persist a project, or export a file without a separate future desktop-issued capability confirmed in the App.
-
-After cloning, run these commands from the repository root. In the first command, `$(pwd)` is the absolute `<repo-root>` required by `codex plugin marketplace add <repo-root>`:
-
-```bash
-codex plugin marketplace add "$(pwd)"
-codex plugin add memolens@memolens-local
-```
-
-Start a new Codex task after installation so the Skill and bundled MCP tools are loaded. `python3` 3.10+ must be available to the Codex process; no Python packages beyond the standard library are required by the plugin.
-
-The safe default never contacts localhost: `status`, confirmed creator context, Inbox, mixed search, timeline list/get, draft/revise, and validation discover an existing SQLite index from MemoLens's application-state directory (or explicit `MEMOLENS_DB_PATH` / `MEMOLENS_LIBRARY_DIR`) and open it in strict read-only mode. Ranking is lexical in this mode. Memories, legacy cleanup reports, and semantic backend search require the user to set `MEMOLENS_PLUGIN_TRUST_LOCAL_API=1` in the environment that starts Codex and restart Codex; this explicit read-risk opt-in is never a write credential. The plugin exposes no indexing, profile edit, Inbox mutation, project persistence, FFmpeg, export, feedback, basket, or deletion operation.
 
 ---
 
@@ -240,7 +221,7 @@ Five boundaries, one local loop:
 
 | Layer | Code | Responsibility |
 | --- | --- | --- |
-| User surfaces | `src/App.tsx`, `src/library/`, `src/creator/`, `src/AtlasView.tsx`, `src/VideoWorkbench.tsx`, `.agents/plugins/` | Home, Library, Memories, Create; Codex is a read-only conversational surface |
+| User surfaces | `src/App.tsx`, `src/library/`, `src/creator/`, `src/AtlasView.tsx`, `src/VideoWorkbench.tsx` | Home, Library, Memories, Create |
 | Desktop runtime | `electron/` | Folder/preview-save pickers, hashed SQLite under Application Support, verified Flask, authenticated IPC |
 | API services | `backend/src/api/routes.py` | Health, settings, photo index, inbox, creator profile, mixed search, creative/render routes |
 | Intelligence | `indexing/`, `backend/src/retrieval/`, `backend/src/media/`, `core/photo_atlas.py` | Photo vision + vectors, local video probe, retrieval, Atlas, director/timeline |
@@ -251,7 +232,7 @@ Remember  →  Review  →  Find  →  Direct  →  Edit  →  Preview
                               ↑
              authenticated Flask :5519 (loopback)
                               ↑
-              Electron  ·  Browser reads  ·  Codex drafts
+                    Electron  ·  Browser
 ```
 
 Library **photo** indexing is `POST /v1/indexing/jobs`. Video files (MP4/MOV/M4V) enter through **Create → Video first cut** (`POST /v1/assets/import`) and then appear in the same Inbox. The Flask-owned query engines live under `backend/src/retrieval/`. The React UI lives in repo-root `src/`; `frontend/querying/` now contains compatibility imports only.
@@ -265,7 +246,6 @@ electron/      Desktop main / preload / backend manager
 frontend/      Legacy Python compatibility imports
 indexing/      Photo scan, EXIF, vision, geocode, vectors
 photon-bot/    Discord messaging bridge
-.agents/       Codex Skill + stdio MCP plugin
 scripts/       Bootstrap, verify, backfill, smoke tests
 src/           Vite + React renderer
 docs/          Specs, strategy, and homepage assets (including the 50s walkthrough MP4)
@@ -288,7 +268,7 @@ Default bind: `http://127.0.0.1:5519` (loopback-only). Override with `MEMOLENS_B
 | `POST` | `/v1/indexing/jobs` | Index / rebuild a local folder |
 | `POST` | `/v1/retrieval/query` | Natural-language retrieval |
 | `POST` | `/v1/retrieval/copy` | Grounded title / caption / highlights |
-| `POST` | `/v1/inspiration/generate` | AI Inspire prompts |
+| `POST` | `/v1/inspiration/generate` | Inspiration prompts |
 | `GET` / `POST` | `/v1/atlas/*` | Status, rebuild, workbench, search, baskets, feedback, generate… |
 | `GET` | `/v1/library/files/<path>` | Serve local originals (local clients) |
 | `GET` | `/v1/library/previews/<path>` | Browser-safe JPEG previews |
@@ -352,7 +332,6 @@ npm run quality:backfill -- \
 - Enabling reverse geocoding sends precise EXIF coordinates to OpenStreetMap Nominatim; it remains off by default
 - Inspiration / copy paths send structured summaries and selected facts — not raw libraries or absolute private paths
 - Photon image replies leave the device for Discord; use strict user/channel allowlists and trusted destinations only
-- The Codex plugin is SQLite read-only and API-off by default; Codex may inspect a few traversal-checked local matches inside the active task, subject to that workspace's data controls, while draft timeline operations remain in memory
 - Inbox and Creator Memory are versioned metadata in the active media database. Archive never deletes or moves a source; profile suggestions do not become defaults until the user confirms them in the App
 - The desktop API binds to loopback and uses a per-launch authenticated session; do not expose port `5519` through a public tunnel
 - Prefer Application Support (desktop) over writing state into the photo folder itself
@@ -371,7 +350,6 @@ Public beta with a local-first media memory and creative loop:
 - Query planning, ranking, and copy generation are owned by `backend/src/retrieval/`
 - Video jobs produce timestamped scene segments and representative keyframes without requiring a cloud model; current retrieval uses deterministic metadata and optional sidecar text while richer visual/audio semantics remain a later Spec 005 phase
 - Create Video turns grounded matches into validated, versioned timelines and local 720p MP4 previews that can be saved through the desktop dialog
-- The Codex plugin can read confirmed creator context, browse the Inbox, search, and draft offline; authenticated Codex write capabilities remain deliberately unavailable until a scoped desktop confirmation flow exists
 
 ---
 

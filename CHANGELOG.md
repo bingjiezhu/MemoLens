@@ -8,6 +8,7 @@ All notable changes to MemoLens are documented here. The project follows
 ### Docs
 
 - Added a 50-second English walkthrough to the README homepage: remember locally, review Inbox, find a moment, then make a 720p first cut. Captions only; instrumental score, no voiceover. The MP4 lives at `docs/assets/memolens-promo.mp4` and on the `promo` GitHub Release for inline playback.
+- Tightened the public GitHub story around the desktop media loop so the homepage reads as a local-first creator app.
 
 ## [0.5.0] - 2026-08-12
 

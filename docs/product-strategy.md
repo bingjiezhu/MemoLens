@@ -1,13 +1,19 @@
 # MemoLens product strategy
 
+## Public product framing
+
+MemoLens is a local-first desktop app: a private photo and video library, reversible Inbox review, Creator Memory, and a 720p first-cut preview. The GitHub homepage and README tell that desktop story. Running the app does not require a conversational plugin.
+
+The 0.4–0.5 strategy also described an optional conversational plugin (Skill + MCP, read-only SQLite). That integration is not the public product promise. It remains documented below so the earlier architecture is not deleted: the desktop App is still the only confirmation and write surface.
+
 ## Product promise
 
-MemoLens is the private media home for an independent creator: drop photos and videos into an approved folder, let the app remember and organize them, then describe the next post in MemoLens or Codex and work only from source-grounded material.
+MemoLens is the private media home for an independent creator: drop photos and videos into an approved folder, let the app remember and organize them, then describe the next post in the desktop App and work only from source-grounded material.
 
 The product does not replace the file system and does not add another autonomous agent. Its advantage is the loop between **memory, lightweight review, creator intent, evidence, and reuse**:
 
 ```text
-Drop media → understand it locally → review while remembering → describe an idea in App or Codex → inspect why each asset fits → create → preview/save
+Drop media → understand it locally → review while remembering → describe an idea in the App → inspect why each asset fits → create → preview/save
 ```
 
 ## Primary users
@@ -15,7 +21,7 @@ Drop media → understand it locally → review while remembering → describe a
 1. **Independent short-video creator** — continuously captures material and wants to stop manually filing it before every post.
 2. **Private archivist** — has years of personal photos and videos and wants recall without cloud migration.
 3. **Hands-on editor** — wants an editable first cut, not an opaque one-shot generation.
-4. **Codex user** — wants the same private memory available through conversation without another model key or agent runtime.
+4. **Conversational plugin user (0.4–0.5 strategy, optional)** — wants the same private memory available through conversation without another model key or agent runtime. This is not required for the desktop product.
 
 ## North-star outcome
 
@@ -76,9 +82,11 @@ Photos and videos are memories and creative material before they are storage usa
 
 Creator Memory only applies preferences the user pinned or confirmed. Every preference shows its source and revision. Search behavior, dwell time, raw prompts, and a model guess never silently become a durable preference. The user can override one project, reset the profile, or inspect the evidence without changing historical projects.
 
-### One brain, two surfaces
+### One desktop surface, optional plugin reads
 
-The desktop app owns media state, permissions, confirmation, indexing, and rendering. Codex uses the same SQLite memory through a small read-only Skill + MCP plugin and supplies the conversational reasoning surface. MemoLens does not ship a second chat system, a second memory database, or another agent scheduler.
+Earlier strategy treated the desktop App and a conversational plugin as two surfaces over one SQLite memory. The App still owns media state, permissions, confirmation, indexing, and rendering. Plugin code, if present, stays SQLite read-only and API-off by default.
+
+Public docs now lead with the desktop App so the repository does not read as a second chat product. MemoLens does not ship a second chat system, a second memory database, or another agent scheduler.
 
 ## Product sequence
 
@@ -88,7 +96,7 @@ The desktop app owns media state, permissions, confirmation, indexing, and rende
 - collision-safe indexing and explicit empty/partial/failure states;
 - mobile and split-view layout correctness;
 - cancellation, real request state, basket hydration, and accessible recovery actions;
-- repository CI, security policy, and a Codex plugin that needs no separate model API key.
+- repository CI, security policy, and an optional read-only MCP plugin that needs no separate model API key.
 
 ### Shipped — video creative workbench
 
@@ -96,7 +104,7 @@ The desktop app owns media state, permissions, confirmation, indexing, and rende
 - editable intent chips and per-result explanations;
 - adaptive video segmentation and timestamped mixed-media retrieval;
 - drag-to-order storyboard, typed timeline revisions, local preview, and non-destructive Save As of the verified preview; final 1080p export remains gated on a scoped output grant;
-- a safe-default Codex workflow for video search, draft creation, and offline validation;
+- a safe-default MCP workflow for video search, draft creation, and offline validation;
 - privacy/cost dashboard for local versus configured provider steps.
 
 ### Now — creator memory and media inbox
@@ -105,7 +113,7 @@ The desktop app owns media state, permissions, confirmation, indexing, and rende
 - related-moment review that favors remembering and creating over storage pressure;
 - a versioned, evidence-linked creator profile that only learns after confirmation;
 - creator preferences visible and overridable in Photo Story and Video First Cut;
-- direct Codex context and Inbox reads through strict read-only SQLite;
+- direct plugin context and Inbox reads through strict read-only SQLite;
 - one App-owned confirmation surface for future scoped write capabilities.
 
 ### Later — memory intelligence

@@ -26,7 +26,7 @@ Do not expose port `5519` through a public tunnel or bind it to a non-loopback i
 Originless loopback requests remain available for trusted same-user tools such as
 Photon and `curl`; this treats other processes running as your local user as part
 of the trust boundary. Browser and desktop calls use stricter origin/session
-checks. The Codex plugin keeps loopback API mode disabled unless you explicitly
+checks. The bundled MCP plugin keeps loopback API mode disabled unless you explicitly
 opt in; its default integration opens the SQLite index read-only.
 
 Creator Memory and Media Inbox decisions live as immutable revisions in the
@@ -36,10 +36,10 @@ They never move, overwrite, or delete a source file. Profile suggestions are
 read-only observations until a user confirms them in the desktop App.
 
 That explicit read-risk opt-in is not a write credential. It never authorizes
-Codex to edit a creator profile, apply Inbox decisions, save timelines, start
+the plugin to edit a creator profile, apply Inbox decisions, save timelines, start
 FFmpeg, export files, or cancel jobs. In this release, App writes require the
 per-launch authenticated desktop session plus active-database binding and
-idempotency. The plugin exposes no write tool. Any future Codex-initiated write
+idempotency. The plugin exposes no write tool. Any future plugin-initiated write
 would require a separate short-lived, scope-limited capability issued through a
 visible desktop confirmation flow.
 
