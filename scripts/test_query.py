@@ -1,3 +1,4 @@
+"""Manual retrieval smoke helper. Not part of `npm test`; use unittest under tests/."""
 from __future__ import annotations
 
 import argparse

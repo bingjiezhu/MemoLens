@@ -25,6 +25,8 @@ def main() -> int:
     note_path.write_text("not an image", encoding="utf-8")
 
     os.environ["MEMOLENS_APP_STATE_DIR"] = str(state_dir)
+    os.environ["IMAGE_LIBRARY_DIR"] = str(photos_dir)
+    os.environ["SQLITE_DB_PATH"] = str(state_dir / "storage" / "photo_index.db")
     desktop_session_token = "memolens-local-verification-token"
     os.environ["MEMOLENS_DESKTOP_SESSION_TOKEN"] = desktop_session_token
     for env_name in (
@@ -38,8 +40,6 @@ def main() -> int:
         "GCP_PROJECT",
     ):
         os.environ[env_name] = ""
-    os.environ.pop("IMAGE_LIBRARY_DIR", None)
-    os.environ.pop("SQLITE_DB_PATH", None)
 
     from backend.src import create_app
     from backend.src.retrieval import RetrievalService

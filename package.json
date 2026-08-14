@@ -9,10 +9,11 @@
   },
   "scripts": {
     "setup:mac": "bash ./scripts/bootstrap_mac.sh",
-    "demo:library": "python3 scripts/create_demo_library.py",
+    "demo:library": "bash ./scripts/run_python.sh scripts/create_demo_library.py",
     "dev": "vite",
     "dev:local": "bash ./scripts/dev_local.sh",
-    "quality:backfill": "python3 scripts/backfill_image_quality.py",
+    "quality:backfill": "bash ./scripts/run_python.sh scripts/backfill_image_quality.py",
+    "test": "npm run test:unit && npm run test:plugin && npm run test:electron",
     "build:renderer": "tsc --noEmit && vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
     "build": "npm run build:renderer && npm run build:electron",

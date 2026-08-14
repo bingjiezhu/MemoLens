@@ -6,7 +6,7 @@ Security fixes target the latest commit on `main`.
 
 ## Reporting a vulnerability
 
-Please do not open a public issue for a vulnerability that could expose local files, credentials, photo metadata, or the loopback API. Use GitHub's **Security → Report a vulnerability** flow for this repository. Include reproduction steps, affected platform/version, and the smallest safe proof of concept.
+Please do not open a public issue for a vulnerability that could expose local files, credentials, photo metadata, or the loopback API. Use GitHub's **Security → Report a vulnerability** (private advisory) for this repository. Include reproduction steps, affected platform/version, and the smallest safe proof of concept. If that form is unavailable, contact the maintainer through their GitHub profile.
 
 ## Local security model
 

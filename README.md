@@ -104,7 +104,7 @@ npm run setup:mac
 ./Launch\ MemoLens.command
 ```
 
-Or build and launch from Terminal:
+After `setup:mac` (or `npm ci` plus a Python venv), you can also build and launch from Terminal:
 
 ```bash
 npm run electron
@@ -135,7 +135,7 @@ python3 backend/app.py          # http://127.0.0.1:5519
 npm run dev                     # http://127.0.0.1:5173
 ```
 
-In **Control**, set backend photo library + SQLite paths, then index from **Library**. The browser path skips the native folder picker but still uses the same API.
+In **Library → Advanced settings**, set the photo library and SQLite paths, then index from **Library**. The browser path skips the native folder picker but still uses the same API. Photo indexing and video import stay separate: photos from Library, videos from **Create → Video first cut**.
 
 Optional one-shot local stack:
 
@@ -243,16 +243,17 @@ Library **photo** indexing is `POST /v1/indexing/jobs`. Video files (MP4/MOV/M4V
 backend/       Flask entry + HTTP API
 core/          Config, SQLite, Atlas, embeddings, LLM helpers
 electron/      Desktop main / preload / backend manager
-frontend/      Legacy Python compatibility imports
+frontend/      Legacy Python compatibility imports (not the UI)
 indexing/      Photo scan, EXIF, vision, geocode, vectors
 photon-bot/    Discord messaging bridge
 scripts/       Bootstrap, verify, backfill, smoke tests
 src/           Vite + React renderer
 docs/          Specs, strategy, and homepage assets (including the 50s walkthrough MP4)
+.agents/       Optional read-only MCP plugin; the desktop app does not need it
 config.yaml    Library defaults + model profiles
 ```
 
-Suggested reading order: `docs/specs/006-creator-memory-media-inbox.md` → `docs/specs/005-video-creative-workbench.md` → `backend/src/api/routes.py` → `backend/src/media/` → `core/media_db.py` → `src/library/` → `electron/main.ts`.
+Suggested reading order: `docs/specs/006-creator-memory-media-inbox.md` (shipped in 0.5.0) → `docs/specs/005-video-creative-workbench.md` (shipped in 0.3.0; the header still records the original proposal) → `backend/src/api/routes.py` → `backend/src/media/` → `core/media_db.py` → `src/library/` → `electron/main.ts`. The desktop app is the product; `.agents/` is an optional local MCP plugin.
 
 ---
 

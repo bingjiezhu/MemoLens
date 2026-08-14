@@ -1,13 +1,19 @@
 # Spec 005：MemoLens Video Creative Workbench
 
-- 状态：`PROPOSED`（不表示已实现或可发布）
-- 产品能力代号：MemoLens `0.2.0` Video Creative Workbench
-- 实际发布版本：`TBD`；由于仓库已有不可变 `v0.2.0` 标签，实现产物 **MUST** 使用更高的 SemVer（预期 `0.3.0`），**MUST NOT** 重打、移动或覆盖 `v0.2.0`
+原先怎么写 / 入门统一叙事：状态为 `PROPOSED`（不表示已实现或可发布）；产品能力代号 MemoLens `0.2.0` Video Creative Workbench；实际发布版本 `TBD`，因仓库已有不可变 `v0.2.0` 标签，实现产物 MUST 使用更高 SemVer（预期 `0.3.0`）。
+
+代码与发布核对后的现状：该工作台已随 **0.3.0** 进入仓库，当前产品版本是 **0.5.0**。下文仍是当时的设计合同（含当时未实施项与发布门槛），不是一份尚未开工的提案。
+
+为什么会有这样的更新：GitHub README 链到本文件。继续只写 `PROPOSED` 会让后来者以为视频初剪还没做。Spec 004《Evidence-Backed Retrieval & Privacy Benchmark》当时被列为 RC 门槛，**本仓库没有这份文件**；检索/隐私约束以 `SECURITY.md`、`docs/product-strategy.md` 和测试为准。
+
+- 状态：`SHIPPED`（0.3.0+；正文仍保留提案期措辞）
+- 产品能力代号：MemoLens `0.2.0` Video Creative Workbench（提案名）
+- 实际发布版本：`0.3.0` 起；**MUST NOT** 重打、移动或覆盖 `v0.2.0`
 - API 版本：`v1` 路径不变；响应增加 `schema_version`
-- 数据库目标版本：`2`
+- 数据库目标版本：`2`（后续 0.5.0 将媒体库升到 `3`，见 Spec 006）
 - 负责人：MemoLens maintainers
-- 最后更新：2026-08-12
-- 依赖规范：Spec 004《MemoLens Evidence-Backed Retrieval & Privacy Benchmark》（RC 前 **MUST** 固定其仓库路径与 commit SHA）
+- 最后更新：2026-08-14
+- 依赖规范：Spec 004 未收入本仓库；不要把它当作可点击的文档链接
 
 本文使用 RFC 2119 风格术语：**MUST（必须）**、**MUST NOT（禁止）**、**SHOULD（应该）**、**SHOULD NOT（不应该）**、**MAY（可以）**。
 

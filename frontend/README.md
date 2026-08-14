@@ -18,7 +18,7 @@ backend/src/retrieval/
 
 | Layer | Location | Owns |
 | --- | --- | --- |
-| Renderer UI | `src/`, `src/query/` | Compose, Workbench, Control, HTTP client, Electron bridge |
+| Renderer UI | `src/`, `src/query/` | Home, Library, Memories, Create, HTTP client, Electron bridge |
 | Flask API | `backend/` | Routes, settings, indexing jobs, Atlas endpoints |
 | Query engines | `backend/src/retrieval/` | Planning, retrieval, copy generation |
 | Indexing / shared | `indexing/`, `core/` | EXIF, vision, vectors, SQLite, Atlas derivation |

@@ -5,7 +5,7 @@
 - API 路径：`/v1`（响应 `schema_version: "1"`）
 - 数据库目标版本：`3`
 - 最后更新：2026-08-12
-- 依赖：Spec 005《Video Creative Workbench》；Spec 004 仍是检索效果与隐私结果型声明的发布门槛
+- 依赖：Spec 005《Video Creative Workbench》（已随 0.3.0 发布）。Spec 004 检索/隐私 benchmark 仍是当时的发布门槛表述，**本仓库没有这份文件**。
 
 本文使用 RFC 2119 风格术语：**MUST（必须）**、**MUST NOT（禁止）**、**SHOULD（应该）**。
 

@@ -2,7 +2,19 @@
 
 Thanks for helping make private photo libraries easier to explore without turning them into a cloud dependency.
 
+The React UI lives in repo-root `src/`. `frontend/` is legacy Python compatibility imports only — do not add UI there. Flask retrieval lives in `backend/src/retrieval/`. The optional MCP plugin lives under `.agents/` and is not required for the desktop app.
+
 ## Development setup
+
+macOS desktop (matches the README):
+
+```bash
+cp .env.example .env   # optional
+npm run setup:mac
+./Launch\ MemoLens.command
+```
+
+Browser / API loop:
 
 ```bash
 python3 -m venv .venv
@@ -13,12 +25,13 @@ ffmpeg -version
 npm run dev:local
 ```
 
-The backend binds to loopback by default. Use a disposable photo folder and database while developing; never commit real photos, SQLite files, `.env` files, generated exports, or Application Support data.
+The backend binds to loopback by default. Use a disposable photo folder and database while developing; never commit real photos, SQLite files, `.env` files, generated exports, or Application Support data. Prefer `npm run demo:library` over private media.
 
 ## Before opening a pull request
 
 ```bash
-npm run check
+npm test                 # Python unit + plugin + Electron/Node tests
+npm run check            # lint, tests, local verify, and production build
 cd photon-bot && npm ci && npm audit --audit-level=high && npm test && npm run build
 ```
 
