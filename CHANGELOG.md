@@ -3,6 +3,12 @@
 All notable changes to MemoLens are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Docs
+
+- Added a 50-second English walkthrough to the README homepage: remember locally, review Inbox, find a moment, then make a 720p first cut. Captions only; instrumental score, no voiceover. The MP4 lives at `docs/assets/memolens-promo.mp4` and on the `promo` GitHub Release for inline playback.
+
 ## [0.5.0] - 2026-08-12
 
 ### Added

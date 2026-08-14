@@ -5,10 +5,20 @@
 Drop photos and videos into one private library. MemoLens remembers the material, helps you review it without turning memories into a cleanup chore, and brings back the right source-grounded moments when you are ready to make a post. Use the focused desktop app for organizing, confirmation, and preview; use Codex as the conversational creative surface without adding another agent system or model key.
 
 <p align="center">
-  <img src="docs/assets/memolens-home-v050.jpg" alt="MemoLens 0.5 home workspace with Media Inbox and Creator Memory summaries" width="100%" />
+  <video
+    src="https://github.com/bingjiezhu/MemoLens/releases/download/promo/memolens-promo.mp4"
+    poster="docs/assets/memolens-home-v050.jpg"
+    controls
+    playsinline
+    preload="metadata"
+    width="100%">
+    <a href="https://github.com/bingjiezhu/MemoLens/releases/download/promo/memolens-promo.mp4">
+      <img src="docs/assets/memolens-home-v050.jpg" alt="MemoLens 50-second walkthrough — remember locally, review Inbox, find a moment, make a first cut" width="100%" />
+    </a>
+  </video>
 </p>
 
-<p align="center"><sub>One private workspace from remembered media to a reviewable first cut.</sub></p>
+<p align="center"><sub>50-second walkthrough (English captions, instrumental score, no voiceover). <a href="docs/assets/memolens-promo.mp4">Download MP4</a> · one private workspace from remembered media to a reviewable first cut.</sub></p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
@@ -262,6 +272,7 @@ photon-bot/    Discord messaging bridge
 .agents/       Codex Skill + stdio MCP plugin
 scripts/       Bootstrap, verify, backfill, smoke tests
 src/           Vite + React renderer
+docs/          Specs, strategy, and homepage assets (including the 50s walkthrough MP4)
 config.yaml    Library defaults + model profiles
 ```
 

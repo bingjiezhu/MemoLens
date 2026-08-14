@@ -71,3 +71,6 @@ docs/project/
 
 # Cleanup staging when macOS Trash is unavailable in the sandbox
 docs/archive/pending-trash-*/
+
+# Local HyperFrames workshop. The published walkthrough is docs/assets/memolens-promo.mp4
+videos/

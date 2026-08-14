@@ -124,3 +124,7 @@ The desktop app owns media state, permissions, confirmation, indexing, and rende
 - claiming frame-perfect understanding, replacing a professional NLE, or executing arbitrary model-generated FFmpeg commands.
 
 These boundaries keep MemoLens focused: a private, inspectable bridge between a person's media memory and what they are trying to create.
+
+## Public walkthrough
+
+The GitHub README opens with a 50-second English film of the same loop: remember locally, review Inbox, find a moment, then make a 720p first cut. It is a demo, not a substitute for the app: captions only, instrumental score, no voiceover, and no private library media.
