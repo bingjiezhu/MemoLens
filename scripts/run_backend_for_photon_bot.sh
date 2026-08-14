@@ -4,7 +4,8 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_LIBRARY_DIR="${IMAGE_LIBRARY_DIR:-${PROJECT_ROOT}/local-photo-library}"
-SQLITE_DB_PATH="${SQLITE_DB_PATH:-${IMAGE_LIBRARY_DIR}/photo_index.db}"
+MEMOLENS_STATE_DIR="${MEMOLENS_APP_STATE_DIR:-${HOME}/Library/Application Support/MemoLens}"
+SQLITE_DB_PATH="${SQLITE_DB_PATH:-${MEMOLENS_STATE_DIR}/storage/photo_index.db}"
 VISION_VLM_PROFILE="${VISION_VLM_PROFILE:-minimax_vl01}"
 QUERY_VLM_PROFILE="${QUERY_VLM_PROFILE:-minimax_m27}"
 EMBEDDING_BACKEND="${EMBEDDING_BACKEND:-semantic_hash}"

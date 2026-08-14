@@ -1697,7 +1697,7 @@ function App() {
           {indexStats && canDescribeScopedIndexHealth ? (
             <p className={hasStaleIndex ? "inline-error" : "inline-note"}>
               {hasStaleIndex
-                ? `Current SQLite index looks stale: ${formatPercent(indexStats.fallbackRatio)} of the ${indexStats.totalRecords} records still use filename-only fallback metadata. Rebuild the library once so Vertex can analyze the images again.`
+                ? `Current SQLite index looks stale: ${formatPercent(indexStats.fallbackRatio)} of the ${indexStats.totalRecords} records still use filename-only fallback metadata. Rebuild the library once so ${selectedVisionProfile ? formatProviderName(selectedVisionProfile.provider) : "the configured vision profile"} can analyze the images again.`
                 : `Current SQLite index looks healthy: ${indexStats.totalRecords} records are available for retrieval.`}
             </p>
           ) : null}

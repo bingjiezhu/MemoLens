@@ -311,15 +311,16 @@
         <h1>MemoLens Creative Memory Architecture</h1>
         <p class="subtitle">
           One authenticated loopback brain turns a private photo and video library into
-          timestamped memory, grounded direction, versioned edits, and local MP4 exports.
+          Inbox review, Creator Memory, grounded direction, and a local 720p preview.
         </p>
       </div>
       <div class="loop" aria-label="Product loop">
         <span class="accent">Remember</span><i>→</i>
+        <span>Review</span><i>→</i>
         <span>Find</span><i>→</i>
         <span>Direct</span><i>→</i>
         <span>Edit</span><i>→</i>
-        <span>Render</span>
+        <span>Preview</span>
       </div>
     </header>
 
@@ -338,7 +339,8 @@
           </article>
           <article class="card">
             <h3>Electron + React</h3>
-            <p>Control · Library · Workbench · Compose · Create Video</p>
+            <p>Home · Library · Memories · Create</p>
+            <div class="tags"><span class="tag">Inbox</span><span class="tag">Creator Memory</span></div>
           </article>
           <article class="card">
             <h3>Codex plugin</h3>
@@ -400,11 +402,11 @@
           </article>
           <article class="card">
             <h3>/v1/creative · /v1/timelines</h3>
-            <p>Briefs, grounded storyboards, typed edits, immutable revisions.</p>
+            <p>Briefs, grounded storyboards, typed edits, then 720p preview jobs. 1080p export stays fail-closed.</p>
           </article>
           <article class="card">
-            <h3>/v1/renders · media streams</h3>
-            <p>Validated preview/export jobs and HTTP Range playback.</p>
+            <h3>/v1/inbox · /v1/creator/profile</h3>
+            <p>Reversible Keep/Archive metadata and confirmed creator preferences.</p>
           </article>
         </div>
       </section>
@@ -460,11 +462,11 @@
           </article>
           <article class="card">
             <h3>Scoped capabilities</h3>
-            <p>Desktop session trust; Codex read-only by default; writes require short-lived grants.</p>
+            <p>Desktop session token on writes; Codex plugin is SQLite read-only and API-off by default.</p>
           </article>
           <article class="card">
             <h3>User-ready outputs</h3>
-            <p>Curated sets · storyboards · timeline revisions · preview and export MP4.</p>
+            <p>Curated sets · Keyword Galaxy · storyboards · 720p preview via Save As.</p>
           </article>
         </div>
       </section>
@@ -473,7 +475,7 @@
     <footer class="footer">
       <div class="modules">
         <strong>Generated from repository modules:</strong>
-        electron/ · src/video/ · backend/src/media/ · indexing/ · core/ · Codex plugin
+        electron/ · src/ · backend/ · indexing/ · core/ · .agents/plugins · photon-bot/
       </div>
       <div class="badge">127.0.0.1:5519 · local-first</div>
     </footer>

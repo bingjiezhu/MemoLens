@@ -108,8 +108,8 @@ npm run electron
 
 ### First run inside the app
 
-1. Open **Library**, choose the folder where you already save creator material, and build its private local index.
-2. Review new photos and videos in **Inbox** when you feel like rediscovering them: Keep, Archive from MemoLens, Favorite, or mark Ready. Every action is reversible and leaves the file untouched.
+1. Open **Library**, choose the folder where you already save creator material, and build its private local **photo** index.
+2. Index videos from **Create → Video first cut** so they join the same library. Then review new photos and videos in **Inbox**: Keep, Archive from MemoLens, Favorite, or mark Ready. Every action is reversible and leaves the file untouched.
 3. Confirm the small **Creator Memory** profile you want MemoLens and Codex to reuse; unconfirmed observations never become defaults.
 4. Open **Memories** to rediscover themes, or **Create** to describe the next photo story or video first cut. Codex can search the same read-only memory when conversation is the more natural surface.
 
@@ -219,31 +219,36 @@ export SQLITE_DB_PATH="$IMAGE_LIBRARY_DIR/photo_index.db"
 ## Architecture
 
 <p align="center">
+  <img src="docs/assets/memolens-workspaces.png" alt="MemoLens 0.5 workspaces — Home, Library, Memories, and Create" width="100%" />
+</p>
+
+<p align="center"><sub>Four app rooms: Home, Library (Inbox + Creator Memory), Memories, and Create.</sub></p>
+
+<p align="center">
   <img src="docs/assets/memolens-architecture.png" alt="MemoLens architecture — local-first layers from user surfaces to SQLite" width="100%" />
 </p>
 
-<p align="center"><sub>Source artboard: <code>docs/assets/memolens-architecture.html</code></sub></p>
+<p align="center"><sub>Technical artboard: <code>docs/assets/memolens-architecture.html</code></sub></p>
 
-Six boundaries, one local loop:
+Five boundaries, one local loop:
 
 | Layer | Code | Responsibility |
 | --- | --- | --- |
-| User surfaces | `src/App.tsx`, `src/AtlasView.tsx`, `src/video/`, `photon-bot/` | Control, Library, Workbench, Compose, Create Video, Discord |
-| Desktop runtime | `electron/` | Folder/preview-save pickers, verified Flask, progress, authenticated IPC |
-| API services | `backend/src/api/routes.py` | Health, settings, image compatibility APIs, media/creative routes |
-| Media engine | `backend/src/media/` | Probe, adaptive segmentation, mixed search, timeline validation, FFmpeg jobs |
-| AI + memory | `indexing/`, `backend/src/retrieval/`, `core/photo_atlas.py` | Photo vision, vectors, planning, ranking, Atlas derivation |
-| Data + policy | `core/db.py`, `core/media_db.py`, `core/config.py` | Compatible image index, media revisions, roots, jobs, local-first guardrails |
+| User surfaces | `src/App.tsx`, `src/library/`, `src/creator/`, `src/AtlasView.tsx`, `src/VideoWorkbench.tsx`, `.agents/plugins/` | Home, Library, Memories, Create; Codex is a read-only conversational surface |
+| Desktop runtime | `electron/` | Folder/preview-save pickers, hashed SQLite under Application Support, verified Flask, authenticated IPC |
+| API services | `backend/src/api/routes.py` | Health, settings, photo index, inbox, creator profile, mixed search, creative/render routes |
+| Intelligence | `indexing/`, `backend/src/retrieval/`, `backend/src/media/`, `core/photo_atlas.py` | Photo vision + vectors, local video probe, retrieval, Atlas, director/timeline |
+| Data + policy | `core/db.py`, `core/media_db.py`, `core/config.py` | Compatible image index, media schema v3, originals untouched, loopback + desktop token |
 
 ```text
-Remember  →  Find  →  Direct  →  Edit  →  Validate  →  Render
+Remember  →  Review  →  Find  →  Direct  →  Edit  →  Preview
                               ↑
              authenticated Flask :5519 (loopback)
                               ↑
               Electron  ·  Browser reads  ·  Codex drafts
 ```
 
-The Flask-owned query engines live under `backend/src/retrieval/`. The React UI lives in repo-root `src/`; `frontend/querying/` now contains compatibility imports only.
+Library **photo** indexing is `POST /v1/indexing/jobs`. Video files (MP4/MOV/M4V) enter through **Create → Video first cut** (`POST /v1/assets/import`) and then appear in the same Inbox. The Flask-owned query engines live under `backend/src/retrieval/`. The React UI lives in repo-root `src/`; `frontend/querying/` now contains compatibility imports only.
 
 ### Repository map
 
@@ -252,14 +257,15 @@ backend/       Flask entry + HTTP API
 core/          Config, SQLite, Atlas, embeddings, LLM helpers
 electron/      Desktop main / preload / backend manager
 frontend/      Legacy Python compatibility imports
-indexing/      Scan, EXIF, vision, geocode, vectors
+indexing/      Photo scan, EXIF, vision, geocode, vectors
 photon-bot/    Discord messaging bridge
+.agents/       Codex Skill + stdio MCP plugin
 scripts/       Bootstrap, verify, backfill, smoke tests
-src/           Vite + React renderer, including the video workbench
+src/           Vite + React renderer
 config.yaml    Library defaults + model profiles
 ```
 
-Suggested reading order: `docs/specs/005-video-creative-workbench.md` → `backend/src/api/routes.py` → `backend/src/media/` → `core/media_db.py` → `src/video/` → `electron/main.ts`. The original photo path remains under `indexing/`, `backend/src/retrieval/`, and `core/photo_atlas.py`.
+Suggested reading order: `docs/specs/006-creator-memory-media-inbox.md` → `docs/specs/005-video-creative-workbench.md` → `backend/src/api/routes.py` → `backend/src/media/` → `core/media_db.py` → `src/library/` → `electron/main.ts`.
 
 ---
 

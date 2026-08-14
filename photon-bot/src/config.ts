@@ -58,9 +58,10 @@ export function loadConfig(): BotConfig {
     "DISCORD_SEND_IMAGE_WIDTH",
     64,
   );
+  const explicitDbPath = process.env.SQLITE_DB_PATH?.trim();
   const dbPath = backendSendPathOverrides
     ? readFilePath(
-        process.env.SQLITE_DB_PATH ?? path.join(imageLibraryDir, "photo_index.db"),
+        explicitDbPath || resolveManagedSqlitePath() || "",
         "SQLITE_DB_PATH",
       )
     : readOptionalFilePath(process.env.SQLITE_DB_PATH);
@@ -172,7 +173,75 @@ function readDirectory(value: string, key: string, createIfMissing = false): str
   return resolved;
 }
 
+function memolensStateDir(): string {
+  const configured = process.env.MEMOLENS_APP_STATE_DIR?.trim();
+  if (configured) {
+    return path.resolve(configured);
+  }
+  if (process.platform === "darwin") {
+    return path.join(process.env.HOME ?? "", "Library/Application Support/MemoLens");
+  }
+  if (process.platform === "win32") {
+    return path.join(process.env.APPDATA || path.join(process.env.HOME ?? "", "AppData/Roaming"), "MemoLens");
+  }
+  return path.join(process.env.XDG_STATE_HOME || path.join(process.env.HOME ?? "", ".local/state"), "MemoLens");
+}
+
+function readJsonObject(filePath: string): Record<string, unknown> | null {
+  try {
+    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+    return payload !== null && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function existingFile(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+  const resolved = path.resolve(value.trim());
+  return fs.existsSync(resolved) && fs.statSync(resolved).isFile() ? resolved : null;
+}
+
+function resolveManagedSqlitePath(): string | null {
+  const stateDir = memolensStateDir();
+  const desktop = readJsonObject(path.join(stateDir, "desktop-settings.json"));
+  const fromDesktop = existingFile(desktop?.defaultDbPath);
+  if (fromDesktop) {
+    return fromDesktop;
+  }
+  const backend = readJsonObject(path.join(stateDir, "backend-settings.json"));
+  const fromBackend = existingFile(backend?.db_path);
+  if (fromBackend) {
+    return fromBackend;
+  }
+  const storageDir = path.join(stateDir, "storage");
+  if (fs.existsSync(storageDir) && fs.statSync(storageDir).isDirectory()) {
+    const hashed = fs
+      .readdirSync(storageDir)
+      .filter((name) => /^photo-index-[0-9a-f]{24}\.db$/i.test(name))
+      .map((name) => path.join(storageDir, name))
+      .filter((filePath) => fs.statSync(filePath).isFile())
+      .sort();
+    if (hashed.length === 1) {
+      const onlyHashedPath = hashed[0];
+      if (onlyHashedPath) {
+        return onlyHashedPath;
+      }
+    }
+  }
+  return existingFile(path.join(storageDir, "photo_index.db"));
+}
+
 function readFilePath(value: string, key: string): string {
+  if (!value.trim()) {
+    throw new Error(
+      `${key} must be set to the SQLite path shown in MemoLens Library / Setup. Desktop indexes use hashed names like photo-index-<hash>.db under Application Support, not photo_index.db inside the photo folder.`,
+    );
+  }
   const resolved = path.resolve(value);
   if (!fs.existsSync(resolved)) {
     throw new Error(`${key} does not exist: ${resolved}`);

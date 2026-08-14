@@ -32,7 +32,7 @@ Smoke test:
 ```bash
 curl -X POST http://127.0.0.1:5519/v1/retrieval/query \
   -H 'Content-Type: application/json' \
-  -d '{"text":"beach sunset","top_k":3,"db_path":"/absolute/path/to/your/photo/folder/photo_index.db","image_library_dir":"/absolute/path/to/your/photo/folder"}'
+  -d '{"text":"beach sunset","top_k":3,"db_path":"/absolute/path/to/your/Application-Support/storage/photo-index-abc123.db","image_library_dir":"/absolute/path/to/your/photo/folder"}'
 ```
 
 ### 2. Discord bot

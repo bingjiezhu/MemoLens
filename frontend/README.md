@@ -24,4 +24,4 @@ backend/src/retrieval/
 | Indexing / shared | `indexing/`, `core/` | EXIF, vision, vectors, SQLite, Atlas derivation |
 
 Default local photo placeholder: `./local-photo-library`  
-Default managed SQLite (macOS desktop): `~/Library/Application Support/MemoLens/storage/photo_index.db`
+Default managed SQLite (macOS desktop): `~/Library/Application Support/MemoLens/storage/photo-index-<hash>.db`

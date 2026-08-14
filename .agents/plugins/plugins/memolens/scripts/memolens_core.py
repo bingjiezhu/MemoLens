@@ -111,7 +111,26 @@ def resolve_local_paths(
 
     if db is None:
         for state_dir in _state_dir_candidates():
-            candidate = state_dir / "storage" / "photo_index.db"
+            desktop_path = state_dir / "desktop-settings.json"
+            try:
+                desktop = json.loads(desktop_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+                desktop = None
+            if isinstance(desktop, dict):
+                db = _clean_path(desktop.get("defaultDbPath"))
+                if db is not None and db.is_file():
+                    break
+                db = None
+
+    if db is None:
+        for state_dir in _state_dir_candidates():
+            storage = state_dir / "storage"
+            hashed = sorted(storage.glob("photo-index-*.db"))
+            hashed = [path for path in hashed if path.is_file()]
+            if len(hashed) == 1:
+                db = hashed[0].resolve()
+                break
+            candidate = storage / "photo_index.db"
             if candidate.is_file():
                 db = candidate.resolve()
                 break
