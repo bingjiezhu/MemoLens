@@ -1,8 +1,11 @@
 # Third-party runtime notices
 
-MemoLens source code is distributed under the MIT License. The media workflow
-invokes an FFmpeg/ffprobe installation supplied by the user or package manager;
-the repository does not bundle an FFmpeg binary, codec library, or model file.
+MemoLens source code is distributed under a dual-license model: PolyForm
+Noncommercial License 1.0.0 for non-commercial use, and a separate commercial
+license for commercial use (see LICENSE and COMMERCIAL-LICENSE.md). The media
+workflow invokes an FFmpeg/ffprobe installation supplied by the user or package
+manager; the repository does not bundle an FFmpeg binary, codec library, or
+model file.
 
 ## FFmpeg
 

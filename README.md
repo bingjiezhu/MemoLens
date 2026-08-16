@@ -4,6 +4,13 @@
 
 Drop photos and videos into one private library. MemoLens remembers the material, helps you review it without turning memories into a cleanup chore, and brings back the right source-grounded moments when you are ready to make a post. Organize, confirm, and preview in the desktop app. Originals never leave your machine unless you choose a cloud vision profile for photos.
 
+**License.** MemoLens is source-available under a dual-license model:
+
+- **Non-commercial use:** [PolyForm Noncommercial License 1.0.0](LICENSE)
+- **Commercial use:** a [separate commercial license](COMMERCIAL-LICENSE.md) is required
+
+For commercial licensing, contact the copyright holder.
+
 <p align="center">
   <a href="https://github.com/bingjiezhu/MemoLens/releases/download/promo/memolens-promo.mp4">
     <img src="docs/assets/memolens-promo-poster.jpg" alt="Watch the 50-second MemoLens walkthrough — remember locally, review Inbox, find a moment, make a first cut" width="100%" />
@@ -22,7 +29,8 @@ Drop photos and videos into one private library. MemoLens remembers the material
   <a href="CHANGELOG.md">Changelog</a> ·
   <a href="#model-profiles">Models</a> ·
   <a href="#photon-bot">Photon Bot</a> ·
-  <a href="#privacy">Privacy</a>
+  <a href="#privacy">Privacy</a> ·
+  <a href="#contributing--license">License</a>
 </p>
 
 ---
@@ -358,4 +366,9 @@ Public beta with a local-first media memory and creative loop:
 
 Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) and run `npm run check` before opening a pull request. Please report sensitive issues through the process in [SECURITY.md](SECURITY.md).
 
-MemoLens is released under the [MIT License](LICENSE). FFmpeg is an external runtime; see [third-party runtime notices](THIRD_PARTY_NOTICES.md).
+Copyright © 2026 Bingjie Zhu. MemoLens is **source-available**, not OSI Open Source: companies cannot take it into a product or paid service under the public grant.
+
+- **Non-commercial:** [PolyForm Noncommercial License 1.0.0](LICENSE) (SPDX: `PolyForm-Noncommercial-1.0.0`)
+- **Commercial:** [a separate license is required](COMMERCIAL-LICENSE.md)
+
+FFmpeg is an external runtime; see [third-party runtime notices](THIRD_PARTY_NOTICES.md).

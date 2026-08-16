@@ -10,6 +10,7 @@ All notable changes to MemoLens are documented here. The project follows
 - Added a 50-second English walkthrough to the README homepage: remember locally, review Inbox, find a moment, then make a 720p first cut. Captions only; instrumental score, no voiceover. The MP4 lives at `docs/assets/memolens-promo.mp4` and on the `promo` GitHub Release for inline playback.
 - Tightened the public GitHub story around the desktop media loop so the homepage reads as a local-first creator app.
 - Clarified first-run, contributing, security reporting, and repository layout for people cloning the project.
+- Switched the public grant from MIT to a dual-license model: PolyForm Noncommercial 1.0.0 for non-commercial use, and a separate commercial license for company / product / paid-service use.
 
 ## [0.5.0] - 2026-08-12
 

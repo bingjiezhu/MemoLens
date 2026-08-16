@@ -65,4 +65,10 @@ output cleanup. Never use a contributor's private media as a committed fixture.
 - Avoid adding a second feature to files already above roughly 1,000 lines; first create the appropriate domain boundary and keep imports directional.
 - Pure mappers, ranking rules, state reducers, and persistence models should have direct deterministic tests. Async controllers additionally need cancellation, stale-response, retry, and cleanup coverage.
 
-By contributing, you agree that your contribution is licensed under the MIT License.
+## License and copyright
+
+MemoLens is source-available under a dual-license model. See [LICENSE](LICENSE) and [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).
+
+By submitting a contribution, you confirm that you have the right to submit it, and you license it to **Bingjie Zhu** under the same dual-license terms: PolyForm Noncommercial License 1.0.0 for non-commercial use, plus the right to sublicense the contribution as part of MemoLens under a separate commercial license. You keep copyright in your contribution unless a later CLA says otherwise.
+
+This inbound grant is what keeps future commercial licensing possible as the project takes outside patches.
