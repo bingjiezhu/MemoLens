@@ -11,6 +11,7 @@ All notable changes to MemoLens are documented here. The project follows
 - Tightened the public GitHub story around the desktop media loop so the homepage reads as a local-first creator app.
 - Clarified first-run, contributing, security reporting, and repository layout for people cloning the project.
 - Switched the public grant from MIT to a dual-license model: PolyForm Noncommercial 1.0.0 for non-commercial use, and a separate commercial license for company / product / paid-service use.
+- Rebuilt the GitHub README around the 0.5 desktop loop and added a Chinese twin (`README.zh-CN.md`) with a language switch at the top.
 
 ## [0.5.0] - 2026-08-12
 

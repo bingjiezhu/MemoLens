@@ -4,6 +4,8 @@
 
 MemoLens is a local-first desktop app: a private photo and video library, reversible Inbox review, Creator Memory, and a 720p first-cut preview. The GitHub homepage and README tell that desktop story. Running the app does not require a conversational plugin.
 
+The public homepage is bilingual: English `README.md` is the GitHub default, with a Chinese twin `README.zh-CN.md`. Each file has a language switch at the top. Product claims in both must stay aligned with the shipped 0.5 loop (Library indexes photos; videos enter through Create → Video first cut; preview is 720p Save As).
+
 The 0.4–0.5 strategy also described an optional conversational plugin (Skill + MCP, read-only SQLite). That integration is not the public product promise. It remains documented below so the earlier architecture is not deleted: the desktop App is still the only confirmation and write surface.
 
 ## Product promise

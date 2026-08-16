@@ -4,6 +4,8 @@ Thanks for helping make private photo libraries easier to explore without turnin
 
 The React UI lives in repo-root `src/`. `frontend/` is legacy Python compatibility imports only — do not add UI there. Flask retrieval lives in `backend/src/retrieval/`. The optional MCP plugin lives under `.agents/` and is not required for the desktop app.
 
+Public homepage: English [`README.md`](README.md) and Chinese [`README.zh-CN.md`](README.zh-CN.md), linked at the top of each. Keep product claims in both files in sync (Library indexes photos; videos enter through Create → Video first cut; preview is 720p Save As).
+
 ## Development setup
 
 macOS desktop (matches the README):
