@@ -39,12 +39,12 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
-    "@types/node": "^22.15.30",
+    "@types/node": "^26.4.0",
     "@types/react": "^19.1.2",
-    "@types/react-dom": "^19.1.2",
-    "@vitejs/plugin-react": "^6.0.5",
-    "electron": "^43.4.0",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.1",
+    "electron": "^44.0.0",
     "typescript": "^7.0.2",
-    "vite": "^8.2.1"
+    "vite": "^8.2.2"
   }
 }
