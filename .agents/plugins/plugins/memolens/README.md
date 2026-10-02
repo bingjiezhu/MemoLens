@@ -14,6 +14,8 @@ Nothing durable is silently changed. Data tools and safe-default SQLite access s
 
 ## Install a host adapter
 
+The host process must resolve `python3` 3.10+ on its PATH. Core's `MEMOLENS_PYTHON` setting does not change this adapter command. After repository setup, `source .venv/bin/activate` before starting a CLI host provides that interpreter; a separately running desktop host needs its own correct launch environment.
+
 From the MemoLens repository root, install the Codex plugin and start a new Codex task:
 
 ```bash
@@ -87,9 +89,12 @@ Configure `MEMOLENS_DB_PATH` when fixed application-state discovery is not avail
 
 Codex exposes raw MCP names such as `memolens_library_bootstrap_start`, `memolens_library_bootstrap_status`, `memolens_status`, `memolens_canonical_editor_handoff`, and `memolens_editor_handoff`. DeepSeek Harness exposes the same tools as `mcp__memolens__<raw-name>`. The canonical tool is the primary project editor; the legacy tool is the Unsaved Draft Lab.
 
+The examples below are individual commands, not a script to run end to end. Replace sample IDs and input files with the exact current project and validated proposal. From the repository root, first enter the plugin directory; when using an unpacked package, start at its package root instead.
+
 ```bash
+cd .agents/plugins/plugins/memolens
 python3 scripts/memolens_cli.py library-bootstrap-start --request-idempotency-key first-library-001
-python3 scripts/memolens_cli.py library-bootstrap-status lb_<opaque-id>
+python3 scripts/memolens_cli.py library-bootstrap-status 'lb_<opaque-id>'
 python3 scripts/memolens_cli.py status
 python3 scripts/memolens_cli.py creator-context
 python3 scripts/memolens_cli.py inbox-list --state inbox --kind image --kind video
@@ -108,12 +113,17 @@ python3 scripts/memolens_cli.py blueprint-validate --input blueprint-candidate.j
 python3 scripts/memolens_cli.py blueprint-get proj_123
 python3 scripts/memolens_cli.py blueprint-get proj_123 --revision 2
 python3 scripts/memolens_cli.py blueprint-history proj_123 --limit 50
-python3 scripts/memolens_cli.py agent-pair proj_123 --client-label "Codex" --action timeline.apply_edit --action timeline.apply_structural_edit --action timeline.restore_revision --action timeline.preview_media
+# Blueprint permission: approve this exact action set in the native companion.
+python3 scripts/memolens_cli.py agent-pair proj_123 --client-label "Codex" --action blueprint.commit_proposal --action blueprint.restore_revision
 python3 scripts/memolens_cli.py agent-pair-status proj_123
 python3 scripts/memolens_cli.py agent-capability-status proj_123
 python3 scripts/memolens_cli.py blueprint-commit proj_123 --input commit.json --idempotency-key proposal-001
 python3 scripts/memolens_cli.py blueprint-restore proj_123 --input restore.json --idempotency-key restore-001
+# Timeline editing uses a separate, explicitly approved action set.
+python3 scripts/memolens_cli.py agent-pair proj_123 --client-label "Codex" --action timeline.apply_edit --action timeline.apply_structural_edit --action timeline.restore_revision --action timeline.preview_media
 python3 scripts/memolens_cli.py timeline-validate --input timeline.json
 ```
+
+Grant only actions you intend to use. A Timeline-only capability cannot commit or restore a Blueprint, and a Blueprint-only capability cannot save Timeline edits. After each pairing, wait for native approval and verify the active action set before writing; the new pairing is not an implicit extension of the previous permission.
 
 All CLI output is one JSON value. Pairing and write commands need the running MemoLens backend plus native desktop review; all other safe-default commands retain their read-only SQLite behavior. The scripts work from a non-repository current working directory and require only the Python standard library.

@@ -4,7 +4,7 @@ MemoLens is a local creative workspace with Codex and DeepSeek Harness adapters.
 
 ## Install and keep the companion running
 
-Follow [Quick start](../README.md#quick-start). The setup script prepares Node, Python and FFmpeg; Core refuses a Python/SQLite combination that fails its actual linked-runtime safety check. Changing only the Python version string does not bypass that check.
+Follow [Quick start](../README.md#quick-start). Install Node.js and a supported Python interpreter first; the macOS instructions use Homebrew Python 3.14 and FFmpeg. The setup script creates the project virtual environment and installs application dependencies. Core refuses a Python/SQLite combination that fails its actual linked-runtime safety check. Changing only the Python version string does not bypass that check.
 
 Install the chosen [agent adapter](../.agents/plugins/plugins/memolens/README.md#install-a-host-adapter). Start a new Codex task, or restart DeepSeek Web, after installing an updated plugin. Data reads do not need a new MemoLens model account. Provider-backed visual analysis is a separate optional capability, and metadata fallback must not be described as visual understanding.
 

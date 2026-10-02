@@ -72,13 +72,14 @@ Agent、浏览器剪辑器和原生 companion 共用一个项目。上方截图�
 
 ## 快速开始
 
-**环境：** 原生 companion 使用 macOS · Node.js 22.12+ · FFmpeg/ffprobe 6+。安装脚本为 Core 管理 Python 3.14，实际链接的 SQLite 必须通过仓库 WAL 安全检查；独立插件支持 Python 3.10+。DeepSeek Harness 还需要 Node.js 22.19+ 或 24+。
+**环境：** 原生 companion 使用 macOS · Node.js 22.12+ · 带有通过安全检查的 SQLite 的 Python 3.10+ · FFmpeg/ffprobe 6+。执行下列命令前，先安装 [Homebrew](https://brew.sh) 和 Node.js。macOS 已验证使用 Homebrew Python 3.14，但仍会检查它实际链接的 SQLite。Setup 只创建项目虚拟环境并安装依赖，不负责安装 Python 或 Node.js。独立插件支持 Python 3.10+；DeepSeek Harness 还需要 Node.js 22.19+ 或 24+。
 
 ```bash
 git clone https://github.com/bingjiezhu/MemoLens.git
 cd MemoLens
 cp .env.example .env          # 可选：填服务商 key 或改用 Ollama
-npm run setup:mac             # 虚拟环境、Node 依赖；缺 FFmpeg 时用 Homebrew 安装
+brew install python@3.14 ffmpeg
+MEMOLENS_PYTHON="$(brew --prefix python@3.14)/bin/python3.14" npm run setup:mac
 ./Launch\ MemoLens.command
 ```
 
@@ -89,9 +90,13 @@ npm run setup:mac             # 虚拟环境、Node 依赖；缺 FFmpeg 时用 H
 在仓库目录执行，需已安装 Codex CLI：
 
 ```bash
+source .venv/bin/activate     # 从此终端启动 CLI 宿主，使用 Python 3.10+
+python3 --version
 codex plugin marketplace add "$(pwd)"
 codex plugin add memolens@memolens-local
 ```
+
+两个适配器都从宿主进程的 PATH 启动 `python3`；`MEMOLENS_PYTHON` 只选择 Core 的安装环境。使用 Codex Desktop 时，其插件进程也必须能找到 Python 3.10+；在另一个终端激活虚拟环境，不会改变已经运行的桌面应用。
 
 新建 Codex 任务，请 MemoLens 设置 Library。收到提示后打开原生 companion，在系统对话框里选择文件夹；扫描、配对和编辑期间保持 companion 运行。DeepSeek Harness Web 安装方式：
 

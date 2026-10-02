@@ -72,13 +72,14 @@ Also included:
 
 ## Quick start
 
-**Needs:** macOS for the desktop companion · Node.js 22.12+ · FFmpeg/ffprobe 6+. Setup manages Python 3.14 for Core; its actual linked SQLite must pass the bundled WAL-safety check. The standalone plugin supports Python 3.10+. DeepSeek Harness additionally requires Node.js 22.19+ or 24+.
+**Needs:** macOS for the desktop companion · Node.js 22.12+ · Python 3.10+ with an admitted SQLite runtime · FFmpeg/ffprobe 6+. Install [Homebrew](https://brew.sh) and Node.js before the commands below. Homebrew Python 3.14 is the tested macOS route; its actual linked SQLite must still pass the bundled WAL-safety check. Setup creates the project virtual environment and installs dependencies; it does not install Python or Node.js. The standalone plugin supports Python 3.10+. DeepSeek Harness additionally requires Node.js 22.19+ or 24+.
 
 ```bash
 git clone https://github.com/bingjiezhu/MemoLens.git
 cd MemoLens
 cp .env.example .env          # optional: provider key or Ollama
-npm run setup:mac             # venv, Node deps, Homebrew FFmpeg if missing
+brew install python@3.14 ffmpeg
+MEMOLENS_PYTHON="$(brew --prefix python@3.14)/bin/python3.14" npm run setup:mac
 ./Launch\ MemoLens.command
 ```
 
@@ -89,9 +90,13 @@ After setup you can also `npm run electron`.
 From this repository, with Codex CLI installed:
 
 ```bash
+source .venv/bin/activate     # launch CLI hosts from this shell to use Python 3.10+
+python3 --version
 codex plugin marketplace add "$(pwd)"
 codex plugin add memolens@memolens-local
 ```
+
+Both adapters start `python3` from the host process's PATH. `MEMOLENS_PYTHON` selects Core's setup runtime only. For Codex Desktop, ensure its plugin process can also resolve Python 3.10+; activating a virtual environment in a separate terminal does not update an already-running desktop app.
 
 Start a new Codex task and ask MemoLens to set up your Library. When prompted, open the native companion and choose the folder there. Leave it running for scanning, pairing and editing. To install in DeepSeek Harness Web:
 
