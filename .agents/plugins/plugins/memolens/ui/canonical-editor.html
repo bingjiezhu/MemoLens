@@ -165,7 +165,7 @@
     .control-group { border: 0; padding: 0; margin: 0; min-width: 0; }
     .control-group legend { color: #686d64; font-size: .74rem; margin-bottom: .4rem; }
     .control-row { display: flex; flex-wrap: wrap; gap: .45rem; }
-    .structure-controls { order: -1; padding-bottom: .9rem; border-bottom: 1px solid var(--line); }
+    .structure-controls { padding-bottom: .9rem; border-bottom: 1px solid var(--line); }
     .structure-controls .source-boundary { margin-top: .55rem; font-size: .7rem; }
     .precise-controls > fieldset { margin-top: .8rem; }
     .precise-controls, .replacement-review { grid-column: 1 / -1; }
@@ -1175,16 +1175,20 @@
         return wrapper
       }
 
-      function renderVisualTimeline(timeline, clips, canEdit, controlsEnabled, pending) {
-        const duration = Number(timeline.output.duration_ms)
-        if (!clips.some(clip => clip.clip_id === selectedClipId)) selectedClipId = clips[0]?.clip_id || null
-        playheadMs = clamp(playheadMs, 0, duration)
+      function resizeTimelineCanvas(duration) {
         const canvasWidth = Math.max(
           720,
           ui.timelineViewport.clientWidth || 0,
           Math.ceil(duration * pixelsPerMs()) + 1,
         )
         ui.timelineCanvas.style.width = `${canvasWidth}px`
+      }
+
+      function renderVisualTimeline(timeline, clips, canEdit, controlsEnabled, pending) {
+        const duration = Number(timeline.output.duration_ms)
+        if (!clips.some(clip => clip.clip_id === selectedClipId)) selectedClipId = clips[0]?.clip_id || null
+        playheadMs = clamp(playheadMs, 0, duration)
+        resizeTimelineCanvas(duration)
         renderRuler(duration)
         ui.timelineTrack.replaceChildren(
           element('span', 'track-label', 'Primary visual'),
@@ -1441,7 +1445,7 @@
             row,
             element('p', 'source-boundary', 'Original media remains unchanged. Review each change before saving a new version.'),
           )
-          controls.append(structure)
+          controls.prepend(structure)
         }
         card.append(head, meta)
         card.append(controls)
@@ -1671,7 +1675,8 @@
         ui.playPause.disabled = true
       })
       window.addEventListener('resize', () => {
-        if (state) render()
+        // Layout changes must not replace focused inputs or discard unstaged values.
+        if (state) resizeTimelineCanvas(timelineDuration())
       })
 
       ui.inspectHistory.addEventListener('click', async () => {

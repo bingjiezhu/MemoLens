@@ -2,6 +2,8 @@
 
 Date: 2026-10-02. Baseline: `origin/main` at `6c9013498a3f88e56445d5eb67b5dc0e9ff8e2ff`.
 
+Follow-up: [local-only closeout review](CLOSEOUT.md), including the keyboard-order and resize/input-preservation fixes. The verification totals below describe the earlier pass; the closeout lists its own fresh results. Do not merge into the primary checkout or publish without a new explicit user request.
+
 ## Scope and design rule
 
 The user asked for autonomous Grill Me self-questioning, simpler interaction, and a higher visual quality bar without replacing the existing MemoLens identity. Work took place in an isolated worktree; the original, dirty checkout was not changed.

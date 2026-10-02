@@ -91,6 +91,7 @@ function viewerHarness({ fetch } = {}) {
     .map(match => [match[2], { tagName: match[1], markup: match[0] }]))
   const elements = new Map()
   const frames = new Map()
+  const windowEvents = new Map()
   let nextFrame = 0
   const document = {
     hidden: false,
@@ -118,7 +119,10 @@ function viewerHarness({ fetch } = {}) {
   document.body = new Element('', 'body', document)
   document.activeElement = document.body
   const context = vm.createContext({
-    window: { location: { pathname: '/canonical-editor/canonical_test' }, addEventListener() {} },
+    window: {
+      location: { pathname: '/canonical-editor/canonical_test' },
+      addEventListener(type, callback) { windowEvents.set(type, callback) },
+    },
     document,
     performance: { now: () => 0 },
     requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame },
@@ -138,7 +142,7 @@ function viewerHarness({ fetch } = {}) {
         paused: () => !playbackRequested,
       }
   `), context)
-  return { viewer: context.viewer, elements, frames, document }
+  return { viewer: context.viewer, elements, frames, document, windowEvents }
 }
 
 function currentState(kind = 'image') {
@@ -222,6 +226,44 @@ test('selecting a timeline clip shows its inspector while retaining all clip for
   assert.equal(timelineClips[0].querySelector('.timeline-clip-body').getAttribute('aria-pressed'), 'false')
   assert.equal(timelineClips[1].querySelector('.timeline-clip-body').getAttribute('aria-pressed'), 'true')
   assert.deepEqual(elements.get('clips').children, cards, 'selection retains the existing exact-value forms')
+})
+
+test('primary clip actions precede advanced settings in reading and keyboard order', () => {
+  const { viewer, elements } = viewerHarness()
+  viewer.setState(twoClipState('video'))
+  viewer.render()
+  const controls = elements.get('clips').children[0].querySelector('.controls')
+  assert.ok(controls.children[0].classList.contains('structure-controls'))
+  assert.ok(controls.children[1].classList.contains('precise-controls'))
+})
+
+test('resizing preserves open clip settings, unstaged values, focus and timeline controls', () => {
+  const { viewer, elements, document, windowEvents } = viewerHarness()
+  windowEvents.get('resize')() // Safe before the initial state has loaded.
+  viewer.setState(twoClipState('video'))
+  viewer.render()
+  const card = elements.get('clips').children[0]
+  const precise = card.querySelector('.precise-controls')
+  const input = precise.querySelector('input')
+  const timelineClip = elements.get('timeline-track').querySelector('.timeline-clip-body')
+  precise.open = true
+  input.value = '350'
+  input.focus()
+  elements.get('visual-timeline').clientWidth = 1200
+  windowEvents.get('resize')()
+  assert.equal(elements.get('timeline-canvas').style.width, '1200px')
+  assert.equal(elements.get('clips').children[0], card)
+  assert.equal(precise.open, true)
+  assert.equal(input.value, '350')
+  assert.equal(document.activeElement, input)
+  timelineClip.focus()
+  elements.get('visual-timeline').clientWidth = 390
+  windowEvents.get('resize')()
+  assert.equal(elements.get('timeline-canvas').style.width, '720px')
+  assert.equal(elements.get('timeline-track').querySelector('.timeline-clip-body'), timelineClip)
+  assert.equal(document.activeElement, timelineClip)
+  assert.equal(precise.open, true)
+  assert.equal(input.value, '350')
 })
 
 test('seeking across a clip boundary synchronizes the selected inspector through the timeline end', () => {
