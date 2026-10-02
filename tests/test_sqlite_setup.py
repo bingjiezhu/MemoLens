@@ -343,6 +343,13 @@ class SQLiteSetupBoundaryTests(unittest.TestCase):
         self.assertLess(admission, environment)
         self.assertIn(".venv/bin/python -I scripts/check_sqlite_runtime.py --json", macos)
 
+    def test_production_oracle_entrypoint_builds_electron_before_loading_node_tests(self) -> None:
+        package = json.loads((PROJECT_ROOT / "package.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            package["scripts"]["test:production-oracles"],
+            "npm run build:electron && bash ./scripts/run_python.sh scripts/run_production_oracles.py",
+        )
+
     def test_quality_backfill_admission_failure_has_zero_database_side_effects(self) -> None:
         from scripts import backfill_image_quality
 

@@ -33,7 +33,7 @@ The backend binds to loopback by default. Use a disposable photo folder and data
 npm test                 # Python unit + plugin + Electron/Node tests
 npm run check            # lint, tests, local verify, and production build
 npm run test:plugin-package # actual npm package, schemas, license and CLI
-bash scripts/run_python.sh scripts/run_production_oracles.py
+npm run test:production-oracles # builds the Electron inputs before exact tests
 cd photon-bot && npm ci && npm audit --audit-level=high && npm test && npm run build
 ```
 

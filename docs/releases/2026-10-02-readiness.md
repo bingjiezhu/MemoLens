@@ -44,7 +44,7 @@ npm run test:plugin-package
 npm --prefix photon-bot ci
 npm --prefix photon-bot test
 npm --prefix photon-bot run build
-bash scripts/run_python.sh scripts/run_production_oracles.py
+npm run test:production-oracles
 bash scripts/run_python.sh -m unittest discover -s tests -p test_release_creator_journey.py -v
 ```
 

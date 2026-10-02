@@ -15,7 +15,7 @@
     "dev:local": "bash ./scripts/dev_local.sh",
     "test": "npm run test:unit && npm run test:plugin && npm run test:electron",
     "test:plugin-package": "bash ./scripts/run_python.sh scripts/verify_plugin_package.py",
-    "test:production-oracles": "bash ./scripts/run_python.sh scripts/run_production_oracles.py",
+    "test:production-oracles": "npm run build:electron && bash ./scripts/run_python.sh scripts/run_production_oracles.py",
     "build:renderer": "tsc --noEmit && vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
     "build": "npm run build:renderer && npm run build:electron",
