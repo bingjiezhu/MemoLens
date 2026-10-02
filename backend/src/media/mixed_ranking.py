@@ -5,6 +5,10 @@ import re
 import unicodedata
 from collections.abc import Sequence
 
+from core.canonical_image_observation import (
+    is_verified_current_canonical_image_observation,
+)
+
 from .mixed_search_contract import MixedSearchRequest
 
 
@@ -54,6 +58,27 @@ def normalized(value: object) -> str:
     return unicodedata.normalize("NFKC", str(value)).casefold()
 
 
+def usage_preference(item: dict[str, object]) -> int:
+    usage = item.get("canonical_usage")
+    if not isinstance(usage, dict):
+        return 0
+    if usage.get("media_kind") == "video":
+        # Rank the exact candidate window, not the containing asset.  A segment
+        # can be wholly fresh even when another interval of the same source file
+        # appeared in an earlier export.
+        used_intervals = usage.get("used_intervals")
+        if isinstance(used_intervals, list) and not used_intervals:
+            return 0
+        if usage.get("has_residual"):
+            return 1
+        return 2
+    if not usage.get("used"):
+        return 0
+    if usage.get("has_residual"):
+        return 1
+    return 2
+
+
 def rank_candidates(
     candidates: Sequence[dict[str, object]],
     request: MixedSearchRequest,
@@ -89,6 +114,7 @@ def rank_candidates(
     ranked.sort(
         key=lambda value: (
             -value.score,
+            usage_preference(value.item) if request.usage.prefer_unused else 0,
             str(value.item.get("captured_at") or ""),
             str(value.item["id"]),
         )
@@ -99,7 +125,30 @@ def rank_candidates(
 def grounded_candidates(ranked: Sequence[RankedCandidate]) -> list[RankedCandidate]:
     # A score of zero is not evidence. Returning it as a creative candidate makes an
     # unrelated library look grounded and prevents the product's honest empty state.
-    return [candidate for candidate in ranked if candidate.score > 0]
+    return [
+        candidate
+        for candidate in ranked
+        if candidate.score > 0 and candidate_is_groundable(candidate.item)
+    ]
+
+
+def candidate_is_groundable(item: dict[str, object]) -> bool:
+    if item.get("result_type") != "image_asset":
+        return True
+    observation = item.get("canonical_image_observation")
+    if not is_verified_current_canonical_image_observation(
+        observation,
+        asset_id=item.get("asset_id"),
+    ):
+        return False
+    assert isinstance(observation, dict)
+    binding = observation["analysis_binding"]
+    assert isinstance(binding, dict)
+    return (
+        item.get("analysis_status") == "current"
+        and item.get("analysis_run_id") == binding["analysis_run_id"]
+        and item.get("analysis_revision") == binding["revision"]
+    )
 
 
 def select_non_overlapping(
@@ -108,17 +157,25 @@ def select_non_overlapping(
     top_k: int,
 ) -> list[RankedCandidate]:
     selected: list[RankedCandidate] = []
-    selected_video_windows: dict[str, list[tuple[int, int]]] = {}
+    selected_video_windows: dict[str, list[tuple[int, int, bool]]] = {}
     for candidate in ranked:
         item = candidate.item
         if item["result_type"] == "video_segment":
             asset_id = str(item["asset_id"])
             start_ms = int(item["start_ms"])
             end_ms = int(item["end_ms"])
+            is_residual = isinstance(item.get("residual_binding"), dict)
             windows = selected_video_windows.setdefault(asset_id, [])
-            if any(start_ms <= prior_end + 250 and end_ms >= prior_start - 250 for prior_start, prior_end in windows):
+            if any(
+                (
+                    start_ms < prior_end and end_ms > prior_start
+                    if is_residual and prior_is_residual
+                    else start_ms <= prior_end + 250 and end_ms >= prior_start - 250
+                )
+                for prior_start, prior_end, prior_is_residual in windows
+            ):
                 continue
-            windows.append((start_ms, end_ms))
+            windows.append((start_ms, end_ms, is_residual))
         selected.append(candidate)
         if len(selected) >= top_k:
             break

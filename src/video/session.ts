@@ -9,6 +9,15 @@ export interface VideoSessionStorage {
   setItem(key: string, value: string): void;
 }
 
+export interface VideoSessionResumeGate {
+  canUseBackend: boolean;
+  dbPath: string | null | undefined;
+  requestedScopeKey: string;
+  stateScopeKey: string;
+  hasProject: boolean;
+  projectPhase: "idle" | "loading" | "ready" | "empty" | "error";
+}
+
 const SCOPE_SEPARATOR = "\u001f";
 const SESSION_KEY_PREFIX = "memolens.video.session.";
 
@@ -30,6 +39,18 @@ function scopeFingerprint(value: string): string {
 
 export function videoSessionStorageKey(scopeKey: string): string {
   return `${SESSION_KEY_PREFIX}${scopeFingerprint(scopeKey)}`;
+}
+
+export function canResumePersistedVideoSession(
+  gate: VideoSessionResumeGate,
+): boolean {
+  // A dependency change aborts the previous request before the effect runs
+  // again, so "loading" must remain resumable after a backend/runtime flap.
+  return gate.canUseBackend
+    && Boolean(gate.dbPath?.trim())
+    && gate.stateScopeKey === gate.requestedScopeKey
+    && !gate.hasProject
+    && (gate.projectPhase === "idle" || gate.projectPhase === "loading");
 }
 
 function hasScopedLibrary(scopeKey: string): boolean {

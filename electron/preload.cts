@@ -5,55 +5,134 @@ import type {
   DesktopIndexingResult,
   DesktopIndexingStartOptions,
   DesktopSettings,
+  DesktopSettingsUpdate,
 } from "../src/query/types.js";
 import type {
   DesktopArtifactSaveRequest,
   DesktopArtifactSaveResult,
 } from "../src/video/types.js";
+import type {
+  DesktopAgentAuthorityOverview,
+  DesktopAuthorityActionResult,
+  DesktopDecisionReviewRequest,
+} from "../src/blueprint/authorityTypes.js";
+import type {
+  DesktopCanonicalExportApprovalRequest,
+  DesktopCanonicalExportApprovalResult,
+} from "../src/blueprint/exportTypes.js";
+import type {
+  ElectronInvokeChannel,
+  ElectronOutboundEventChannel,
+} from "./productionSurfaceRegistry.js";
 
 // Sandboxed preload scripts run in Electron's restricted CommonJS context.
 // `electron` is one of the explicitly supported modules there; Node built-ins
 // such as `node:module` and ESM imports are intentionally unavailable.
 const { contextBridge, ipcRenderer } = require("electron") as typeof Electron.Renderer;
 
+function invokeProductionIpc<Result>(
+  channel: ElectronInvokeChannel,
+  ...args: unknown[]
+): Promise<Result> {
+  return ipcRenderer.invoke(channel, ...args) as Promise<Result>;
+}
+
+function subscribeProductionIpcEvent<Payload>(
+  channel: ElectronOutboundEventChannel,
+  callback: (payload: Payload) => void,
+): () => void {
+  const listener = (_event: Electron.IpcRendererEvent, payload: Payload) => {
+    callback(payload);
+  };
+  ipcRenderer.on(channel, listener);
+  return () => {
+    ipcRenderer.removeListener(channel, listener);
+  };
+}
+
 contextBridge.exposeInMainWorld("memolensDesktop", {
   getSettings(): Promise<DesktopSettings> {
-    return ipcRenderer.invoke("memolens:get-settings");
+    return invokeProductionIpc<DesktopSettings>("memolens:get-settings");
   },
-  saveSettings(settings: DesktopSettings): Promise<DesktopSettings> {
-    return ipcRenderer.invoke("memolens:save-settings", settings);
+  listAgentAuthority(projectId?: string | null): Promise<DesktopAgentAuthorityOverview> {
+    return invokeProductionIpc<DesktopAgentAuthorityOverview>(
+      "memolens:list-agent-authority",
+      projectId ?? null,
+    );
+  },
+  reviewAgentPairing(
+    pairingId: string,
+    projectId: string,
+  ): Promise<DesktopAuthorityActionResult> {
+    return invokeProductionIpc<DesktopAuthorityActionResult>(
+      "memolens:review-agent-pairing",
+      pairingId,
+      projectId,
+    );
+  },
+  revokeAgentCapability(
+    capabilityId: string,
+    projectId: string,
+  ): Promise<DesktopAuthorityActionResult> {
+    return invokeProductionIpc<DesktopAuthorityActionResult>(
+      "memolens:revoke-agent-capability",
+      capabilityId,
+      projectId,
+    );
+  },
+  requestDecisionAuthorityReview(
+    request: DesktopDecisionReviewRequest,
+  ): Promise<DesktopAuthorityActionResult> {
+    return invokeProductionIpc<DesktopAuthorityActionResult>(
+      "memolens:request-decision-authority-review",
+      request,
+    );
+  },
+  approveAndExportCanonicalTimeline(
+    request: DesktopCanonicalExportApprovalRequest,
+  ): Promise<DesktopCanonicalExportApprovalResult> {
+    return invokeProductionIpc<DesktopCanonicalExportApprovalResult>(
+      "memolens:approve-and-export-canonical-timeline",
+      request,
+    );
+  },
+  saveSettings(update: DesktopSettingsUpdate): Promise<DesktopSettings> {
+    return invokeProductionIpc<DesktopSettings>("memolens:save-settings", update);
   },
   ensureBackend(): Promise<DesktopBackendStatus> {
-    return ipcRenderer.invoke("memolens:ensure-backend");
+    return invokeProductionIpc<DesktopBackendStatus>("memolens:ensure-backend");
   },
   pickImageFolder(): Promise<DesktopFolderSelection | null> {
-    return ipcRenderer.invoke("memolens:pick-image-folder");
+    return invokeProductionIpc<DesktopFolderSelection | null>("memolens:pick-image-folder");
   },
-  commitLibrarySelection(selection: DesktopFolderSelection): Promise<DesktopSettings> {
-    return ipcRenderer.invoke("memolens:commit-library-selection", selection);
+  commitLibrarySelection(selectionTicket: string): Promise<DesktopSettings> {
+    return invokeProductionIpc<DesktopSettings>(
+      "memolens:commit-library-selection",
+      selectionTicket,
+    );
   },
   startIndexing(options: DesktopIndexingStartOptions): Promise<DesktopIndexingResult> {
-    return ipcRenderer.invoke("memolens:start-indexing", options);
+    return invokeProductionIpc<DesktopIndexingResult>("memolens:start-indexing", options);
   },
-  pauseIndexing(): Promise<boolean> {
-    return ipcRenderer.invoke("memolens:pause-indexing");
+  pauseIndexing(operationId: string): Promise<boolean> {
+    return invokeProductionIpc<boolean>("memolens:pause-indexing", operationId);
   },
-  resumeIndexing(): Promise<boolean> {
-    return ipcRenderer.invoke("memolens:resume-indexing");
+  resumeIndexing(operationId: string): Promise<boolean> {
+    return invokeProductionIpc<boolean>("memolens:resume-indexing", operationId);
   },
   saveVideoArtifact(request: DesktopArtifactSaveRequest): Promise<DesktopArtifactSaveResult> {
-    return ipcRenderer.invoke("memolens:save-video-artifact", request);
+    return invokeProductionIpc<DesktopArtifactSaveResult>(
+      "memolens:save-video-artifact",
+      request,
+    );
   },
   openInCodex(): Promise<boolean> {
-    return ipcRenderer.invoke("memolens:open-in-codex");
+    return invokeProductionIpc<boolean>("memolens:open-in-codex");
   },
   onIndexingProgress(callback: (progress: DesktopIndexingProgress) => void): () => void {
-    const listener = (_event: Electron.IpcRendererEvent, progress: DesktopIndexingProgress) => {
-      callback(progress);
-    };
-    ipcRenderer.on("memolens:indexing-progress", listener);
-    return () => {
-      ipcRenderer.removeListener("memolens:indexing-progress", listener);
-    };
+    return subscribeProductionIpcEvent<DesktopIndexingProgress>(
+      "memolens:indexing-progress",
+      callback,
+    );
   },
 });

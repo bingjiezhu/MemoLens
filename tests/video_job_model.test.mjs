@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -53,4 +54,22 @@ test("presentation helpers are deterministic and bounded", () => {
   assert.equal(formatMediaScore(0.505), "51%");
   assert.equal(formatMediaScore(2), "100%");
   assert.equal(defaultPreviewFilename({ project_id: "project", revision: 7 }), "memolens-project-r7.mp4");
+});
+
+test("hidden or background Video Workbench gates every periodic poller", async () => {
+  const source = await readFile(new URL("../src/VideoWorkbench.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /root\.closest\("\[hidden\]"\) === null/);
+  assert.match(source, /document\.addEventListener\("visibilitychange", refresh\)/);
+  assert.match(source, /attributeFilter: \["hidden"\]/);
+  assert.equal(
+    source.match(/if \(!pollingAllowed \|\|/g)?.length,
+    3,
+    "Blueprint, media-index, and render polling effects must all share the visibility gate",
+  );
+  assert.match(
+    source,
+    /data-video-workbench-polling-root="canonical"\s*>\s*<div className="section-block video-workbench">\{projectOpenPanel\}<\/div>\s*\{pollingAllowed \? \(/,
+    "the nested canonical workspace must not retain its own pollers while hidden",
+  );
 });

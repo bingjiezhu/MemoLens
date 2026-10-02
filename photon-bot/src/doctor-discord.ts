@@ -19,10 +19,18 @@ async function main(): Promise<void> {
     void client.login(config.discordBotToken).catch(reject);
   });
 
+  if (client.user?.id !== config.discordExpectedBotUserId) {
+    client.destroy();
+    throw new Error(
+      "Discord account scope denied: authenticated bot user does not match DISCORD_EXPECTED_BOT_USER_ID.",
+    );
+  }
+
   const application = await client.application?.fetch();
 
   console.log("MemoLens Discord Doctor");
   console.log(`Bot user: ${client.user?.tag ?? "unknown"} (${client.user?.id ?? "unknown"})`);
+  console.log(`Pinned bot user ID: ${config.discordExpectedBotUserId}`);
   console.log(`Application: ${application?.name ?? "unknown"}`);
   console.log(`Guilds visible: ${client.guilds.cache.size}`);
   console.log(`Allowed users (required): ${config.discordAllowedUserIds.join(", ")}`);

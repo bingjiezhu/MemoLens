@@ -1,4 +1,5 @@
 import type {
+  CanonicalUsagePolicy,
   CreativeAssetMatch,
   CreativeProject,
   CreativeTimeline,
@@ -23,6 +24,9 @@ export interface VideoWorkbenchState {
   searchPhase: AsyncPhase;
   searchResults: CreativeAssetMatch[];
   searchError: string | null;
+  searchUsagePolicy: CanonicalUsagePolicy | null;
+  searchUsageRevision: string | null;
+  searchDerivativeRevision: string | null;
   selectedMatchId: string | null;
   segmentPhase: AsyncPhase;
   segment: VideoSegmentDetail | null;
@@ -50,14 +54,22 @@ export type VideoWorkbenchAction =
   | { type: "index_job"; job: MediaJob }
   | { type: "index_error"; error: string }
   | { type: "search_loading" }
-  | { type: "search_ready"; results: CreativeAssetMatch[] }
+  | { type: "search_reset" }
+  | {
+      type: "search_ready";
+      results: CreativeAssetMatch[];
+      usagePolicy: CanonicalUsagePolicy | null;
+      usageRevision: string | null;
+      derivativeRevision: string;
+    }
   | { type: "search_error"; error: string }
   | { type: "select_match"; matchId: string | null }
   | { type: "segment_loading" }
   | { type: "segment_ready"; segment: VideoSegmentDetail }
   | { type: "segment_error"; error: string }
   | { type: "project_loading" }
-  | { type: "project_ready"; project: CreativeProject }
+  | { type: "project_ready"; project: CreativeProject; resetWorkspace?: boolean }
+  | { type: "canonical_workspace_opened" }
   | { type: "project_error"; error: string }
   | { type: "timeline_loading" }
   | { type: "timeline_ready"; timeline: CreativeTimeline; diff?: TimelineDiff[] }
@@ -81,6 +93,9 @@ export function initialVideoWorkbenchState(scopeKey: string): VideoWorkbenchStat
     searchPhase: "idle",
     searchResults: [],
     searchError: null,
+    searchUsagePolicy: null,
+    searchUsageRevision: null,
+    searchDerivativeRevision: null,
     selectedMatchId: null,
     segmentPhase: "idle",
     segment: null,
@@ -127,19 +142,57 @@ export function videoWorkbenchReducer(
     case "index_error":
       return { ...state, indexError: action.error };
     case "search_loading":
-      return { ...state, searchPhase: "loading", searchError: null };
+      return {
+        ...state,
+        searchPhase: "loading",
+        searchResults: [],
+        searchError: null,
+        searchUsagePolicy: null,
+        searchUsageRevision: null,
+        searchDerivativeRevision: null,
+        selectedMatchId: null,
+        segment: null,
+        segmentError: null,
+        segmentPhase: "idle",
+      };
+    case "search_reset":
+      return {
+        ...state,
+        searchPhase: "idle",
+        searchResults: [],
+        searchError: null,
+        searchUsagePolicy: null,
+        searchUsageRevision: null,
+        searchDerivativeRevision: null,
+        selectedMatchId: null,
+        segment: null,
+        segmentError: null,
+        segmentPhase: "idle",
+      };
     case "search_ready":
       return {
         ...state,
         searchPhase: action.results.length > 0 ? "ready" : "empty",
         searchResults: action.results,
         searchError: null,
+        searchUsagePolicy: action.usagePolicy,
+        searchUsageRevision: action.usageRevision,
+        searchDerivativeRevision: action.derivativeRevision,
         selectedMatchId: action.results.some((item) => item.id === state.selectedMatchId)
           ? state.selectedMatchId
           : action.results[0]?.id ?? null,
       };
     case "search_error":
-      return { ...state, searchPhase: "error", searchResults: [], searchError: action.error };
+      return {
+        ...state,
+        searchPhase: "error",
+        searchResults: [],
+        searchError: action.error,
+        searchUsagePolicy: null,
+        searchUsageRevision: null,
+        searchDerivativeRevision: null,
+        selectedMatchId: null,
+      };
     case "select_match":
       return { ...state, selectedMatchId: action.matchId, segment: null, segmentError: null, segmentPhase: "idle" };
     case "segment_loading":
@@ -156,7 +209,7 @@ export function videoWorkbenchReducer(
         projectPhase: "ready",
         project: action.project,
         projectError: null,
-        ...(state.project?.id === action.project.id
+        ...(!action.resetWorkspace && state.project?.id === action.project.id
           ? {}
           : {
               timelinePhase: "idle" as AsyncPhase,
@@ -170,6 +223,23 @@ export function videoWorkbenchReducer(
               renderError: null,
               saveMessage: null,
             }),
+      };
+    case "canonical_workspace_opened":
+      return {
+        ...state,
+        projectPhase: "ready",
+        project: null,
+        projectError: null,
+        timelinePhase: "idle",
+        timeline: null,
+        timelineError: null,
+        timelineDiff: [],
+        validationPhase: "idle",
+        validation: null,
+        validationError: null,
+        renderJob: null,
+        renderError: null,
+        saveMessage: null,
       };
     case "project_error":
       return { ...state, projectPhase: "error", projectError: action.error };

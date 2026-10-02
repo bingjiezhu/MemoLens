@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from PIL import Image
@@ -13,6 +14,34 @@ from PIL import Image
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+_TERMINAL_MEDIA_JOB_STATES = {
+    "succeeded",
+    "failed",
+    "cancelled",
+    "interrupted",
+}
+
+
+def _wait_for_media_job(client, job_id: object, *, timeout: float = 60.0) -> dict[str, object]:
+    if not isinstance(job_id, str) or not job_id:
+        return {"status": "missing", "id": job_id}
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.get(f"/v1/index/jobs/{job_id}")
+        payload = response.get_json(silent=True) or {}
+        if response.status_code != 200:
+            return {
+                "status": "read_failed",
+                "id": job_id,
+                "http_status": response.status_code,
+            }
+        job = payload.get("job")
+        if isinstance(job, dict) and job.get("status") in _TERMINAL_MEDIA_JOB_STATES:
+            return dict(job)
+        time.sleep(0.02)
+    return {"status": "timeout", "id": job_id}
 
 
 def main() -> int:
@@ -41,7 +70,7 @@ def main() -> int:
     ):
         os.environ[env_name] = ""
 
-    from backend.src import create_app
+    from backend.src import create_app, shutdown_runtime_extensions
     from backend.src.retrieval import RetrievalService
 
     app = create_app()
@@ -63,14 +92,24 @@ def main() -> int:
             "image_library_dir": str(state_dir / "missing-photo-dir"),
         },
     )
+    photos_identity = photos_dir.stat()
+    library_root_identity = {
+        "device": str(photos_identity.st_dev),
+        "inode": str(photos_identity.st_ino),
+    }
     index_response = client.post(
         "/v1/indexing/jobs",
         json={
             "image_dir": str(photos_dir),
             "db_path": str(state_dir / "storage" / "photo_index.db"),
+            "library_root_identity": library_root_identity,
             "persist_to_server": True,
             "reindex": True,
         },
+    )
+    index_job = _wait_for_media_job(
+        client,
+        (index_response.get_json(silent=True) or {}).get("job_id"),
     )
     renamed_dir = photos_dir / "renamed"
     renamed_dir.mkdir(parents=True, exist_ok=True)
@@ -81,15 +120,21 @@ def main() -> int:
         json={
             "image_dir": str(photos_dir),
             "db_path": str(state_dir / "storage" / "photo_index.db"),
+            "library_root_identity": library_root_identity,
             "persist_to_server": True,
             "reindex": False,
         },
+    )
+    relocated_index_job = _wait_for_media_job(
+        client,
+        (relocated_index_response.get_json(silent=True) or {}).get("job_id"),
     )
     invalid_index_db_response = client.post(
         "/v1/indexing/jobs",
         json={
             "image_dir": str(photos_dir),
             "db_path": str(photos_dir),
+            "library_root_identity": library_root_identity,
             "persist_to_server": True,
             "reindex": True,
         },
@@ -162,11 +207,13 @@ def main() -> int:
             "limit": 20,
         },
     )
-    atlas_asset_id = (
-        ((atlas_overview_response.json or {}).get("assets") or [{}])[0].get("id")
+    atlas_asset = (
+        ((atlas_overview_response.json or {}).get("assets") or [{}])[0]
         if atlas_overview_response.status_code == 200
-        else None
+        else {}
     )
+    atlas_asset_id = atlas_asset.get("id")
+    atlas_asset_observation = atlas_asset.get("canonical_image_observation")
     atlas_feedback_response = client.post(
         "/v1/atlas/feedback",
         json={
@@ -185,6 +232,11 @@ def main() -> int:
             "top_k": 3,
             "no_people": True,
             "asset_ids": [atlas_asset_id] if atlas_asset_id else [],
+            "asset_observations": (
+                [atlas_asset_observation]
+                if atlas_asset_id and isinstance(atlas_asset_observation, dict)
+                else []
+            ),
             "include_copy": False,
         },
     )
@@ -403,7 +455,11 @@ def main() -> int:
         "settings_status": settings_response.status_code,
         "invalid_settings_status": invalid_settings_response.status_code,
         "index_status": index_response.status_code,
+        "index_job_status": index_job.get("status"),
+        "index_job_kind": index_job.get("kind"),
         "relocated_index_status": relocated_index_response.status_code,
+        "relocated_index_job_status": relocated_index_job.get("status"),
+        "relocated_index_job_kind": relocated_index_job.get("kind"),
         "invalid_index_db_status": invalid_index_db_response.status_code,
         "indexed_count": index_response.json["meta"]["indexed_count"],
         "index_has_records": "records" in (index_response.json or {}),
@@ -534,27 +590,36 @@ def main() -> int:
         ],
     }
 
+    shutdown_runtime_extensions(app.extensions)
     print(json.dumps(result, indent=2))
 
     if result["settings_status"] != 200:
         return 1
     if result["invalid_settings_status"] != 400:
         return 1
-    if result["index_status"] != 200 or result["indexed_count"] < 1:
+    if result["index_status"] != 202 or result["indexed_count"] != 0:
         return 1
-    if result["relocated_index_status"] != 200:
+    if result["index_job_status"] != "succeeded":
         return 1
-    if result["invalid_index_db_status"] != 400:
+    if result["index_job_kind"] != "image_analysis":
+        return 1
+    if result["relocated_index_status"] != 202:
+        return 1
+    if result["relocated_index_job_status"] != "succeeded":
+        return 1
+    if result["relocated_index_job_kind"] != "image_analysis":
+        return 1
+    if result["invalid_index_db_status"] != 409:
         return 1
     if result["index_has_records"] is not False:
         return 1
-    if result["relocated_skip_message"] != "already indexed (path updated)":
+    if result["relocated_skip_message"] is not None:
         return 1
     if result["stored_relative_path"] != "renamed/quiet_beach_sunset_renamed.jpg":
         return 1
-    if result["stored_aesthetic_score"] is None:
+    if result["stored_aesthetic_score"] is not None:
         return 1
-    if result["stored_aesthetic_model"] != "local_technical_aesthetic_v1":
+    if result["stored_aesthetic_model"] is not None:
         return 1
     if result["query_status"] != 200 or result["query_candidate_count"] < 1:
         return 1

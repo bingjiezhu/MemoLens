@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { extname, join, relative, resolve, sep } from "node:path";
 
@@ -7,6 +8,8 @@ import type {
   DesktopIndexingResult,
   DesktopIndexingStartOptions,
 } from "../src/query/types.js";
+import { createGuardedFetch, guardedFetch } from "./networkPolicy.js";
+import { sendProductionIpcEvent } from "./productionSurfaceRegistry.js";
 
 const SUPPORTED_IMAGE_EXTENSIONS = new Set([
   ".jpg",
@@ -22,7 +25,6 @@ const SUPPORTED_IMAGE_EXTENSIONS = new Set([
 ]);
 
 export const LOCAL_INDEX_BATCH_SIZE = 6;
-const PROGRESS_CHANNEL = "memolens:indexing-progress";
 
 export interface IndexingProgressSender {
   isDestroyed(): boolean;
@@ -33,6 +35,8 @@ export interface ImageBatchRequest {
   apiBase: string;
   filePaths: string[];
   rootPath: string;
+  rootDevice: string;
+  rootInode: string;
   model: string | null;
   dbPath: string;
   reindex: boolean;
@@ -55,19 +59,38 @@ interface HttpBatchDependencies {
 export interface DesktopIndexingCoordinatorOptions {
   apiBase: string;
   getSessionToken: () => string;
-  resolveDbPath: (folderPath: string) => string;
+  resolveApprovedSelection: () => Promise<ApprovedIndexingSelection>;
   collectImageFiles?: (folderPath: string) => Promise<string[]>;
   analyzeImageBatch?: ImageBatchAnalyzer;
   fetch?: typeof fetch;
   resolvePath?: (filePath: string) => string;
   batchSize?: number;
+  createOperationId?: () => string;
+}
+
+export interface ApprovedIndexingSelection {
+  folderPath: string;
+  dbPath: string;
+  rootDevice: string;
+  rootInode: string;
+  verifyCurrentIdentity: () => Promise<void>;
+  release?: () => Promise<void>;
 }
 
 interface ActiveIndexingJob {
+  operationId: string;
   sender: IndexingProgressSender;
   progress: DesktopIndexingProgress;
   pauseRequested: boolean;
   resumeResolvers: Array<() => void>;
+}
+
+const INDEXING_OPERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function indexingOperationId(value: unknown): string | null {
+  return typeof value === "string" && INDEXING_OPERATION_ID.test(value)
+    ? value.toLowerCase()
+    : null;
 }
 
 interface IndexingCounts {
@@ -80,9 +103,39 @@ interface IndexingCounts {
 interface IndexingRun {
   folderPath: string;
   dbPath: string;
+  rootDevice: string;
+  rootInode: string;
+  verifyCurrentIdentity: () => Promise<void>;
   imageFiles: string[];
   errors: string[];
   counts: IndexingCounts;
+  release: () => Promise<void>;
+}
+
+export function normalizeDesktopIndexingStartOptions(
+  rawOptions: unknown,
+): DesktopIndexingStartOptions {
+  if (rawOptions === null || typeof rawOptions !== "object" || Array.isArray(rawOptions)) {
+    throw new Error("MemoLens rejected invalid indexing options.");
+  }
+  const record = rawOptions as Record<string, unknown>;
+  if (Object.keys(record).some((key) => key !== "model" && key !== "reindex")) {
+    throw new Error("MemoLens rejected renderer-controlled indexing paths.");
+  }
+  if (
+    record.model !== undefined
+    && record.model !== null
+    && typeof record.model !== "string"
+  ) {
+    throw new Error("MemoLens rejected an invalid indexing model.");
+  }
+  if (record.reindex !== undefined && typeof record.reindex !== "boolean") {
+    throw new Error("MemoLens rejected an invalid indexing reindex flag.");
+  }
+  return {
+    ...(record.model === undefined ? {} : { model: record.model as string | null }),
+    ...(record.reindex === undefined ? {} : { reindex: record.reindex as boolean }),
+  };
 }
 
 export async function collectImageFiles(folderPath: string): Promise<string[]> {
@@ -103,7 +156,23 @@ export async function collectImageFiles(folderPath: string): Promise<string[]> {
 }
 
 function toRelativePath(rootPath: string, filePath: string): string {
-  return relative(rootPath, filePath).split(sep).join("/");
+  const relativePath = relative(rootPath, filePath).split(sep).join("/");
+  if (
+    relativePath.length === 0
+    || relativePath.startsWith("/")
+    || relativePath === ".."
+    || relativePath.startsWith("../")
+    || relativePath.split("/").some((part) => part.length === 0 || part === "." || part === "..")
+  ) {
+    throw new Error("MemoLens rejected a file outside the approved library root.");
+  }
+  return relativePath;
+}
+
+function assertRootIdentity(device: string, inode: string): void {
+  if (!/^(?:0|[1-9][0-9]{0,31})$/.test(device) || !/^(?:0|[1-9][0-9]{0,31})$/.test(inode)) {
+    throw new Error("MemoLens rejected an invalid approved library identity.");
+  }
 }
 
 function chunkPaths(values: string[], chunkSize: number): string[][] {
@@ -139,10 +208,14 @@ export async function requestImageBatch(
   request: ImageBatchRequest,
   dependencies: HttpBatchDependencies,
 ): Promise<ImageBatchResult> {
+  assertRootIdentity(request.rootDevice, request.rootInode);
   const relativePaths = request.filePaths.map((filePath) => (
     toRelativePath(request.rootPath, filePath)
   ));
-  const response = await (dependencies.fetch ?? fetch)(
+  const fetchImpl = dependencies.fetch
+    ? createGuardedFetch(dependencies.fetch)
+    : guardedFetch;
+  const response = await fetchImpl(
     `${request.apiBase.replace(/\/$/, "")}/v1/indexing/jobs`,
     {
       method: "POST",
@@ -155,6 +228,10 @@ export async function requestImageBatch(
         persist_to_server: true,
         reindex: request.reindex,
         db_path: request.dbPath,
+        library_root_identity: {
+          device: request.rootDevice,
+          inode: request.rootInode,
+        },
         input: {
           image_dir: request.rootPath,
           files: relativePaths,
@@ -235,11 +312,13 @@ export class DesktopIndexingCoordinator {
   private readonly analyzeBatch: ImageBatchAnalyzer;
   private readonly resolvePath: (filePath: string) => string;
   private readonly batchSize: number;
+  private readonly createOperationId: () => string;
 
   constructor(private readonly options: DesktopIndexingCoordinatorOptions) {
     this.collectFiles = options.collectImageFiles ?? collectImageFiles;
     this.resolvePath = options.resolvePath ?? resolve;
     this.batchSize = Math.max(1, options.batchSize ?? LOCAL_INDEX_BATCH_SIZE);
+    this.createOperationId = options.createOperationId ?? randomUUID;
     this.analyzeBatch = options.analyzeImageBatch ?? ((request) => (
       requestImageBatch(request, {
         getSessionToken: options.getSessionToken,
@@ -250,14 +329,16 @@ export class DesktopIndexingCoordinator {
 
   async start(
     sender: IndexingProgressSender,
-    options: DesktopIndexingStartOptions,
+    rawOptions: unknown,
   ): Promise<DesktopIndexingResult> {
     this.assertCanStart();
+    const options = normalizeDesktopIndexingStartOptions(rawOptions);
     this.startInProgress = true;
     let job: ActiveIndexingJob | null = null;
+    let run: IndexingRun | null = null;
 
     try {
-      const run = await this.prepareRun(options);
+      run = await this.prepareRun();
       job = this.activateJob(sender, run);
       this.startInProgress = false;
       await this.processBatches(job, run, options);
@@ -270,12 +351,19 @@ export class DesktopIndexingCoordinator {
       if (this.activeJob === job) {
         this.activeJob = null;
       }
+      await run?.release();
     }
   }
 
-  pause(): boolean {
+  pause(rawOperationId: unknown): boolean {
     const job = this.activeJob;
-    if (job === null || !canPausePhase(job.progress.phase)) {
+    const operationId = indexingOperationId(rawOperationId);
+    if (
+      operationId === null
+      || job === null
+      || operationId !== job.operationId
+      || !canPausePhase(job.progress.phase)
+    ) {
       return false;
     }
 
@@ -286,9 +374,15 @@ export class DesktopIndexingCoordinator {
     return true;
   }
 
-  resume(): boolean {
+  resume(rawOperationId: unknown): boolean {
     const job = this.activeJob;
-    if (job === null || !canPausePhase(job.progress.phase)) {
+    const operationId = indexingOperationId(rawOperationId);
+    if (
+      operationId === null
+      || job === null
+      || operationId !== job.operationId
+      || !canPausePhase(job.progress.phase)
+    ) {
       return false;
     }
 
@@ -313,23 +407,52 @@ export class DesktopIndexingCoordinator {
     }
   }
 
-  private async prepareRun(options: DesktopIndexingStartOptions): Promise<IndexingRun> {
-    const folderPath = this.resolvePath(options.folderPath);
-    const dbPath = this.resolvePath(options.dbPath ?? this.options.resolveDbPath(folderPath));
-    return {
-      folderPath,
-      dbPath,
-      imageFiles: await this.collectFiles(folderPath),
-      errors: [],
-      counts: { completed: 0, indexed: 0, skipped: 0, failed: 0 },
-    };
+  private async prepareRun(): Promise<IndexingRun> {
+    const approved = await this.options.resolveApprovedSelection();
+    const folderPath = this.resolvePath(approved.folderPath);
+    const dbPath = this.resolvePath(approved.dbPath);
+    const release = approved.release ?? (async () => undefined);
+    if (folderPath !== approved.folderPath || dbPath !== approved.dbPath) {
+      await release();
+      throw new Error("MemoLens rejected a non-canonical approved indexing selection.");
+    }
+    try {
+      assertRootIdentity(approved.rootDevice, approved.rootInode);
+      // The held main-process grant is rechecked immediately before and after
+      // the path-based discovery pass.  The backend's pinned root fd remains
+      // the security boundary; these checks prevent avoidable UI disclosure
+      // or requests when replacement is already observable in Electron.
+      await approved.verifyCurrentIdentity();
+      const imageFiles = await this.collectFiles(folderPath);
+      await approved.verifyCurrentIdentity();
+      return {
+        folderPath,
+        dbPath,
+        rootDevice: approved.rootDevice,
+        rootInode: approved.rootInode,
+        verifyCurrentIdentity: approved.verifyCurrentIdentity,
+        imageFiles,
+        errors: [],
+        counts: { completed: 0, indexed: 0, skipped: 0, failed: 0 },
+        release,
+      };
+    } catch (error) {
+      await release();
+      throw error;
+    }
   }
 
   private activateJob(sender: IndexingProgressSender, run: IndexingRun): ActiveIndexingJob {
     const total = run.imageFiles.length;
+    const operationId = indexingOperationId(this.createOperationId());
+    if (operationId === null) {
+      throw new Error("MemoLens refused to create an invalid indexing operation identity.");
+    }
     const job: ActiveIndexingJob = {
+      operationId,
       sender,
       progress: {
+        operationId,
         phase: "running",
         total,
         ...run.counts,
@@ -353,6 +476,7 @@ export class DesktopIndexingCoordinator {
   ): Promise<void> {
     for (const filePaths of chunkPaths(run.imageFiles, this.batchSize)) {
       await this.waitIfPaused(job);
+      await run.verifyCurrentIdentity();
       const currentFile = batchLabel(run.folderPath, filePaths);
       this.publishProgress(job, { phase: "running", currentFile });
       await this.processBatch(run, options, filePaths, currentFile);
@@ -371,6 +495,8 @@ export class DesktopIndexingCoordinator {
         apiBase: this.options.apiBase,
         filePaths,
         rootPath: run.folderPath,
+        rootDevice: run.rootDevice,
+        rootInode: run.rootInode,
         model: options.model ?? null,
         dbPath: run.dbPath,
         reindex: Boolean(options.reindex),
@@ -435,7 +561,7 @@ export class DesktopIndexingCoordinator {
   ): void {
     job.progress = { ...job.progress, ...patch };
     if (!job.sender.isDestroyed()) {
-      job.sender.send(PROGRESS_CHANNEL, job.progress);
+      sendProductionIpcEvent(job.sender, "memolens:indexing-progress", job.progress);
     }
   }
 

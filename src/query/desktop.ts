@@ -5,6 +5,7 @@ import type {
   DesktopIndexingResult,
   DesktopIndexingStartOptions,
   DesktopSettings,
+  DesktopSettingsUpdate,
 } from "./types";
 
 function getDesktopApi() {
@@ -28,13 +29,13 @@ export async function getDesktopSettings(): Promise<DesktopSettings | null> {
 }
 
 export async function saveDesktopSettings(
-  settings: DesktopSettings,
+  update: DesktopSettingsUpdate,
 ): Promise<DesktopSettings | null> {
   const api = getDesktopApi();
   if (api === null) {
     return null;
   }
-  return api.saveSettings(settings);
+  return api.saveSettings(update);
 }
 
 export async function ensureDesktopBackend(): Promise<DesktopBackendStatus | null> {
@@ -54,13 +55,13 @@ export async function pickLocalImageFolder(): Promise<DesktopFolderSelection | n
 }
 
 export async function commitLocalLibrarySelection(
-  selection: DesktopFolderSelection,
+  selectionTicket: string,
 ): Promise<DesktopSettings | null> {
   const api = getDesktopApi();
   if (api === null) {
     return null;
   }
-  return api.commitLibrarySelection(selection);
+  return api.commitLibrarySelection(selectionTicket);
 }
 
 export async function startLocalIndexing(
@@ -73,20 +74,20 @@ export async function startLocalIndexing(
   return api.startIndexing(options);
 }
 
-export async function pauseLocalIndexing(): Promise<boolean | null> {
+export async function pauseLocalIndexing(operationId: string): Promise<boolean | null> {
   const api = getDesktopApi();
   if (api === null) {
     return null;
   }
-  return api.pauseIndexing();
+  return api.pauseIndexing(operationId);
 }
 
-export async function resumeLocalIndexing(): Promise<boolean | null> {
+export async function resumeLocalIndexing(operationId: string): Promise<boolean | null> {
   const api = getDesktopApi();
   if (api === null) {
     return null;
   }
-  return api.resumeIndexing();
+  return api.resumeIndexing(operationId);
 }
 
 export function subscribeToIndexingProgress(

@@ -1,47 +1,92 @@
-import { createWriteStream, existsSync } from "node:fs";
-import { link, unlink } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { constants, existsSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { Readable, Transform } from "node:stream";
-import { pipeline } from "node:stream/promises";
 
 import {
+  commitLibraryBootstrapCandidate,
   ensureBackendReady,
+  ensureLibraryBootstrapCandidateReady,
   getDesktopSessionToken,
+  getMainAuthorityToken,
   isBackendIdentityVerified,
+  matchesLibraryBootstrapRuntime,
+  probeBackendHealthV2,
   stopManagedBackend,
 } from "./backendManager.js";
 import {
   commitDesktopLibrarySelection,
+  commitBootstrapLibraryProjection,
   DEFAULT_BACKEND_URL,
+  loadApprovedDesktopLibraryBinding,
   loadDesktopSettings,
-  resolveLibraryDbPath,
   saveDesktopSettings,
 } from "./desktopSettings.js";
 import {
-  ArtifactIntegrityTracker,
-  normalizeSha256Etag,
-  parseArtifactIntegrityProof,
-} from "./artifactIntegrity.js";
+  LibrarySelectionAuthority,
+  NativeLibrarySelectionCoordinator,
+} from "./librarySelectionAuthority.js";
+import {
+  LibraryBootstrapBroker,
+  LibraryBootstrapRequestSpool,
+} from "./libraryBootstrapBroker.js";
+import { LibraryBootstrapBindingStore } from "./libraryBootstrapBinding.js";
+import { LibraryBootstrapCoordinator } from "./libraryBootstrapCoordinator.js";
+import { runDesktopStartupRoute } from "./desktopStartupRouter.js";
 import { DesktopIndexingCoordinator } from "./indexingCoordinator.js";
-import { buildMemoLensCodexUrl } from "./codexIntegration.js";
+import { VideoArtifactSaveCoordinator } from "./videoArtifactSaveCoordinator.js";
+import {
+  buildMemoLensCodexUrl,
+  dispatchMemoLensLocalPluginUrl,
+} from "./codexIntegration.js";
+import {
+  AgentAuthorityCoordinator,
+  conductNativeDecisionReview,
+  DesktopAuthorityError,
+  sanitizeNativeAuthorityText,
+} from "./agentAuthorityCoordinator.js";
+import { CanonicalExportCoordinator } from "./canonicalExportCoordinator.js";
+import {
+  configureElectronSessionNetworkPolicy,
+  dispatchExternalNavigation,
+  guardedFetch,
+  isLiteralLoopbackUrl,
+} from "./networkPolicy.js";
+import {
+  assertTrustedIpcSender,
+  isTrustedRendererNavigation,
+} from "./ipcAuthority.js";
+import { ProductionIpcHandlerRegistry } from "./productionSurfaceRegistry.js";
 
 import type {
   DesktopSettings,
-  DesktopFolderSelection,
   DesktopIndexingResult,
   DesktopIndexingStartOptions,
+  DesktopSettingsUpdate,
 } from "../src/query/types.js";
 import type {
   DesktopArtifactSaveRequest,
   DesktopArtifactSaveResult,
 } from "../src/video/types.js";
+import type {
+  DesktopAgentAuthorityOverview,
+  DesktopAuthorityActionResult,
+  DesktopDecisionReviewRequest,
+} from "../src/blueprint/authorityTypes.js";
+import type {
+  CanonicalExportPresentation,
+  DesktopCanonicalExportApprovalRequest,
+  DesktopCanonicalExportApprovalResult,
+} from "../src/blueprint/exportTypes.js";
 
 const require = createRequire(import.meta.url);
 const { app, BrowserWindow, dialog, ipcMain, shell } =
   require("electron") as typeof Electron.CrossProcessExports;
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
 
 const CURRENT_FILE = fileURLToPath(import.meta.url);
 const CURRENT_DIR = dirname(CURRENT_FILE);
@@ -66,26 +111,334 @@ function resolveProjectRoot(): string {
 }
 
 const PROJECT_ROOT = resolveProjectRoot();
+let backendLifecycleActivated = false;
+const librarySelectionAuthority = new LibrarySelectionAuthority();
+const nativeLibrarySelectionCoordinator = new NativeLibrarySelectionCoordinator({
+  authority: librarySelectionAuthority,
+  async chooseFolder() {
+    const settings = await loadDesktopSettings(PROJECT_ROOT);
+    const result = await dialog.showOpenDialog({
+      properties: ["openDirectory"],
+      title: "Select local media folder",
+      defaultPath: settings.defaultLibraryDir ?? undefined,
+    });
+    return result.canceled || result.filePaths.length === 0
+      ? null
+      : result.filePaths[0];
+  },
+});
+const libraryBootstrapRequestSpool = new LibraryBootstrapRequestSpool();
+const libraryBootstrapBindingStore = new LibraryBootstrapBindingStore();
+const libraryBootstrapCoordinator = new LibraryBootstrapCoordinator({
+  bindingStore: libraryBootstrapBindingStore,
+  authority: librarySelectionAuthority,
+  async ensureCandidate(envelope) {
+    backendLifecycleActivated = true;
+    const settings = await loadDesktopSettings(PROJECT_ROOT);
+    return ensureLibraryBootstrapCandidateReady(PROJECT_ROOT, settings, {
+      requestId: envelope.request_id,
+      candidateBindingSha256: envelope.candidate_binding_sha256,
+    });
+  },
+  async commitCore(envelope) {
+    return commitLibraryBootstrapCandidate(
+      DEFAULT_BACKEND_URL,
+      envelope.request_id,
+      envelope.candidate_binding_sha256,
+    );
+  },
+  async verifyActive(envelope) {
+    const expectation = {
+      mode: "active" as const,
+      requestId: envelope.request_id,
+      candidateBindingSha256: envelope.candidate_binding_sha256,
+    };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const runtime = await probeBackendHealthV2(DEFAULT_BACKEND_URL);
+      if (runtime !== null) {
+        if (matchesLibraryBootstrapRuntime(runtime, expectation)) return;
+        throw new Error("MemoLens refused a Library projection from the wrong active runtime.");
+      }
+      if (attempt < 2) {
+        await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 100));
+      }
+    }
+    throw new Error("MemoLens could not prove the committed active Library runtime.");
+  },
+  commitProjection(binding) {
+    return commitBootstrapLibraryProjection(PROJECT_ROOT, binding);
+  },
+});
+const libraryBootstrapBroker = new LibraryBootstrapBroker({
+  spool: libraryBootstrapRequestSpool,
+  picker: nativeLibrarySelectionCoordinator,
+  authority: librarySelectionAuthority,
+  resume: (claimed) => libraryBootstrapCoordinator.resume(claimed),
+  commit: (verified, claimed) => libraryBootstrapCoordinator.commit(verified, claimed),
+});
 const indexingCoordinator = new DesktopIndexingCoordinator({
   apiBase: DEFAULT_BACKEND_URL,
   getSessionToken: getDesktopSessionToken,
-  resolveDbPath: resolveSelectedDbPath,
+  async resolveApprovedSelection() {
+    const binding = await loadApprovedDesktopLibraryBinding();
+    if (binding === null) {
+      throw new Error("Choose and connect a local library before indexing.");
+    }
+    const verified = await librarySelectionAuthority.verifyActiveBinding(binding);
+    return {
+      folderPath: verified.canonicalRoot,
+      dbPath: verified.dbPath,
+      rootDevice: verified.device,
+      rootInode: verified.inode,
+      verifyCurrentIdentity: verified.verifyCurrentIdentity,
+      release: verified.release,
+    };
+  },
+});
+
+function showAuthorityMessageBox(
+  options: Electron.MessageBoxOptions,
+): Promise<Electron.MessageBoxReturnValue> {
+  const focusedWindow = BrowserWindow.getFocusedWindow();
+  return focusedWindow
+    ? dialog.showMessageBox(focusedWindow, options)
+    : dialog.showMessageBox(options);
+}
+
+async function ensureAuthorityBackendTrusted(forceIdentityProof = false): Promise<void> {
+  if (!forceIdentityProof && isBackendIdentityVerified()) {
+    return;
+  }
+  backendLifecycleActivated = true;
+  const settings = await loadDesktopSettings(PROJECT_ROOT);
+  const status = await ensureBackendReady(PROJECT_ROOT, settings);
+  if (
+    (status.state !== "connected" && status.state !== "started")
+    || !isBackendIdentityVerified()
+  ) {
+    throw new DesktopAuthorityError(
+      "native_confirmation_required",
+      "MemoLens could not verify the local authority service.",
+    );
+  }
+}
+
+const videoArtifactSaveCoordinator = new VideoArtifactSaveCoordinator({
+  backendUrl: DEFAULT_BACKEND_URL,
+  ensureBackendTrusted: () => ensureAuthorityBackendTrusted(true),
+  getSessionToken: getDesktopSessionToken,
+  fetchImpl: guardedFetch,
+  async chooseDestination(suggestedFilename) {
+    const selection = await dialog.showSaveDialog({
+      title: "Save MemoLens video",
+      defaultPath: suggestedFilename,
+      buttonLabel: "Save video",
+      filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+      properties: ["createDirectory", "showOverwriteConfirmation"],
+    });
+    return selection.canceled || !selection.filePath
+      ? { cancelled: true }
+      : { cancelled: false, filePath: selection.filePath };
+  },
+});
+
+const authorityCoordinator = new AgentAuthorityCoordinator({
+  apiBase: DEFAULT_BACKEND_URL,
+  ensureBackendTrusted: ensureAuthorityBackendTrusted,
+  getMainAuthorityToken,
+  getDesktopSessionToken,
+  fetchImpl: guardedFetch,
+  presenter: {
+    async reviewPairing(presentation) {
+      const actions = presentation.requestedActions.map((value) => (
+        sanitizeNativeAuthorityText(value)
+      )).join(", ");
+      const timeline = presentation.observedTimelineHead;
+      const detail = [
+        `Project: ${sanitizeNativeAuthorityText(presentation.projectId)}`,
+        `Agent subject ID (self-reported): ${sanitizeNativeAuthorityText(presentation.pairedSubjectId)}`,
+        `Current Blueprint revision: ${presentation.observedRevision}`,
+        ...(timeline === null ? [] : [
+          `Current canonical Timeline: revision ${timeline.revision}`,
+          `Timeline ID: ${sanitizeNativeAuthorityText(timeline.timelineId)}`,
+          `Timeline revision SHA-256: ${timeline.revisionSha256}`,
+          `Timeline content SHA-256: ${timeline.timelineContentSha256}`,
+          `Pinned Blueprint/Coverage revisions: ${timeline.blueprintRevision}/${timeline.coverageRevision}`,
+        ]),
+        `Pairing code: ${sanitizeNativeAuthorityText(presentation.shortCode)}`,
+        `Requested actions: ${actions}`,
+        `Window: ${presentation.ttlSeconds} seconds, up to ${presentation.maxOperations} operations`,
+        `Request expires: ${sanitizeNativeAuthorityText(presentation.expiresAt)}`,
+        "",
+        "The client name is self-reported. MemoLens verifies only possession of this local pairing secret. Pairing permits only the listed reversible project writes; it never confirms creative decisions or permits render, export, or publication.",
+      ].join("\n");
+      const result = await showAuthorityMessageBox({
+        type: "question",
+        title: "Review Agent pairing",
+        message: `${sanitizeNativeAuthorityText(presentation.claimedClientLabel, 120)} requests project access`,
+        detail,
+        buttons: ["Allow scoped project access", "Reject request", "Cancel"],
+        defaultId: 2,
+        cancelId: 2,
+        noLink: true,
+      });
+      if (result.response === 0) return "approve";
+      if (result.response === 1) return "reject";
+      return "cancel";
+    },
+    async confirmCapabilityRevoke(capability) {
+      const detail = [
+        `Project: ${sanitizeNativeAuthorityText(capability.projectId)}`,
+        `Agent subject ID (self-reported): ${sanitizeNativeAuthorityText(capability.pairedSubjectId)}`,
+        `Client label: ${sanitizeNativeAuthorityText(capability.claimedClientLabel, 120)} (self-reported)`,
+        `Scope: ${capability.actions.map((value) => sanitizeNativeAuthorityText(value)).join(", ")}`,
+        `Remaining operations: ${capability.remainingOperations} of ${capability.maxOperations}`,
+        `Expires: ${sanitizeNativeAuthorityText(capability.expiresAt)}`,
+        "",
+        "Revocation stops new Agent writes. Revisions already committed remain in project history.",
+      ].join("\n");
+      const result = await showAuthorityMessageBox({
+        type: "warning",
+        title: "Revoke Agent access",
+        message: "Stop this Agent from submitting new project writes?",
+        detail,
+        buttons: ["Revoke access", "Cancel"],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      return result.response === 0;
+    },
+    async reviewDecision(presentation) {
+      const verb = presentation.operation === "confirm" ? "Confirm" : "Revoke";
+      return conductNativeDecisionReview(presentation, async (step) => {
+        if (step.kind === "content") {
+          const result = await showAuthorityMessageBox({
+            type: presentation.operation === "confirm" ? "question" : "warning",
+            title: `Review exact content before ${verb.toLowerCase()}`,
+            message: `${sanitizeNativeAuthorityText(step.unitLabel, 120)} — page ${step.pageIndex + 1} of ${step.pageCount}`,
+            detail: [
+              `Project: ${sanitizeNativeAuthorityText(step.projectId)}`,
+              `Exact Blueprint revision: ${step.observedRevision}`,
+              `Decision unit ${step.unitIndex + 1} of ${step.unitCount}: ${step.unitName}`,
+              "",
+              "Complete canonical content on this page:",
+              "",
+              // This text is already losslessly canonicalized and control-safe.
+              // Never pass it through a truncating display sanitizer.
+              step.pageContent,
+              "",
+              "Continue only after reviewing this entire page. Cancel changes no authority.",
+            ].join("\n"),
+            buttons: ["Continue review", "Cancel"],
+            defaultId: 1,
+            cancelId: 1,
+            noLink: true,
+          });
+          return result.response === 0;
+        }
+
+        const selectedUnits = step.decisionUnits.map((unit, index) => (
+          `${index + 1}. ${sanitizeNativeAuthorityText(unit.label, 120)} (${unit.name})`
+        )).join("\n");
+        const result = await showAuthorityMessageBox({
+          type: presentation.operation === "confirm" ? "question" : "warning",
+          title: `${verb} creative decisions`,
+          message: `${verb} ${step.decisionUnits.length} decision ${step.decisionUnits.length === 1 ? "unit" : "units"}?`,
+          detail: [
+            `Project: ${sanitizeNativeAuthorityText(step.projectId)}`,
+            `Exact Blueprint revision: ${step.observedRevision}`,
+            "",
+            "You reviewed every page of the complete canonical content for:",
+            selectedUnits,
+            "",
+            presentation.operation === "confirm"
+              ? "This confirms only those exact decisions. It does not approve rendering, export, publishing, or future changed content."
+              : "This removes user authority only. It does not change the Blueprint proposal itself.",
+          ].join("\n"),
+          buttons: [`${verb} selected decisions`, "Cancel"],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+        });
+        return result.response === 0;
+      });
+    },
+  },
+});
+
+function showCanonicalExportDirectoryDialog(
+  options: Electron.OpenDialogOptions,
+): Promise<Electron.OpenDialogReturnValue> {
+  const focusedWindow = BrowserWindow.getFocusedWindow();
+  return focusedWindow
+    ? dialog.showOpenDialog(focusedWindow, options)
+    : dialog.showOpenDialog(options);
+}
+
+async function chooseCanonicalExportDestination(
+  presentation: CanonicalExportPresentation,
+  presentationSha256: string,
+  suggestedPackageName: string,
+) {
+  const timeline = presentation.timeline_binding;
+  const result = await showCanonicalExportDirectoryDialog({
+    title: "Approve exact canonical export",
+    message: [
+      `Project: ${sanitizeNativeAuthorityText(presentation.project_id)}`,
+      `Approve exact Timeline revision ${timeline.revision}`,
+      `Timeline ID: ${sanitizeNativeAuthorityText(timeline.timeline_id)}`,
+      `Profile: ${presentation.profile} · ${presentation.aspect_ratio} · ${presentation.duration_ms} ms · ${presentation.clip_count} clips`,
+      "Hard cuts, silent, no subtitles. Choose the parent folder for a new non-overwriting package.",
+      "Package: final video, exact Blueprint script, package manifest, human usage list, completion marker.",
+      `Package name: ${suggestedPackageName}`,
+      `Exact presentation SHA-256: ${presentationSha256}`,
+      `Timeline revision SHA-256: ${timeline.revision_sha256}`,
+      `Timeline content SHA-256: ${timeline.timeline_content_sha256}`,
+      `Source bindings SHA-256: ${timeline.source_bindings_sha256}`,
+    ].join("\n"),
+    buttonLabel: `Approve revision ${timeline.revision} export`,
+    properties: ["openDirectory", "createDirectory"],
+  });
+  if (result.canceled || result.filePaths.length !== 1) return { cancelled: true } as const;
+  const canonicalPath = resolve(result.filePaths[0]);
+  const handle = await open(
+    canonicalPath,
+    constants.O_RDONLY
+      | (constants.O_DIRECTORY ?? 0)
+      | (constants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const identity = await handle.stat({ bigint: true });
+    if (!identity.isDirectory()) {
+      throw new Error("The approved canonical export destination is not a directory.");
+    }
+    return {
+      cancelled: false,
+      canonicalPath,
+      selectionIdentity: {
+        device: identity.dev.toString(10),
+        inode: identity.ino.toString(10),
+      },
+      release: async () => handle.close(),
+    } as const;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+const canonicalExportCoordinator = new CanonicalExportCoordinator({
+  apiBase: DEFAULT_BACKEND_URL,
+  ensureBackendTrusted: ensureAuthorityBackendTrusted,
+  getMainAuthorityToken,
+  fetchImpl: guardedFetch,
+  presenter: { chooseDestination: chooseCanonicalExportDestination },
 });
 
 let desktopSessionAuthenticationConfigured = false;
+let normalStartupCompleted = false;
 const trustedRendererEntries = new Map<number, string>();
-
-function assertTrustedIpcSender(event: Electron.IpcMainInvokeEvent): void {
-  const expectedEntryUrl = trustedRendererEntries.get(event.sender.id);
-  const isMainFrame = event.senderFrame === event.sender.mainFrame;
-  if (
-    !expectedEntryUrl
-    || !isMainFrame
-    || !isTrustedRendererNavigation(event.senderFrame.url, expectedEntryUrl)
-  ) {
-    throw new Error("Rejected IPC call from an untrusted renderer frame.");
-  }
-}
 
 function configureSessionPermissions(): void {
   const { session } = require("electron") as typeof Electron.CrossProcessExports;
@@ -126,27 +479,46 @@ function configureDesktopSessionAuthentication(): void {
   desktopSessionAuthenticationConfigured = true;
 }
 
-function isLoopbackDevelopmentUrl(rawUrl: string): boolean {
+async function runBackendBootstrap(): Promise<void> {
+  backendLifecycleActivated = true;
   try {
-    const parsed = new URL(rawUrl);
-    return ["http:", "https:"].includes(parsed.protocol)
-      && ["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname);
-  } catch {
-    return false;
+    const settings = await loadDesktopSettings(PROJECT_ROOT);
+    const status = await ensureBackendReady(PROJECT_ROOT, settings);
+    if (status.state === "connected" || status.state === "started") {
+      // Only expose the renderer session token after the backend has proved
+      // possession of the spawn-time secret via the public health challenge.
+      configureDesktopSessionAuthentication();
+    }
+    console.log(
+      `[memolens-desktop] backend bootstrap ${status.state} :: ${status.url} :: ${status.message}`,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[memolens-desktop] backend bootstrap failed :: ${message}`);
   }
 }
 
-function isTrustedRendererNavigation(targetUrl: string, entryUrl: string): boolean {
-  try {
-    const target = new URL(targetUrl);
-    const entry = new URL(entryUrl);
-    if (entry.protocol === "file:") {
-      return target.protocol === "file:" && fileURLToPath(target) === fileURLToPath(entry);
-    }
-    return target.origin === entry.origin;
-  } catch {
+async function runPendingLibraryBootstrap(): Promise<boolean> {
+  if (!await libraryBootstrapRequestSpool.hasPendingRequest()) {
     return false;
   }
+  const result = await libraryBootstrapBroker.handleNext();
+  if (result !== null) {
+    console.log(
+      `[memolens-desktop] Library bootstrap ${result.status} :: ${result.request_id}`,
+    );
+    if (result.status === "library_authority_committed" && normalStartupCompleted) {
+      configureDesktopSessionAuthentication();
+      // Both activate and second-instance may share the broker's single-flight
+      // result. Reuse the first live window synchronously so they cannot create
+      // a duplicate. Cold startup still owns its own IPC/window promotion.
+      const window = BrowserWindow.getAllWindows()[0] ?? createWindow();
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+    }
+  }
+  return true;
 }
 
 function createWindow(): Electron.BrowserWindow {
@@ -168,7 +540,7 @@ function createWindow(): Electron.BrowserWindow {
   });
 
   const requestedDevUrl = process.env.ELECTRON_RENDERER_URL;
-  const devUrl = requestedDevUrl && isLoopbackDevelopmentUrl(requestedDevUrl)
+  const devUrl = requestedDevUrl && isLiteralLoopbackUrl(requestedDevUrl)
     ? requestedDevUrl
     : null;
   if (requestedDevUrl && devUrl === null) {
@@ -210,219 +582,147 @@ function createWindow(): Electron.BrowserWindow {
   return window;
 }
 
-function resolveSelectedDbPath(folderPath: string): string {
-  return resolveLibraryDbPath(folderPath);
-}
-
-function sanitizeVideoExportFilename(value: string): string {
-  const cleaned = value
-    .normalize("NFKC")
-    .replace(/[\\/\u0000-\u001f\u007f<>:"|?*]+/g, "-")
-    .replace(/^\.+/, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 116);
-  const stem = cleaned.replace(/\.mp4$/i, "").replace(/\.[^.]+$/, "").trim();
-  return `${stem || "memolens-export"}.mp4`;
-}
-
-function isTrustedRenderArtifactUrl(rawUrl: string): boolean {
-  try {
-    const artifactUrl = new URL(rawUrl);
-    const backendUrl = new URL(DEFAULT_BACKEND_URL);
-    return artifactUrl.origin === backendUrl.origin
-      && artifactUrl.username === ""
-      && artifactUrl.password === ""
-      && artifactUrl.search === ""
-      && artifactUrl.hash === ""
-      && /^\/v1\/renders\/[A-Za-z0-9_-]+\/download$/.test(artifactUrl.pathname);
-  } catch {
-    return false;
-  }
-}
-
-async function saveCompletedRenderArtifact(
-  request: DesktopArtifactSaveRequest,
-): Promise<DesktopArtifactSaveResult> {
-  const maximumBytes = 100 * 1024 * 1024 * 1024;
-  const integrityProof = parseArtifactIntegrityProof(
-    request?.expectedSha256,
-    request?.expectedSizeBytes,
-    maximumBytes,
-  );
-  if (
-    !request
-    || !isTrustedRenderArtifactUrl(request.artifactUrl)
-    || integrityProof === null
-  ) {
-    return {
-      status: "failed",
-      filename: null,
-      message: "MemoLens rejected an incomplete or untrusted render artifact proof.",
-    };
-  }
-
-  const settings = await loadDesktopSettings(PROJECT_ROOT);
-  const backendStatus = await ensureBackendReady(PROJECT_ROOT, settings);
-  if (backendStatus.state !== "connected" && backendStatus.state !== "started") {
-    return {
-      status: "failed",
-      filename: null,
-      message: "MemoLens could not verify the local render service. Reconnect and try again.",
-    };
-  }
-
-  const suggestedFilename = sanitizeVideoExportFilename(request.suggestedFilename);
-  const selection = await dialog.showSaveDialog({
-    title: "Save MemoLens video",
-    defaultPath: suggestedFilename,
-    buttonLabel: "Save video",
-    filters: [{ name: "MP4 video", extensions: ["mp4"] }],
-    properties: ["createDirectory", "showOverwriteConfirmation"],
-  });
-  if (selection.canceled || !selection.filePath) {
-    return { status: "cancelled", filename: null, message: "Video save was cancelled." };
-  }
-
-  const destinationPath = selection.filePath.toLowerCase().endsWith(".mp4")
-    ? selection.filePath
-    : `${selection.filePath}.mp4`;
-  if (existsSync(destinationPath)) {
-    return {
-      status: "exists",
-      filename: sanitizeVideoExportFilename(destinationPath.split(sep).pop() ?? suggestedFilename),
-      message: "That file already exists. Choose a new filename; MemoLens never overwrites by default.",
-    };
-  }
-
-  const temporaryPath = `${destinationPath}.memolens-${randomUUID()}.part`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30 * 60 * 1000);
-  try {
-    const response = await fetch(request.artifactUrl, {
-      headers: { "X-MemoLens-Desktop-Token": getDesktopSessionToken() },
-      redirect: "error",
-      signal: controller.signal,
-    });
-    if (response.url !== request.artifactUrl || !response.ok || response.body === null) {
-      throw new Error(`Render download failed with status ${response.status}.`);
-    }
-    const declaredSize = Number(response.headers.get("content-length"));
-    if (!Number.isSafeInteger(declaredSize) || declaredSize !== integrityProof.sizeBytes) {
-      throw new Error("Render artifact size proof did not match the download response.");
-    }
-    if (normalizeSha256Etag(response.headers.get("etag")) !== integrityProof.sha256) {
-      throw new Error("Render artifact ETag did not match its integrity proof.");
-    }
-
-    const integrityTracker = new ArtifactIntegrityTracker(integrityProof, maximumBytes);
-    const byteLimit = new Transform({
-      transform(chunk: Buffer, _encoding, callback) {
-        try {
-          integrityTracker.update(chunk);
-        } catch (error) {
-          controller.abort();
-          callback(error instanceof Error ? error : new Error("Artifact verification failed."));
-          return;
-        }
-        callback(null, chunk);
-      },
-    });
-
-    await pipeline(
-      Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
-      byteLimit,
-      createWriteStream(temporaryPath, { flags: "wx" }),
-    );
-    if (!integrityTracker.verify()) {
-      throw new Error("Render artifact bytes did not match their integrity proof.");
-    }
-    // A hard link publishes the fully downloaded file atomically and fails if
-    // another process created the destination after the save dialog closed.
-    await link(temporaryPath, destinationPath);
-    await unlink(temporaryPath);
-    return {
-      status: "saved",
-      filename: destinationPath.split(sep).pop() ?? suggestedFilename,
-      message: "Video saved without changing any source media.",
-    };
-  } catch (error) {
-    await unlink(temporaryPath).catch(() => {});
-    const rawMessage = error instanceof Error ? error.message : "";
-    const safeMessage = rawMessage.includes("100 GB desktop safety limit")
-      ? "Render artifact exceeds the 100 GB desktop safety limit."
-      : rawMessage.includes("integrity proof") || rawMessage.includes("size proof") || rawMessage.includes("ETag")
-        ? "Video integrity verification failed; no destination file was published."
-      : controller.signal.aborted
-        ? "Video save timed out before the artifact finished downloading."
-        : /^Render download failed with status \d+\.$/.test(rawMessage)
-          ? rawMessage
-          : "Video could not be saved. Choose a new filename and try again.";
-    return {
-      status: "failed",
-      filename: null,
-      message: safeMessage,
-    };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-ipcMain.handle("memolens:pick-image-folder", async (event) => {
-  assertTrustedIpcSender(event);
-  const settings = await loadDesktopSettings(PROJECT_ROOT);
-  const result = await dialog.showOpenDialog({
-    properties: ["openDirectory"],
-    title: "Select local media folder",
-    defaultPath: settings.defaultLibraryDir ?? undefined,
-  });
-  if (result.canceled || result.filePaths.length === 0) {
-    return null;
-  }
-
-  const folderPath = resolve(result.filePaths[0]);
-  const dbPath = resolveSelectedDbPath(folderPath);
-  const selection: DesktopFolderSelection = {
-    folderPath,
-    dbPath,
+function authorityActionFailure(error: unknown): DesktopAuthorityActionResult {
+  return {
+    status: "failed",
+    message: error instanceof DesktopAuthorityError
+      ? sanitizeNativeAuthorityText(error.message, 500)
+      : "MemoLens could not complete the native authority review.",
+    projectAuthority: null,
   };
-  return selection;
+}
+
+let nativeAuthorityReviewInProgress = false;
+
+async function runNativeAuthorityReview(
+  action: () => Promise<DesktopAuthorityActionResult>,
+): Promise<DesktopAuthorityActionResult> {
+  if (nativeAuthorityReviewInProgress) {
+    return {
+      status: "failed",
+      message: "Another native authority review is already open.",
+      projectAuthority: null,
+    };
+  }
+  nativeAuthorityReviewInProgress = true;
+  try {
+    return await action();
+  } finally {
+    nativeAuthorityReviewInProgress = false;
+  }
+}
+
+function registerProductionIpcHandlers(): void {
+const productionIpcHandlers = new ProductionIpcHandlerRegistry(ipcMain);
+
+productionIpcHandlers.handle("memolens:pick-image-folder", async (event) => {
+  assertTrustedIpcSender(event, trustedRendererEntries);
+  return nativeLibrarySelectionCoordinator.pick();
 });
 
-ipcMain.handle(
+productionIpcHandlers.handle(
   "memolens:commit-library-selection",
-  async (event, selection: DesktopFolderSelection): Promise<DesktopSettings> => {
-    assertTrustedIpcSender(event);
-    return commitDesktopLibrarySelection(PROJECT_ROOT, selection);
+  async (event, selectionTicket: string): Promise<DesktopSettings> => {
+    assertTrustedIpcSender(event, trustedRendererEntries);
+    const verified = await librarySelectionAuthority.redeemSelection(selectionTicket);
+    try {
+      return await commitDesktopLibrarySelection(PROJECT_ROOT, verified);
+    } finally {
+      await verified.release();
+    }
   },
 );
 
-ipcMain.handle("memolens:get-settings", async (event): Promise<DesktopSettings> => {
-  assertTrustedIpcSender(event);
+productionIpcHandlers.handle("memolens:get-settings", async (event): Promise<DesktopSettings> => {
+  assertTrustedIpcSender(event, trustedRendererEntries);
   return loadDesktopSettings(PROJECT_ROOT);
 });
 
-ipcMain.handle(
+productionIpcHandlers.handle(
+  "memolens:list-agent-authority",
+  async (event, projectId?: string | null): Promise<DesktopAgentAuthorityOverview> => {
+    assertTrustedIpcSender(event, trustedRendererEntries);
+    return authorityCoordinator.list(projectId);
+  },
+);
+
+productionIpcHandlers.handle(
+  "memolens:review-agent-pairing",
+  async (event, pairingId: string, projectId: string): Promise<DesktopAuthorityActionResult> => {
+    assertTrustedIpcSender(event, trustedRendererEntries);
+    try {
+      return await runNativeAuthorityReview(() => (
+        authorityCoordinator.reviewPairing(pairingId, projectId)
+      ));
+    } catch (error) {
+      return authorityActionFailure(error);
+    }
+  },
+);
+
+productionIpcHandlers.handle(
+  "memolens:revoke-agent-capability",
+  async (event, capabilityId: string, projectId: string): Promise<DesktopAuthorityActionResult> => {
+    assertTrustedIpcSender(event, trustedRendererEntries);
+    try {
+      return await runNativeAuthorityReview(() => (
+        authorityCoordinator.revokeCapability(capabilityId, projectId)
+      ));
+    } catch (error) {
+      return authorityActionFailure(error);
+    }
+  },
+);
+
+productionIpcHandlers.handle(
+  "memolens:request-decision-authority-review",
+  async (
+    event,
+    request: DesktopDecisionReviewRequest,
+  ): Promise<DesktopAuthorityActionResult> => {
+    assertTrustedIpcSender(event, trustedRendererEntries);
+    try {
+      return await runNativeAuthorityReview(() => (
+        authorityCoordinator.requestDecisionReview(request)
+      ));
+    } catch (error) {
+      return authorityActionFailure(error);
+    }
+  },
+);
+
+productionIpcHandlers.handle(
+  "memolens:approve-and-export-canonical-timeline",
+  async (
+    event,
+    request: DesktopCanonicalExportApprovalRequest,
+  ): Promise<DesktopCanonicalExportApprovalResult> => {
+    assertTrustedIpcSender(event, trustedRendererEntries);
+    return canonicalExportCoordinator.approveAndExport(request);
+  },
+);
+
+productionIpcHandlers.handle(
   "memolens:save-video-artifact",
   async (
     event,
     request: DesktopArtifactSaveRequest,
   ): Promise<DesktopArtifactSaveResult> => {
-    assertTrustedIpcSender(event);
-    return saveCompletedRenderArtifact(request);
+    assertTrustedIpcSender(event, trustedRendererEntries);
+    return videoArtifactSaveCoordinator.save(request);
   },
 );
 
-ipcMain.handle(
+productionIpcHandlers.handle(
   "memolens:save-settings",
-  async (event, settings: DesktopSettings): Promise<DesktopSettings> => {
-    assertTrustedIpcSender(event);
+  async (event, settings: DesktopSettingsUpdate): Promise<DesktopSettings> => {
+    assertTrustedIpcSender(event, trustedRendererEntries);
     return saveDesktopSettings(PROJECT_ROOT, settings);
   },
 );
 
-ipcMain.handle("memolens:ensure-backend", async (event) => {
-  assertTrustedIpcSender(event);
+productionIpcHandlers.handle("memolens:ensure-backend", async (event) => {
+  assertTrustedIpcSender(event, trustedRendererEntries);
   const settings = await loadDesktopSettings(PROJECT_ROOT);
   const status = await ensureBackendReady(PROJECT_ROOT, settings);
   if (status.state === "connected" || status.state === "started") {
@@ -431,56 +731,106 @@ ipcMain.handle("memolens:ensure-backend", async (event) => {
   return status;
 });
 
-ipcMain.handle(
+productionIpcHandlers.handle(
   "memolens:start-indexing",
   async (event, options: DesktopIndexingStartOptions): Promise<DesktopIndexingResult> => {
-    assertTrustedIpcSender(event);
+    assertTrustedIpcSender(event, trustedRendererEntries);
     return indexingCoordinator.start(event.sender, options);
   },
 );
 
-ipcMain.handle("memolens:pause-indexing", async (event): Promise<boolean> => {
-  assertTrustedIpcSender(event);
-  return indexingCoordinator.pause();
+productionIpcHandlers.handle("memolens:pause-indexing", async (event, operationId: string): Promise<boolean> => {
+  assertTrustedIpcSender(event, trustedRendererEntries);
+  return indexingCoordinator.pause(operationId);
 });
 
-ipcMain.handle("memolens:resume-indexing", async (event): Promise<boolean> => {
-  assertTrustedIpcSender(event);
-  return indexingCoordinator.resume();
+productionIpcHandlers.handle("memolens:resume-indexing", async (event, operationId: string): Promise<boolean> => {
+  assertTrustedIpcSender(event, trustedRendererEntries);
+  return indexingCoordinator.resume(operationId);
 });
 
-ipcMain.handle("memolens:open-in-codex", async (event): Promise<boolean> => {
-  assertTrustedIpcSender(event);
-  await shell.openExternal(buildMemoLensCodexUrl(PROJECT_ROOT));
+productionIpcHandlers.handle("memolens:open-in-codex", async (event): Promise<boolean> => {
+  assertTrustedIpcSender(event, trustedRendererEntries);
+  const targetUrl = buildMemoLensCodexUrl(PROJECT_ROOT);
+  await dispatchMemoLensLocalPluginUrl(targetUrl, PROJECT_ROOT, (validatedTargetUrl) => (
+    dispatchExternalNavigation(
+      validatedTargetUrl,
+      (externalTargetUrl) => shell.openExternal(externalTargetUrl),
+    )
+  ));
   return true;
 });
 
-app.whenReady().then(async () => {
+// Refuse to boot when a declared production invoke surface was not installed.
+productionIpcHandlers.assertComplete();
+}
+
+if (hasSingleInstanceLock) app.on("second-instance", () => {
+  // A second invocation may be the user's explicit "open MemoLens" gesture
+  // after an Agent queued a path-free intent.  Never parse request data from
+  // argv. Only a committed result may restore the primary instance's window.
+  void runPendingLibraryBootstrap().catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[memolens-desktop] Library bootstrap broker failed :: ${message}`);
+  });
+});
+
+if (hasSingleInstanceLock) app.whenReady().then(async () => {
+  const { session } = require("electron") as typeof Electron.CrossProcessExports;
+  let networkProfile: "online" | "offline";
+  try {
+    networkProfile = await configureElectronSessionNetworkPolicy(session.defaultSession);
+  } catch {
+    console.error("[memolens-desktop] invalid or unenforceable network policy; startup stopped");
+    app.exit(1);
+    return;
+  }
+  if (networkProfile === "offline") {
+    console.log(
+      "[memolens-desktop] offline boundary enabled for app fetch and Chromium session requests; OS traffic is outside this boundary",
+    );
+  }
   configureSessionPermissions();
   try {
-    const settings = await loadDesktopSettings(PROJECT_ROOT);
-    const status = await ensureBackendReady(PROJECT_ROOT, settings);
-    if (status.state === "connected" || status.state === "started") {
-      // Only expose the renderer session token after the backend has proved
-      // possession of the spawn-time secret via the public health challenge.
-      configureDesktopSessionAuthentication();
+    const route = await runDesktopStartupRoute({
+      argv: process.argv,
+      hasPendingBootstrap: await libraryBootstrapRequestSpool.hasPendingRequest(),
+      async runBootstrapBroker() {
+        const result = await libraryBootstrapBroker.handleNext();
+        if (result !== null) {
+          console.log(
+            `[memolens-desktop] Library bootstrap ${result.status} :: ${result.request_id}`,
+          );
+        }
+        return result;
+      },
+      registerBusinessIpc: registerProductionIpcHandlers,
+      ensureBackend: runBackendBootstrap,
+      createWindow,
+    });
+    if (route === "library_bootstrap_broker") {
+      // Cancelled, expired or empty broker turns never enter business startup.
+      // A committed turn has already promoted to normal and keeps its scan alive.
+      app.quit();
+      return;
     }
-    console.log(
-      `[memolens-desktop] backend bootstrap ${status.state} :: ${status.url} :: ${status.message}`,
-    );
+    normalStartupCompleted = true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error(`[memolens-desktop] backend bootstrap failed :: ${message}`);
+    console.error(`[memolens-desktop] startup routing failed :: ${message}`);
+    app.exit(1);
+    return;
   }
 
-  // Do not create a renderer that can make authenticated requests until the
-  // backend proof attempt above has completed.
-  createWindow();
-
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+    void runPendingLibraryBootstrap().then((handled) => {
+      if (!handled && BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+      }
+    }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[memolens-desktop] Library bootstrap broker failed :: ${message}`);
+    });
   });
 
   app.on("browser-window-created", (_, win) => {
@@ -490,8 +840,36 @@ app.whenReady().then(async () => {
   });
 });
 
-app.on("before-quit", () => {
-  stopManagedBackend();
+let backendShutdownComplete = false;
+let backendShutdownInFlight: Promise<boolean> | null = null;
+
+app.on("before-quit", (event) => {
+  if (!backendLifecycleActivated) {
+    return;
+  }
+  if (backendShutdownComplete) {
+    return;
+  }
+  event.preventDefault();
+  if (backendShutdownInFlight !== null) {
+    return;
+  }
+  backendShutdownInFlight = stopManagedBackend();
+  void backendShutdownInFlight.then((stopped) => {
+    backendShutdownInFlight = null;
+    if (!stopped) {
+      console.error(
+        "[memolens-desktop] backend shutdown could not be confirmed; quit remains blocked",
+      );
+      return;
+    }
+    backendShutdownComplete = true;
+    app.quit();
+  }).catch((error: unknown) => {
+    backendShutdownInFlight = null;
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[memolens-desktop] backend shutdown failed :: ${message}`);
+  });
 });
 
 app.on("window-all-closed", () => {

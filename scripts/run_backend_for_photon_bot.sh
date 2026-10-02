@@ -17,4 +17,4 @@ export QUERY_VLM_PROFILE
 export EMBEDDING_BACKEND
 
 cd "${PROJECT_ROOT}"
-python3 backend/app.py
+exec bash "${PROJECT_ROOT}/scripts/run_python.sh" backend/app.py

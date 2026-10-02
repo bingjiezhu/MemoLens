@@ -1,0 +1,36 @@
+{
+  "object": "memolens.release_native_ui_evidence",
+  "schema_version": "1",
+  "date": "2026-10-02",
+  "scope": "agent_driven_native_electron_ui_with_synthetic_media",
+  "user_library_accessed": false,
+  "provider_calls_requested": false,
+  "real_user_approval_claimed": false,
+  "model_or_cross_host_acceptance_claimed": false,
+  "isolated_app_state_and_renderer_profile": true,
+  "fixture_setup": "production_fixture_database_copied_with_sqlite_backup_and_test_native_binding_projection",
+  "observed_ui_actions": [
+    "Open existing project from a session without a saved project",
+    "Load exact canonical Blueprint, Coverage and Timeline",
+    "Reload the final renderer and restore the saved project",
+    "Approve exact revision export through the actual native directory dialog",
+    "Observe automatic polling reach Export succeeded",
+    "Try a missing project ID and preserve the existing project",
+    "Reopen the valid project successfully"
+  ],
+  "project_id": "proj_e3fdcb1f68ab4eb3bb849358fa03eb15",
+  "database_uuid": "60348745-35eb-4284-a01f-a15eec41c763",
+  "timeline_revision": 1,
+  "timeline_content_sha256": "1cc12689ff732c147fee727eb6a6bd7498c820c72787bf318ca74e91102f0518",
+  "output": {
+    "width": 1080,
+    "height": 1920,
+    "duration_ms": 8000,
+    "audio_stream_count": 0,
+    "package_files": ["video.mp4", "script.txt", "manifest.json", "使用清单.txt", ".memolens-complete.json"],
+    "export_revisions": 1,
+    "usage_occurrences": 2
+  },
+  "originals": {"synthetic_sources": 4, "source_hashes_unchanged": true},
+  "private_paths_or_credentials_included": false
+}

@@ -1,5 +1,9 @@
 import { atlasAssetToPhotoAsset } from "../query/api";
-import type { AtlasAsset, PhotoAsset } from "../query/types";
+import type {
+  AtlasAsset,
+  AtlasCanonicalImageObservation,
+  PhotoAsset,
+} from "../query/types";
 
 export const MAX_BASKET_ITEMS = 240;
 
@@ -8,6 +12,7 @@ export interface BasketItem {
   title: string;
   subtitle: string;
   imageUrl: string;
+  canonicalImageObservation?: AtlasCanonicalImageObservation;
 }
 
 export type BasketSource = AtlasAsset | PhotoAsset;
@@ -33,6 +38,9 @@ export function basketItemFromPhotoAsset(photo: PhotoAsset): BasketItem {
     title: photo.title,
     subtitle: [photo.location, photo.takenAt].filter(Boolean).join(" · "),
     imageUrl: photo.imageUrl,
+    ...(photo.canonicalImageObservation
+      ? { canonicalImageObservation: photo.canonicalImageObservation }
+      : {}),
   };
 }
 

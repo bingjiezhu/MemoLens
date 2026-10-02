@@ -8,6 +8,12 @@ import {
 } from "./creator/model";
 import type { CreatorProfileContent } from "./creator/types";
 import type { CreatorProfileField } from "./creator/types";
+import { BlueprintProjectWorkspace as CanonicalBlueprintWorkspace } from "./blueprint/BlueprintProjectWorkspace";
+import {
+  canAdoptBlueprintWorkspaceResponse,
+  isBlueprintProjectWorkspace,
+} from "./blueprint/workspaceModel";
+import type { BlueprintProjectWorkspace } from "./blueprint/workspaceTypes";
 import {
   cancelRenderJob,
   applyTimelineInstruction,
@@ -61,24 +67,46 @@ import {
 import {
   initialVideoWorkbenchState,
   videoWorkbenchReducer,
+  type VideoWorkbenchAction,
 } from "./video/projectReducer";
 import {
+  canAdoptOpenedVideoProject,
+  canApplyVideoProjectResponse,
+  loadExistingVideoProject,
+  persistOpenedVideoProject,
+  type VideoProjectRequestIdentity,
+} from "./video/projectOpen";
+import {
+  buildCanonicalUsageSelection,
+  selectableUsageReferenceIds,
+  usageMatchSelectableInBrief,
+} from "./video/usage";
+import {
+  isResidualCandidateId,
+  residualParentSegmentId,
+} from "./video/residual";
+import {
+  canResumePersistedVideoSession,
   createVideoScopeKey,
   persistVideoSession,
   readPersistedVideoSession,
+  type PersistedVideoSession,
 } from "./video/session";
 import {
   deriveVideoWorkflow,
   type VideoWorkflowId,
 } from "./video/workflow";
 import type {
+  CanonicalUsageSelection,
   CreativeBriefInput,
+  CreativeAssetMatch,
   CreativeTimeline,
   RenderJob,
   RenderKind,
   TimelineClip,
   TimelineOperation,
   TimelineDiff,
+  SearchUsageMode,
 } from "./video/types";
 
 import "./video/video-workbench.css";
@@ -104,6 +132,11 @@ interface PendingInstruction {
   summaries: string[];
   unrecognized: string[];
   mode: "server" | "local";
+}
+
+interface CanonicalWorkspaceFailure {
+  projectId: string;
+  message: string;
 }
 
 const INITIAL_BRIEF: CreativeBriefInput = {
@@ -134,6 +167,46 @@ function splitTerms(value: string): string[] {
     .filter((term, index, terms) => term.length > 0 && terms.indexOf(term) === index);
 }
 
+function formatUsageIntervals(intervals: Array<[number, number]>): string {
+  if (intervals.length === 0) return "none";
+  const visible = intervals.slice(0, 3).map(
+    ([start, end]) => `${formatMilliseconds(start)}–${formatMilliseconds(end)}`,
+  );
+  return `${visible.join(", ")}${intervals.length > visible.length ? ` +${intervals.length - visible.length}` : ""}`;
+}
+
+function isVideoWorkbenchPollingAllowed(
+  documentHidden: boolean,
+  root: HTMLElement | null,
+): boolean {
+  return !documentHidden && root !== null && root.closest("[hidden]") === null;
+}
+
+function useVideoWorkbenchPollingGate() {
+  const rootRef = useRef<HTMLElement | null>(null);
+  const [pollingAllowed, setPollingAllowed] = useState(false);
+
+  useEffect(() => {
+    const refresh = () => {
+      setPollingAllowed(isVideoWorkbenchPollingAllowed(document.hidden, rootRef.current));
+    };
+    const observer = new MutationObserver(refresh);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["hidden"],
+      subtree: true,
+    });
+    document.addEventListener("visibilitychange", refresh);
+    refresh();
+    return () => {
+      observer.disconnect();
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, []);
+
+  return { rootRef, pollingAllowed };
+}
+
 function VideoWorkbench({
   apiBase,
   imageLibraryDir,
@@ -147,13 +220,17 @@ function VideoWorkbench({
   creatorProfileRevision = 0,
   creatorPreferenceCount = 0,
 }: VideoWorkbenchProps) {
+  const { rootRef: workbenchPollingRootRef, pollingAllowed } = useVideoWorkbenchPollingGate();
   const scopeKey = createVideoScopeKey(imageLibraryDir, dbPath);
-  const [state, dispatch] = useReducer(
+  const [state, dispatchState] = useReducer(
     videoWorkbenchReducer,
     scopeKey,
     initialVideoWorkbenchState,
   );
+  const currentStateRef = useRef(state);
+  currentStateRef.current = state;
   const [searchQuery, setSearchQuery] = useState("quiet opening, human detail, then energetic movement");
+  const [searchUsageMode, setSearchUsageMode] = useState<SearchUsageMode>("all");
   const [selectedRefs, setSelectedRefs] = useState<string[]>([]);
   const [brief, setBrief] = useState<CreativeBriefInput>(INITIAL_BRIEF);
   const [mustIncludeText, setMustIncludeText] = useState("");
@@ -173,11 +250,37 @@ function VideoWorkbench({
   const [editedProfileFields, setEditedProfileFields] = useState<Set<CreatorProfileField>>(new Set());
   const [prefilledProfileFields, setPrefilledProfileFields] = useState<Set<CreatorProfileField>>(new Set());
   const [prefilledProfileRevision, setPrefilledProfileRevision] = useState(0);
+  const [blueprintWorkspace, setBlueprintWorkspace] = useState<BlueprintProjectWorkspace | null>(null);
+  const [canonicalWorkspaceFailure, setCanonicalWorkspaceFailure] = useState<CanonicalWorkspaceFailure | null>(null);
+  const [projectIdInput, setProjectIdInput] = useState("");
+  const [isOpeningProject, setIsOpeningProject] = useState(false);
+  const [projectOpenError, setProjectOpenError] = useState<string | null>(null);
+  const projectOpenRequestIdRef = useRef(0);
+  const projectDatabaseUuidRef = useRef<string | null>(null);
+  const projectOpenControllerRef = useRef<AbortController | null>(null);
+  const projectOpenScopeRef = useRef({ scopeKey, apiBase, dbPath: dbPath ?? "", canUseBackend, scopeEpoch: 0 });
+  if (
+    projectOpenScopeRef.current.scopeKey !== scopeKey
+    || projectOpenScopeRef.current.apiBase !== apiBase
+    || projectOpenScopeRef.current.dbPath !== (dbPath ?? "")
+    || projectOpenScopeRef.current.canUseBackend !== canUseBackend
+  ) {
+    // Increment during render so even an A -> B -> A switch invalidates old reads
+    // before the reset effect or an abort-aware transport has a chance to run.
+    projectOpenScopeRef.current = {
+      scopeKey, apiBase, dbPath: dbPath ?? "", canUseBackend,
+      scopeEpoch: projectOpenScopeRef.current.scopeEpoch + 1,
+    };
+  }
+  const renderScopeEpoch = projectOpenScopeRef.current.scopeEpoch;
+  const blueprintWorkspaceRef = useRef(blueprintWorkspace);
+  blueprintWorkspaceRef.current = blueprintWorkspace;
   const scopeRef = useRef(scopeKey);
+  scopeRef.current = scopeKey;
   const requestControllersRef = useRef(new Set<AbortController>());
   const mutationLedger = useMemo(() => new VideoMutationLedger(window.localStorage), []);
 
-  const canWrite = desktopRuntime && canUseBackend;
+  const canWrite = desktopRuntime && canUseBackend && state.scopeKey === scopeKey && !isOpeningProject;
   const appliedCreatorProfile = creatorMemoryEnabled ? creatorProfile : null;
   const appliedCreatorPreferenceCount = countCreatorPreferences(appliedCreatorProfile);
   const hasLibrary = Boolean(imageLibraryDir?.trim() && dbPath?.trim());
@@ -242,6 +345,110 @@ function VideoWorkbench({
     return scopeRef.current === capturedScope;
   }
 
+  function dispatch(action: VideoWorkbenchAction): void {
+    // Keep the response boundary current before React commits the next render.
+    currentStateRef.current = videoWorkbenchReducer(currentStateRef.current, action);
+    dispatchState(action);
+  }
+
+  function currentProjectOpenScope() {
+    return { ...projectOpenScopeRef.current, requestId: projectOpenRequestIdRef.current };
+  }
+
+  function captureProjectRequest(includeRenderJob = false): VideoProjectRequestIdentity {
+    const current = currentStateRef.current;
+    return {
+      ...currentProjectOpenScope(),
+      projectId: blueprintWorkspaceRef.current?.project_id ?? current.project?.id ?? current.timeline?.project_id ?? null,
+      timelineId: current.timeline?.id ?? null,
+      timelineRevision: current.timeline?.revision ?? null,
+      ...(includeRenderJob ? { renderJobId: current.renderJob?.id ?? null } : {}),
+    };
+  }
+
+  function isCurrentProjectRequest(request: VideoProjectRequestIdentity): boolean {
+    return canApplyVideoProjectResponse(request, captureProjectRequest(true));
+  }
+
+  function isCurrentProjectScope(request: VideoProjectRequestIdentity): boolean {
+    return canAdoptOpenedVideoProject({ ...request, projectId: request.projectId ?? "" }, currentProjectOpenScope());
+  }
+
+  function assertCurrentProjectRequest(request: VideoProjectRequestIdentity, signal: AbortSignal): void {
+    if (signal.aborted || !isCurrentProjectRequest(request)) {
+      throw new DOMException("The project or timeline changed before the request was sent.", "AbortError");
+    }
+  }
+
+  async function openExistingProject(projectId: string, options: {
+    savedSession?: PersistedVideoSession;
+    restoreSession?: boolean;
+    canonicalOnly?: boolean;
+    controller?: AbortController;
+  } = {}): Promise<void> {
+    if (!canUseBackend || !dbPath?.trim() || state.scopeKey !== scopeKey || isWriting || isSavingArtifact) return;
+    projectOpenControllerRef.current?.abort();
+    const controller = options.controller ?? createTrackedController();
+    projectOpenControllerRef.current = controller;
+    const request = {
+      ...projectOpenScopeRef.current,
+      requestId: ++projectOpenRequestIdRef.current,
+      projectId: projectId.trim(),
+    };
+    const isCurrent = () => canAdoptOpenedVideoProject(request, currentProjectOpenScope());
+    setIsOpeningProject(true);
+    setProjectOpenError(null);
+    if (options.restoreSession) dispatch({ type: "project_loading" });
+    try {
+      const opened = await loadExistingVideoProject({
+        request,
+        signal: controller.signal,
+        isCurrent,
+        savedSession: options.savedSession,
+        expectedDatabaseUuid: projectDatabaseUuidRef.current,
+        canonicalOnly: options.canonicalOnly
+          || blueprintWorkspaceRef.current?.project_id === request.projectId
+          || canonicalWorkspaceFailure?.projectId === request.projectId,
+      });
+      if (!opened || controller.signal.aborted || !isCurrent()) return;
+      if (!persistOpenedVideoProject(window.localStorage, opened, currentProjectOpenScope())) return;
+      setCanonicalWorkspaceFailure(null);
+      setPendingInstruction(null);
+      setSelectedRefs([]);
+      setArtifactSaved(false);
+      setProjectIdInput(opened.session.projectId);
+      if (opened.kind === "canonical") {
+        projectDatabaseUuidRef.current = opened.workspace.database_uuid;
+        blueprintWorkspaceRef.current = opened.workspace;
+        setBlueprintWorkspace(opened.workspace);
+        dispatch({ type: "canonical_workspace_opened" });
+      } else {
+        blueprintWorkspaceRef.current = null;
+        setBlueprintWorkspace(null);
+        dispatch({ type: "project_ready", project: opened.project, resetWorkspace: true });
+        if (opened.timeline) dispatch({ type: "timeline_ready", timeline: opened.timeline });
+      }
+    } catch (error) {
+      if (controller.signal.aborted || !isCurrent()) return;
+      const message = `${options.restoreSession ? "Saved video project could not be restored" : "Project could not be opened"}: ${humanError(error, "read failed")}`;
+      setProjectOpenError(message);
+      if (options.canonicalOnly || (
+        options.restoreSession && error instanceof VideoApiError && error.code === "blueprint_integrity_error"
+      )) {
+        setCanonicalWorkspaceFailure({ projectId: request.projectId, message });
+        dispatch({ type: "canonical_workspace_opened" });
+      } else if (options.restoreSession) {
+        dispatch({ type: "project_error", error: message });
+      }
+    } finally {
+      releaseController(controller);
+      if (isCurrent()) {
+        setIsOpeningProject(false);
+        projectOpenControllerRef.current = null;
+      }
+    }
+  }
+
   function settleMutationError(lease: MutationLease | null, error: unknown): MutationOutcome {
     const outcome = videoMutationOutcomeFromError(error);
     if (lease) mutationLedger.settle(lease, outcome);
@@ -257,13 +464,14 @@ function VideoWorkbench({
   }
 
   async function restoreLatestTimeline(input: {
-    capturedScope: string;
+    request: VideoProjectRequestIdentity;
     projectId: string;
     timelineId: string;
     afterRevision: number;
     signal: AbortSignal;
   }): Promise<CreativeTimeline | null> {
     try {
+      if (!isCurrentProjectRequest(input.request)) return null;
       const latest = await fetchTimeline(
         apiBase,
         input.timelineId,
@@ -271,7 +479,8 @@ function VideoWorkbench({
         dbPath,
         input.signal,
       );
-      if (!isCurrentScope(input.capturedScope)) return null;
+      if (input.signal.aborted || !isCurrentProjectRequest(input.request)) return null;
+      if (latest.id !== input.timelineId || latest.project_id !== input.projectId) return null;
       if (latest.revision <= input.afterRevision) return latest;
       dispatch({ type: "timeline_ready", timeline: latest });
       persistTimelineHead(input.projectId, latest);
@@ -283,16 +492,31 @@ function VideoWorkbench({
   }
 
   async function restoreProjectLatestTimeline(input: {
-    capturedScope: string;
+    request: VideoProjectRequestIdentity;
     projectId: string;
     previousTimelineId: string | null;
     previousTimelineRevision: number | null;
     signal: AbortSignal;
   }): Promise<boolean> {
     try {
+      if (!isCurrentProjectRequest(input.request)) return false;
       const project = await fetchCreativeProject(apiBase, input.projectId, dbPath, input.signal);
+      if (input.signal.aborted || !isCurrentProjectRequest(input.request)) return false;
+      if (project.id !== input.projectId) return false;
+      if (isBlueprintProjectWorkspace(project)) {
+        if (projectDatabaseUuidRef.current && project.database_uuid !== projectDatabaseUuidRef.current) return false;
+        projectDatabaseUuidRef.current = project.database_uuid;
+        setCanonicalWorkspaceFailure(null);
+        blueprintWorkspaceRef.current = project;
+        setBlueprintWorkspace(project);
+        persistVideoSession(window.localStorage, input.request.scopeKey, {
+          projectId: input.projectId, timelineId: null, timelineRevision: null,
+        });
+        dispatch({ type: "canonical_workspace_opened" });
+        return true;
+      }
       const timelineId = project.latest_timeline_id ?? null;
-      if (!timelineId || !isCurrentScope(input.capturedScope)) return false;
+      if (!timelineId || !isCurrentProjectRequest(input.request)) return false;
       const timeline = await fetchTimeline(
         apiBase,
         timelineId,
@@ -300,7 +524,8 @@ function VideoWorkbench({
         dbPath,
         input.signal,
       );
-      if (!isCurrentScope(input.capturedScope)) return false;
+      if (input.signal.aborted || !isCurrentProjectRequest(input.request)) return false;
+      if (timeline.id !== timelineId || timeline.project_id !== input.projectId) return false;
       const changed = timelineId !== input.previousTimelineId
         || timeline.revision !== input.previousTimelineRevision;
       if (!changed) return false;
@@ -314,7 +539,7 @@ function VideoWorkbench({
   }
 
   async function restoreRenderFromJobList(input: {
-    capturedScope: string;
+    request: VideoProjectRequestIdentity;
     timelineId: string;
     revision: number;
     kind: RenderKind;
@@ -322,9 +547,9 @@ function VideoWorkbench({
     signal: AbortSignal;
   }): Promise<boolean> {
     try {
-      if (!dbPath) return false;
+      if (!dbPath || !isCurrentProjectRequest(input.request)) return false;
       const jobs = await fetchRecentRenderJobs(apiBase, dbPath, input.signal);
-      if (!isCurrentScope(input.capturedScope)) return false;
+      if (input.signal.aborted || !isCurrentProjectRequest(input.request)) return false;
       setRecoveredRenderJobs(jobs);
       const matching = jobs.find((job) => (
         job.timeline_id === input.timelineId
@@ -358,7 +583,7 @@ function VideoWorkbench({
   }
 
   useEffect(() => {
-    scopeRef.current = scopeKey;
+    projectOpenScopeRef.current.scopeEpoch += 1;
     for (const controller of requestControllersRef.current) controller.abort();
     requestControllersRef.current.clear();
     dispatch({ type: "reset_scope", scopeKey });
@@ -366,6 +591,7 @@ function VideoWorkbench({
     setPendingInstruction(null);
     setImportSummary(null);
     setArtifactSaved(false);
+    setIsSavingArtifact(false);
     setIdeaConfirmed(false);
     setMaterialsConfirmed(false);
     setExpandedStep("idea");
@@ -375,6 +601,14 @@ function VideoWorkbench({
     setPrefilledProfileFields(new Set());
     setPrefilledProfileRevision(0);
     setCreatorMemoryEnabled(true);
+    setBlueprintWorkspace(null);
+    blueprintWorkspaceRef.current = null;
+    projectDatabaseUuidRef.current = null;
+    setCanonicalWorkspaceFailure(null);
+    setProjectIdInput("");
+    setProjectOpenError(null);
+    setIsOpeningProject(false);
+    setIsWriting(false);
   }, [scopeKey]);
 
   useEffect(() => {
@@ -432,9 +666,18 @@ function VideoWorkbench({
   }, [state.renderJob?.id]);
 
   useEffect(() => () => {
+    projectOpenScopeRef.current.scopeEpoch += 1;
     for (const controller of requestControllersRef.current) controller.abort();
     requestControllersRef.current.clear();
   }, []);
+
+  useEffect(() => {
+    projectOpenControllerRef.current?.abort();
+    projectOpenControllerRef.current = null;
+    setIsOpeningProject(false);
+    setIsWriting(false);
+    setIsSavingArtifact(false);
+  }, [apiBase, canUseBackend]);
 
   useEffect(() => {
     if (!canUseBackend) return;
@@ -490,39 +733,83 @@ function VideoWorkbench({
   }, [desktopRuntime, recoveredRenderJobs, state.renderJob, state.timeline]);
 
   useEffect(() => {
-    if (!canUseBackend || !dbPath || state.project || state.projectPhase !== "idle") return;
+    if (!canResumePersistedVideoSession({
+      canUseBackend,
+      dbPath,
+      requestedScopeKey: scopeKey,
+      stateScopeKey: state.scopeKey,
+      hasProject: state.project !== null,
+      projectPhase: state.projectPhase,
+    })) return;
     const saved = readPersistedVideoSession(window.localStorage, scopeKey);
     if (!saved) return;
-    const capturedScope = scopeKey;
     const controller = createTrackedController();
-    dispatch({ type: "project_loading" });
-    void fetchCreativeProject(apiBase, saved.projectId, dbPath, controller.signal)
-      .then(async (project) => {
-        if (!isCurrentScope(capturedScope)) return;
-        dispatch({ type: "project_ready", project });
-        const timelineId = project.latest_timeline_id ?? saved.timelineId ?? null;
-        if (!timelineId) return;
-        dispatch({ type: "timeline_loading" });
-        const timeline = await fetchTimeline(
+    void openExistingProject(saved.projectId, {
+      savedSession: saved,
+      restoreSession: true,
+      controller,
+    });
+    return () => controller.abort();
+  }, [apiBase, canUseBackend, dbPath, scopeKey, state.project, state.scopeKey]);
+
+  useEffect(() => {
+    if (!pollingAllowed || !canUseBackend || !dbPath || !state.project || blueprintWorkspace || isOpeningProject) return;
+    const projectId = state.project.id;
+    const capturedScope = scopeKey;
+    const request = captureProjectRequest();
+    let stopped = false;
+    let controller: AbortController | null = null;
+    const refresh = async () => {
+      controller = new AbortController();
+      try {
+        const project = await fetchCreativeProject(
           apiBase,
-          timelineId,
-          project.latest_timeline_revision ?? saved.timelineRevision,
+          projectId,
           dbPath,
           controller.signal,
         );
-        if (isCurrentScope(capturedScope)) dispatch({ type: "timeline_ready", timeline });
-      })
-      .catch((error) => {
-        if (!controller.signal.aborted && isCurrentScope(capturedScope)) {
-          dispatch({ type: "project_error", error: `Saved video project could not be restored: ${humanError(error, "restore failed")}` });
+        if (
+          !stopped && !controller.signal.aborted
+          && isCurrentProjectRequest(request)
+          && project.id === projectId && isBlueprintProjectWorkspace(project)
+          && (!projectDatabaseUuidRef.current || project.database_uuid === projectDatabaseUuidRef.current)
+        ) {
+          projectDatabaseUuidRef.current = project.database_uuid;
+          setCanonicalWorkspaceFailure(null);
+          blueprintWorkspaceRef.current = project;
+          setBlueprintWorkspace(project);
+          persistVideoSession(window.localStorage, capturedScope, {
+            projectId, timelineId: null, timelineRevision: null,
+          });
+          dispatch({ type: "canonical_workspace_opened" });
         }
-      })
-      .finally(() => releaseController(controller));
-    return () => controller.abort();
-  }, [apiBase, canUseBackend, dbPath, scopeKey, state.project, state.projectPhase]);
+      } catch (error) {
+        if (
+          !stopped
+          && !controller.signal.aborted
+          && isCurrentProjectRequest(request)
+          && error instanceof VideoApiError
+          && error.code === "blueprint_integrity_error"
+        ) {
+          setCanonicalWorkspaceFailure({
+            projectId,
+            message: humanError(error, "Canonical Blueprint integrity validation failed."),
+          });
+          setBlueprintWorkspace(null);
+          dispatch({ type: "canonical_workspace_opened" });
+        }
+      }
+    };
+    const intervalId = window.setInterval(() => void refresh(), 5_000);
+    return () => {
+      stopped = true;
+      controller?.abort();
+      window.clearInterval(intervalId);
+    };
+  }, [apiBase, blueprintWorkspace, canUseBackend, dbPath, isOpeningProject, pollingAllowed, scopeKey, state.project]);
 
   useEffect(() => {
-    if (activeIndexJobs.length === 0) return;
+    if (!pollingAllowed || activeIndexJobs.length === 0) return;
     const capturedScope = scopeKey;
     const jobIds = activeIndexJobs.map((job) => job.id);
     let stopped = false;
@@ -550,11 +837,11 @@ function VideoWorkbench({
       if (timeoutId !== null) window.clearTimeout(timeoutId);
       controller?.abort();
     };
-  }, [apiBase, scopeKey, activeIndexJobs.map((job) => `${job.id}:${job.status}`).join("|")]);
+  }, [apiBase, pollingAllowed, scopeKey, activeIndexJobs.map((job) => `${job.id}:${job.status}`).join("|")]);
 
   useEffect(() => {
-    if (!state.renderJob || !isActiveJobStatus(state.renderJob.status)) return;
-    const capturedScope = scopeKey;
+    if (!pollingAllowed || !state.renderJob || !isActiveJobStatus(state.renderJob.status)) return;
+    const request = captureProjectRequest(true);
     const renderJobId = state.renderJob.id;
     let stopped = false;
     let controller: AbortController | null = null;
@@ -564,9 +851,9 @@ function VideoWorkbench({
       try {
         if (!dbPath) return;
         const job = await fetchRenderJob(apiBase, renderJobId, dbPath, controller.signal);
-        if (!stopped && isCurrentScope(capturedScope)) dispatch({ type: "render_job", job });
+        if (!stopped && !controller.signal.aborted && isCurrentProjectRequest(request)) dispatch({ type: "render_job", job });
       } catch (error) {
-        if (!stopped && !controller.signal.aborted && isCurrentScope(capturedScope)) {
+        if (!stopped && !controller.signal.aborted && isCurrentProjectRequest(request)) {
           dispatch({ type: "render_error", error: humanError(error, "Render status could not be refreshed.") });
         }
       } finally {
@@ -579,14 +866,19 @@ function VideoWorkbench({
       if (timeoutId !== null) window.clearTimeout(timeoutId);
       controller?.abort();
     };
-  }, [apiBase, scopeKey, state.renderJob?.id, state.renderJob?.status]);
+  }, [apiBase, pollingAllowed, scopeKey, isOpeningProject, state.renderJob?.id, state.renderJob?.status]);
 
   useEffect(() => {
     if (!selectedMatch || selectedMatch.result_type !== "video_segment") return;
     const capturedScope = scopeKey;
     const controller = createTrackedController();
     dispatch({ type: "segment_loading" });
-    void fetchVideoSegment(apiBase, selectedMatch.id, dbPath, controller.signal)
+    void fetchVideoSegment(
+      apiBase,
+      residualParentSegmentId(selectedMatch),
+      dbPath,
+      controller.signal,
+    )
       .then((segment) => {
         if (isCurrentScope(capturedScope)) dispatch({ type: "segment_ready", segment });
       })
@@ -708,7 +1000,9 @@ function VideoWorkbench({
       return;
     }
     const capturedScope = scopeKey;
+    const capturedUsageMode = searchUsageMode;
     const controller = createTrackedController();
+    setSelectedRefs([]);
     dispatch({ type: "search_loading" });
     try {
       const result = await searchMixedAssets({
@@ -717,9 +1011,18 @@ function VideoWorkbench({
         query: searchQuery.trim(),
         topK: 24,
         excludedTerms: splitTerms(mustExcludeText),
+        usageMode: capturedUsageMode,
         signal: controller.signal,
       });
-      if (isCurrentScope(capturedScope)) dispatch({ type: "search_ready", results: result.results });
+      if (isCurrentScope(capturedScope)) {
+        dispatch({
+          type: "search_ready",
+          results: result.results,
+          usagePolicy: result.usage_policy ?? null,
+          usageRevision: result.usage_revision ?? null,
+          derivativeRevision: result.derivative_revision,
+        });
+      }
     } catch (error) {
       if (!controller.signal.aborted && isCurrentScope(capturedScope)) {
         dispatch({ type: "search_error", error: humanError(error, "Mixed media search failed.") });
@@ -729,10 +1032,11 @@ function VideoWorkbench({
     }
   }
 
-  function toggleReference(matchId: string): void {
-    setSelectedRefs((current) => current.includes(matchId)
-      ? current.filter((id) => id !== matchId)
-      : [...current, matchId].slice(0, 24));
+  function toggleReference(match: CreativeAssetMatch): void {
+    if (!usageMatchSelectableInBrief(match, searchUsageMode)) return;
+    setSelectedRefs((current) => current.includes(match.id)
+      ? current.filter((id) => id !== match.id)
+      : [...current, match.id].slice(0, 24));
   }
 
   async function handleCreateBrief(): Promise<void> {
@@ -740,13 +1044,70 @@ function VideoWorkbench({
       dispatch({ type: "project_error", error: "Saving a creative project requires the authenticated MemoLens Desktop bridge." });
       return;
     }
-    const capturedScope = scopeKey;
+    const selectableRefs = selectableUsageReferenceIds(
+      selectedRefs,
+      state.searchResults,
+      searchUsageMode,
+    );
+    const usageAware = searchUsageMode !== "all";
+    const selectedMatches = new Map(
+      state.searchResults.map((match) => [match.id, match]),
+    );
+    const candidateObservations = selectableRefs.flatMap((referenceId) => {
+      const match = selectedMatches.get(referenceId);
+      if (!match || match.result_type !== "image_asset") return [];
+      return match.canonical_image_observation
+        ? [match.canonical_image_observation]
+        : [];
+    });
+    const selectedImageCount = selectableRefs.filter(
+      (referenceId) => selectedMatches.get(referenceId)?.result_type === "image_asset",
+    ).length;
+    if (candidateObservations.length !== selectedImageCount) {
+      setSelectedRefs(selectableRefs.filter((referenceId) => {
+        const match = selectedMatches.get(referenceId);
+        return match?.result_type !== "image_asset"
+          || match.canonical_image_observation !== null;
+      }));
+      dispatch({
+        type: "project_error",
+        error: "One or more selected images no longer have exact current evidence. Search again before creating the brief.",
+      });
+      return;
+    }
+    let usageSelection: CanonicalUsageSelection | null = null;
+    if (usageAware) {
+      if (
+        selectableRefs.length === 0
+        || selectableRefs.length !== selectedRefs.length
+        || state.searchUsagePolicy !== searchUsageMode
+        || !state.searchUsageRevision
+        || !state.searchDerivativeRevision
+      ) {
+        setSelectedRefs(selectableRefs);
+        dispatch({
+          type: "project_error",
+          error: searchUsageMode === "unused_only"
+            ? "Choose at least one currently verified unused image, wholly unused video segment, or exact residual clip."
+            : "Choose at least one result from the current usage-aware search before creating the brief.",
+        });
+        return;
+      }
+      usageSelection = buildCanonicalUsageSelection(
+        selectableRefs,
+        state.searchResults,
+        searchUsageMode,
+        state.searchUsageRevision,
+        state.searchDerivativeRevision,
+      );
+    }
+    const request = captureProjectRequest();
     const controller = createTrackedController();
     const normalizedBrief: CreativeBriefInput = {
       ...brief,
       must_include: splitTerms(mustIncludeText),
       must_exclude: splitTerms(mustExcludeText),
-      candidate_refs: [...selectedRefs],
+      candidate_refs: [...selectableRefs],
     };
     const appliedProfileFields = appliedProfileFieldsForBrief(normalizedBrief);
     const creatorProfileRef = appliedProfileFields.length > 0
@@ -767,6 +1128,9 @@ function VideoWorkbench({
       must_include: normalizedBrief.must_include,
       must_exclude: normalizedBrief.must_exclude,
       candidate_refs: normalizedBrief.candidate_refs ?? [],
+      ...(candidateObservations.length > 0 ? {
+        candidate_observations: candidateObservations as unknown as MutationJson,
+      } : {}),
       ...(normalizedBrief.narrative_arc === undefined
         ? {}
         : { narrative_arc: normalizedBrief.narrative_arc }),
@@ -774,6 +1138,9 @@ function VideoWorkbench({
       ...(creatorProfileRef ? {
         creator_profile_ref: creatorProfileRef,
         applied_profile_fields: appliedProfileFields,
+      } : {}),
+      ...(usageSelection ? {
+        usage_selection: usageSelection as unknown as MutationJson,
       } : {}),
     };
     setIsWriting(true);
@@ -785,18 +1152,21 @@ function VideoWorkbench({
         action: "creative_brief.create",
         payload: mutationPayload,
       });
+      assertCurrentProjectRequest(request, controller.signal);
       const project = await createCreativeBrief({
         apiBase,
         dbPath,
         brief: normalizedBrief,
-        selectedRefs,
+        selectedRefs: selectableRefs,
+        usageSelection,
+        candidateObservations,
         creatorProfileRef,
         appliedProfileFields,
         signal: controller.signal,
         idempotencyKey: lease.idempotencyKey,
       });
       mutationLedger.settle(lease, { kind: "success" });
-      if (!isCurrentScope(capturedScope)) return;
+      if (controller.signal.aborted || !isCurrentProjectRequest(request)) return;
       dispatch({ type: "project_ready", project });
       persistVideoSession(window.localStorage, scopeKey, {
         projectId: project.id,
@@ -805,19 +1175,19 @@ function VideoWorkbench({
       });
     } catch (error) {
       settleMutationError(lease, error);
-      if (!controller.signal.aborted && isCurrentScope(capturedScope)) {
+      if (!controller.signal.aborted && isCurrentProjectRequest(request)) {
         dispatch({ type: "project_error", error: humanError(error, "Creative brief could not be created.") });
       }
     } finally {
       releaseController(controller);
-      if (isCurrentScope(capturedScope)) setIsWriting(false);
+      if (isCurrentProjectScope(request)) setIsWriting(false);
     }
   }
 
   async function handleCreateTimeline(): Promise<void> {
     if (!canWrite || !state.project) return;
     const capturedProject = state.project;
-    const capturedScope = scopeKey;
+    const request = captureProjectRequest();
     const controller = createTrackedController();
     setIsWriting(true);
     dispatch({ type: "timeline_loading" });
@@ -831,6 +1201,7 @@ function VideoWorkbench({
           ...(dbPath ? { db_path: dbPath } : {}),
         },
       });
+      assertCurrentProjectRequest(request, controller.signal);
       const result = await createTimeline({
         apiBase,
         projectId: capturedProject.id,
@@ -840,26 +1211,27 @@ function VideoWorkbench({
         idempotencyKey: lease.idempotencyKey,
       });
       mutationLedger.settle(lease, { kind: "success" });
-      if (!isCurrentScope(capturedScope)) return;
+      if (controller.signal.aborted || !isCurrentProjectRequest(request)) return;
+      if (result.timeline.project_id !== capturedProject.id) throw new Error("Timeline response belongs to another project.");
       dispatch({ type: "timeline_ready", timeline: result.timeline, diff: result.diff });
       persistTimelineHead(capturedProject.id, result.timeline);
     } catch (error) {
       const outcome = settleMutationError(lease, error);
       const reconciled = !controller.signal.aborted && isAmbiguousVideoMutationOutcome(outcome)
         ? await restoreProjectLatestTimeline({
-            capturedScope,
+            request,
             projectId: capturedProject.id,
             previousTimelineId: state.timeline?.id ?? capturedProject.latest_timeline_id ?? null,
             previousTimelineRevision: state.timeline?.revision ?? capturedProject.latest_timeline_revision ?? null,
             signal: controller.signal,
           })
         : false;
-      if (!reconciled && !controller.signal.aborted && isCurrentScope(capturedScope)) {
+      if (!reconciled && !controller.signal.aborted && isCurrentProjectRequest(request)) {
         dispatch({ type: "timeline_error", error: humanError(error, "Storyboard could not be created.") });
       }
     } finally {
       releaseController(controller);
-      if (isCurrentScope(capturedScope)) setIsWriting(false);
+      if (isCurrentProjectScope(request)) setIsWriting(false);
     }
   }
 
@@ -867,7 +1239,7 @@ function VideoWorkbench({
     if (!canWrite || !state.timeline || operations.length === 0 || isWriting) return;
     const capturedTimeline = state.timeline;
     const capturedProjectId = state.project?.id ?? capturedTimeline.project_id;
-    const capturedScope = scopeKey;
+    const request = captureProjectRequest();
     const controller = createTrackedController();
     setIsWriting(true);
     dispatch({ type: "timeline_loading" });
@@ -882,6 +1254,7 @@ function VideoWorkbench({
           ...(dbPath ? { db_path: dbPath } : {}),
         },
       });
+      assertCurrentProjectRequest(request, controller.signal);
       const result = await reviseTimeline({
         apiBase,
         timelineId: capturedTimeline.id,
@@ -892,7 +1265,10 @@ function VideoWorkbench({
         idempotencyKey: lease.idempotencyKey,
       });
       mutationLedger.settle(lease, { kind: "success" });
-      if (!isCurrentScope(capturedScope)) return;
+      if (controller.signal.aborted || !isCurrentProjectRequest(request)) return;
+      if (result.timeline.id !== capturedTimeline.id || result.timeline.project_id !== capturedProjectId) {
+        throw new Error("Timeline response belongs to another project or timeline.");
+      }
       dispatch({ type: "timeline_ready", timeline: result.timeline, diff: result.diff });
       persistTimelineHead(capturedProjectId, result.timeline);
       setPendingInstruction(null);
@@ -901,7 +1277,7 @@ function VideoWorkbench({
       const outcome = settleMutationError(lease, error);
       const latest = !controller.signal.aborted && shouldReconcileTimelineMutation(outcome)
         ? await restoreLatestTimeline({
-            capturedScope,
+            request,
             projectId: capturedProjectId,
             timelineId: capturedTimeline.id,
             afterRevision: capturedTimeline.revision,
@@ -909,12 +1285,12 @@ function VideoWorkbench({
           })
         : null;
       const restoredNewHead = Boolean(latest && latest.revision > capturedTimeline.revision);
-      if (!restoredNewHead && !controller.signal.aborted && isCurrentScope(capturedScope)) {
+      if (!restoredNewHead && !controller.signal.aborted && isCurrentProjectRequest(request)) {
         dispatch({ type: "timeline_error", error: humanError(error, "Timeline revision was rejected; the saved revision is unchanged.") });
       }
     } finally {
       releaseController(controller);
-      if (isCurrentScope(capturedScope)) setIsWriting(false);
+      if (isCurrentProjectScope(request)) setIsWriting(false);
     }
   }
 
@@ -922,7 +1298,7 @@ function VideoWorkbench({
     if (!state.timeline || !commandText.trim()) return;
     const instruction = commandText.trim();
     const capturedTimeline = state.timeline;
-    const capturedScope = scopeKey;
+    const request = captureProjectRequest();
     const controller = createTrackedController();
     setIsWriting(true);
     setPendingInstruction(null);
@@ -935,7 +1311,7 @@ function VideoWorkbench({
         instruction,
         signal: controller.signal,
       });
-      if (!isCurrentScope(capturedScope)) return;
+      if (controller.signal.aborted || !isCurrentProjectRequest(request)) return;
       setPendingInstruction({
         instruction,
         operations: preview.operations,
@@ -947,7 +1323,7 @@ function VideoWorkbench({
         mode: "server",
       });
     } catch (error) {
-      if (controller.signal.aborted || !isCurrentScope(capturedScope)) return;
+      if (controller.signal.aborted || !isCurrentProjectRequest(request)) return;
       if (error instanceof VideoApiError && [400, 404, 422].includes(error.status)) {
         const parsed = parseTimelineInstruction(instruction, capturedTimeline);
         setPendingInstruction({
@@ -965,12 +1341,12 @@ function VideoWorkbench({
       }
     } finally {
       releaseController(controller);
-      if (isCurrentScope(capturedScope)) setIsWriting(false);
+      if (isCurrentProjectScope(request)) setIsWriting(false);
     }
   }
 
   async function confirmInstruction(): Promise<void> {
-    if (!pendingInstruction || !state.timeline || isWriting) return;
+    if (!canWrite || !pendingInstruction || !state.timeline || isWriting) return;
     if (pendingInstruction.mode === "local") {
       await applyTimelineOperations(pendingInstruction.operations);
       return;
@@ -978,7 +1354,7 @@ function VideoWorkbench({
     const capturedInstruction = pendingInstruction;
     const capturedTimeline = state.timeline;
     const capturedProjectId = state.project?.id ?? capturedTimeline.project_id;
-    const capturedScope = scopeKey;
+    const request = captureProjectRequest();
     const controller = createTrackedController();
     setIsWriting(true);
     dispatch({ type: "timeline_loading" });
@@ -994,6 +1370,7 @@ function VideoWorkbench({
           ...(dbPath ? { db_path: dbPath } : {}),
         },
       });
+      assertCurrentProjectRequest(request, controller.signal);
       const result = await applyTimelineInstruction({
         apiBase,
         timelineId: capturedTimeline.id,
@@ -1004,7 +1381,10 @@ function VideoWorkbench({
         idempotencyKey: lease.idempotencyKey,
       });
       mutationLedger.settle(lease, { kind: "success" });
-      if (!isCurrentScope(capturedScope)) return;
+      if (controller.signal.aborted || !isCurrentProjectRequest(request)) return;
+      if (result.timeline.id !== capturedTimeline.id || result.timeline.project_id !== capturedProjectId) {
+        throw new Error("Timeline response belongs to another project or timeline.");
+      }
       dispatch({ type: "timeline_ready", timeline: result.timeline, diff: result.diff });
       persistTimelineHead(capturedProjectId, result.timeline);
       setPendingInstruction(null);
@@ -1013,7 +1393,7 @@ function VideoWorkbench({
       const outcome = settleMutationError(lease, error);
       const latest = !controller.signal.aborted && shouldReconcileTimelineMutation(outcome)
         ? await restoreLatestTimeline({
-            capturedScope,
+            request,
             projectId: capturedProjectId,
             timelineId: capturedTimeline.id,
             afterRevision: capturedTimeline.revision,
@@ -1021,32 +1401,34 @@ function VideoWorkbench({
           })
         : null;
       const restoredNewHead = Boolean(latest && latest.revision > capturedTimeline.revision);
-      if (!restoredNewHead && !controller.signal.aborted && isCurrentScope(capturedScope)) {
+      if (!restoredNewHead && !controller.signal.aborted && isCurrentProjectRequest(request)) {
         dispatch({ type: "timeline_error", error: humanError(error, "Instruction apply was rejected; the saved revision is unchanged.") });
       }
     } finally {
       releaseController(controller);
-      if (isCurrentScope(capturedScope)) setIsWriting(false);
+      if (isCurrentProjectScope(request)) setIsWriting(false);
     }
   }
 
   async function handleValidate(): Promise<boolean> {
     if (!state.timeline) return false;
-    const capturedScope = scopeKey;
+    const request = captureProjectRequest();
+    const capturedTimeline = state.timeline;
     const controller = createTrackedController();
     dispatch({ type: "validation_loading" });
     try {
       const validation = await validateTimeline({
         apiBase,
-        timelineId: state.timeline.id,
-        revision: state.timeline.revision,
+        timelineId: capturedTimeline.id,
+        revision: capturedTimeline.revision,
         dbPath,
         signal: controller.signal,
       });
-      if (isCurrentScope(capturedScope)) dispatch({ type: "validation_ready", validation });
+      if (controller.signal.aborted || !isCurrentProjectRequest(request)) return false;
+      dispatch({ type: "validation_ready", validation });
       return validation.valid;
     } catch (error) {
-      if (!controller.signal.aborted && isCurrentScope(capturedScope)) {
+      if (!controller.signal.aborted && isCurrentProjectRequest(request)) {
         dispatch({ type: "validation_error", error: humanError(error, "Timeline validation failed.") });
       }
       return false;
@@ -1061,20 +1443,20 @@ function VideoWorkbench({
       return;
     }
     if (!canPreviewRender || !state.timeline || renderActive) return;
+    const request = captureProjectRequest(true);
+    const capturedTimeline = state.timeline;
     setIsWriting(true);
     const valid = await handleValidate();
-    if (!valid || !state.timeline) {
-      setIsWriting(false);
+    if (!valid || !isCurrentProjectRequest(request)) {
+      if (isCurrentProjectScope(request)) setIsWriting(false);
       return;
     }
-    const capturedTimeline = state.timeline;
     const previewRootId = state.capabilities?.preview_root_id ?? "";
     const profile = kind === "preview" ? "preview-low" : "export-1080p";
     const knownJobIds = new Set([
       ...recoveredRenderJobs.map((job) => job.id),
       ...(state.renderJob ? [state.renderJob.id] : []),
     ]);
-    const capturedScope = scopeKey;
     const controller = createTrackedController();
     let lease: MutationLease | null = null;
     try {
@@ -1090,6 +1472,7 @@ function VideoWorkbench({
           ...(dbPath ? { db_path: dbPath } : {}),
         },
       });
+      assertCurrentProjectRequest(request, controller.signal);
       const job = await startRender({
         apiBase,
         timelineId: capturedTimeline.id,
@@ -1102,12 +1485,17 @@ function VideoWorkbench({
         idempotencyKey: lease.idempotencyKey,
       });
       mutationLedger.settle(lease, { kind: "success" });
-      if (isCurrentScope(capturedScope)) dispatch({ type: "render_job", job });
+      if (!controller.signal.aborted && isCurrentProjectRequest(request)) {
+        if (job.timeline_id !== capturedTimeline.id || job.timeline_revision !== capturedTimeline.revision) {
+          throw new Error("Render response belongs to another timeline revision.");
+        }
+        dispatch({ type: "render_job", job });
+      }
     } catch (error) {
       const outcome = settleMutationError(lease, error);
       const reconciled = !controller.signal.aborted && isAmbiguousVideoMutationOutcome(outcome)
         ? await restoreRenderFromJobList({
-            capturedScope,
+            request,
             timelineId: capturedTimeline.id,
             revision: capturedTimeline.revision,
             kind,
@@ -1115,19 +1503,19 @@ function VideoWorkbench({
             signal: controller.signal,
           })
         : false;
-      if (!reconciled && !controller.signal.aborted && isCurrentScope(capturedScope)) {
+      if (!reconciled && !controller.signal.aborted && isCurrentProjectRequest(request)) {
         dispatch({ type: "render_error", error: humanError(error, `${kind} render could not start.`) });
       }
     } finally {
       releaseController(controller);
-      if (isCurrentScope(capturedScope)) setIsWriting(false);
+      if (isCurrentProjectScope(request)) setIsWriting(false);
     }
   }
 
   async function handleCancelRender(): Promise<void> {
-    if (!state.renderJob || !renderActive) return;
+    if (!canWrite || !state.renderJob || !renderActive) return;
     const capturedJob = state.renderJob;
-    const capturedScope = scopeKey;
+    const request = captureProjectRequest(true);
     const controller = createTrackedController();
     let lease: MutationLease | null = null;
     try {
@@ -1136,6 +1524,7 @@ function VideoWorkbench({
         action: "render.cancel",
         payload: {},
       });
+      assertCurrentProjectRequest(request, controller.signal);
       const job = await cancelRenderJob(
         apiBase,
         capturedJob.id,
@@ -1144,10 +1533,15 @@ function VideoWorkbench({
         lease.idempotencyKey,
       );
       mutationLedger.settle(lease, { kind: "success" });
-      if (isCurrentScope(capturedScope)) dispatch({ type: "render_job", job });
+      if (!controller.signal.aborted && isCurrentProjectRequest(request)) {
+        if (job.id !== capturedJob.id || job.timeline_id !== capturedJob.timeline_id || job.timeline_revision !== capturedJob.timeline_revision) {
+          throw new Error("Render response belongs to another job or timeline revision.");
+        }
+        dispatch({ type: "render_job", job });
+      }
     } catch (error) {
       settleMutationError(lease, error);
-      if (!controller.signal.aborted && isCurrentScope(capturedScope)) {
+      if (!controller.signal.aborted && isCurrentProjectRequest(request)) {
         dispatch({ type: "render_error", error: humanError(error, "Render could not be cancelled.") });
       }
     } finally {
@@ -1157,6 +1551,7 @@ function VideoWorkbench({
 
   async function handleSaveArtifact(): Promise<void> {
     if (!state.renderJob || !renderCompleted || !state.timeline) return;
+    const request = captureProjectRequest(true);
     const artifactUrl = renderDownloadUrl(apiBase, state.renderJob);
     const filename = state.renderJob.filename ?? state.renderJob.output?.filename ?? defaultPreviewFilename(state.timeline);
     if (!canVerifiedPreviewSaveAs) {
@@ -1178,18 +1573,21 @@ function VideoWorkbench({
     dispatch({ type: "save_message", message: null });
     try {
       const result = await saveVideoArtifactOnDesktop({
+        renderJobId: state.renderJob.id,
         artifactUrl,
         suggestedFilename: filename,
         expectedSha256,
         expectedSizeBytes,
       });
+      if (!isCurrentProjectRequest(request)) return;
       setArtifactSaved(result?.status === "saved");
       dispatch({ type: "save_message", message: result?.message ?? "Desktop save bridge is unavailable." });
     } catch (error) {
+      if (!isCurrentProjectRequest(request)) return;
       setArtifactSaved(false);
       dispatch({ type: "save_message", message: humanError(error, "Video could not be saved.") });
     } finally {
-      setIsSavingArtifact(false);
+      if (isCurrentProjectScope(request)) setIsSavingArtifact(false);
     }
   }
 
@@ -1211,6 +1609,114 @@ function VideoWorkbench({
     return { op: "trim_clip", clip_id: clip.id, source_in_ms: sourceIn, source_out_ms: sourceOut };
   }
 
+  async function retryCanonicalWorkspace(): Promise<void> {
+    if (!canonicalWorkspaceFailure || !dbPath || !canUseBackend) return;
+    await openExistingProject(canonicalWorkspaceFailure.projectId, { canonicalOnly: true });
+  }
+
+  const projectOpenPanel = (
+    <section className="video-panel" aria-labelledby="video-open-project-title">
+      <div className="video-panel-head">
+        <div>
+          <p className="eyebrow">Continue a project</p>
+          <h3 id="video-open-project-title">Open existing project</h3>
+          <p className="video-muted">Enter the exact Project ID from MemoLens or your agent to continue in this library.</p>
+        </div>
+      </div>
+      <form onSubmit={(event) => {
+        event.preventDefault();
+        if (!isOpeningProject) void openExistingProject(projectIdInput);
+      }}>
+        <label className="video-field" htmlFor="video-open-project-id">
+          Project ID
+          <input
+            id="video-open-project-id"
+            value={projectIdInput}
+            onChange={(event) => setProjectIdInput(event.target.value)}
+            placeholder="proj_…"
+            autoComplete="off"
+            spellCheck={false}
+            disabled={isOpeningProject}
+            aria-describedby="video-open-project-status"
+          />
+        </label>
+        <div className="video-form-actions">
+          <button
+            type="submit"
+            className="secondary-button compact-button"
+            disabled={!canUseBackend || !dbPath?.trim() || state.scopeKey !== scopeKey || !projectIdInput.trim() || isWriting || isSavingArtifact || isOpeningProject}
+          >
+            {isOpeningProject ? "Opening project…" : "Open project"}
+          </button>
+          <span className="inline-note" id="video-open-project-status" role="status">
+            {isOpeningProject ? "Reading the saved project…" : !canUseBackend || !dbPath?.trim()
+              ? "Connect your library to open a saved project."
+              : blueprintWorkspace ? `Current project: ${blueprintWorkspace.project_id}`
+                : state.project ? `Current project: ${state.project.id}` : ""}
+          </span>
+        </div>
+        {projectOpenError ? <p className="video-inline-error" role="alert">{projectOpenError}</p> : null}
+      </form>
+    </section>
+  );
+
+  if (canonicalWorkspaceFailure) {
+    return (
+      <section className="section-block video-workbench" id="video-studio" aria-labelledby="blueprint-integrity-title">
+        {projectOpenPanel}
+        <div className="video-state-card" role="alert" aria-live="assertive">
+          <p className="eyebrow">Canonical Blueprint unavailable</p>
+          <h2 id="blueprint-integrity-title">MemoLens stopped before showing a legacy fallback.</h2>
+          <p>{canonicalWorkspaceFailure.message}</p>
+          <p className="inline-note">
+            Project {canonicalWorkspaceFailure.projectId} remains untouched. Repair the canonical ledger, then retry this exact project.
+          </p>
+          <button
+            type="button"
+            className="secondary-button compact-button"
+            disabled={!canUseBackend || isOpeningProject}
+            onClick={() => void retryCanonicalWorkspace()}
+          >
+            Retry canonical read
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (blueprintWorkspace && state.scopeKey === scopeKey) {
+    return (
+      <div
+        ref={(node) => {
+          workbenchPollingRootRef.current = node;
+        }}
+        data-video-workbench-polling-root="canonical"
+      >
+        <div className="section-block video-workbench">{projectOpenPanel}</div>
+        {pollingAllowed ? (
+          <CanonicalBlueprintWorkspace
+            key={`${scopeKey}:${blueprintWorkspace.database_uuid}:${blueprintWorkspace.project_id}`}
+            apiBase={apiBase}
+            dbPath={dbPath}
+            initialWorkspace={blueprintWorkspace}
+            canWrite={canWrite}
+            onWorkspaceChange={(next) => {
+              if (renderScopeEpoch !== projectOpenScopeRef.current.scopeEpoch || !blueprintWorkspaceRef.current) return;
+              if (!canAdoptBlueprintWorkspaceResponse({
+                expected: blueprintWorkspaceRef.current,
+                candidate: next,
+                capturedScopeKey: scopeKey,
+                currentScopeKey: scopeRef.current,
+              })) return;
+              blueprintWorkspaceRef.current = next;
+              setBlueprintWorkspace(next);
+            }}
+          />
+        ) : null}
+      </div>
+    );
+  }
+
   const selectedSegmentMedia = desktopRuntime && selectedMatch?.result_type === "video_segment"
     ? resolveVideoResourceUrl(apiBase, state.segment?.media_url ?? selectedMatch.media_url)
     : null;
@@ -1230,7 +1736,15 @@ function VideoWorkbench({
   };
 
   return (
-    <section className="section-block video-workbench" id="video-studio" aria-labelledby="video-studio-title">
+    <section
+      ref={(node) => {
+        workbenchPollingRootRef.current = node;
+      }}
+      className="section-block video-workbench"
+      id="video-studio"
+      aria-labelledby="video-studio-title"
+      data-video-workbench-polling-root="legacy"
+    >
       <div className="video-workbench-heading">
         <div>
           <p className="eyebrow">Video Creative Workbench</p>
@@ -1246,6 +1760,8 @@ function VideoWorkbench({
           <span>Original images and videos are never overwritten.</span>
         </div>
       </div>
+
+      {projectOpenPanel}
 
       {creatorPreferenceCount > 0 ? (
         <div className="video-creator-context" role="note">
@@ -1538,10 +2054,30 @@ function VideoWorkbench({
               <span className="sr-only">Mixed media search</span>
               <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search filenames and indexed sidecar/segment text" />
             </label>
+            <label className="video-search-usage-filter">
+              <span className="sr-only">Successful export usage preference</span>
+              <select
+                value={searchUsageMode}
+                onChange={(event) => {
+                  const nextMode = event.target.value as SearchUsageMode;
+                  setSearchUsageMode(nextMode);
+                  setSelectedRefs([]);
+                  dispatch({ type: "search_reset" });
+                }}
+              >
+                <option value="all">Allow reuse</option>
+                <option value="prefer_unused">Prefer unused</option>
+                <option value="unused_only">Unused / residual only</option>
+              </select>
+            </label>
             <button type="submit" className="primary-button" disabled={!canUseBackend || !dbPath || state.searchPhase === "loading"}>
               {state.searchPhase === "loading" ? "Searching…" : "Search mixed media"}
             </button>
           </form>
+          <p className="video-inline-note" role="note">
+            Raw search excludes bytes proven to be successful canonical video outputs by exact SHA-256,
+            including renamed or copied imports. MemoLens does not delete or move the original file.
+          </p>
 
           {state.searchPhase === "error" ? <div className="video-state-card error" role="alert">{state.searchError}</div> : null}
           {state.searchPhase === "empty" ? (
@@ -1559,7 +2095,11 @@ function VideoWorkbench({
                 {state.searchResults.map((match) => {
                   const thumb = resolveVideoResourceUrl(apiBase, match.thumbnail_url);
                   const selected = match.id === state.selectedMatchId;
-                  const referenced = selectedRefs.includes(match.id);
+                  const selectionBlocked = !usageMatchSelectableInBrief(
+                    match,
+                    searchUsageMode,
+                  );
+                  const referenced = !selectionBlocked && selectedRefs.includes(match.id);
                   return (
                     <article key={match.id} className={`video-source-card${selected ? " active" : ""}`}>
                       <button
@@ -1570,7 +2110,13 @@ function VideoWorkbench({
                       >
                         <span className="video-source-art">
                           {thumb ? <img src={thumb} alt="" loading="lazy" decoding="async" /> : <span className="video-source-placeholder">{match.result_type === "video_segment" ? "VIDEO" : "IMAGE"}</span>}
-                          <em>{match.result_type === "video_segment" ? "Video segment" : "Image"}</em>
+                          <em>
+                            {isResidualCandidateId(match.id)
+                              ? "Exact residual clip"
+                              : match.result_type === "video_segment"
+                                ? "Video segment"
+                                : "Image"}
+                          </em>
                         </span>
                         <span className="video-source-copy">
                           <strong>{match.title ?? match.filename ?? match.summary}</strong>
@@ -1579,12 +2125,32 @@ function VideoWorkbench({
                               ? `${formatMilliseconds(match.start_ms)} → ${formatMilliseconds(match.end_ms)}`
                               : "Still image"}
                           </small>
+                          {match.usage ? (
+                            <small>
+                              {match.residual_binding
+                                ? `Residual ${formatMilliseconds(match.residual_binding.source_in_ms)}–${formatMilliseconds(match.residual_binding.source_out_ms)} from ${match.residual_binding.parent_segment_id}`
+                                : match.result_type === "video_segment"
+                                  ? `Available ${formatUsageIntervals(match.usage.residual_intervals)}`
+                                : match.usage.used
+                                  ? `Used in ${match.usage.used_in.length} successful export(s)`
+                                  : "Unused in successful exports"}
+                            </small>
+                          ) : null}
                           <span>{match.summary}</span>
                         </span>
                       </button>
                       <label className="video-source-check">
-                        <input type="checkbox" checked={referenced} onChange={() => toggleReference(match.id)} />
-                        <span>Use in brief</span>
+                        <input
+                          type="checkbox"
+                          checked={referenced}
+                          disabled={selectionBlocked}
+                          onChange={() => toggleReference(match)}
+                        />
+                        <span>
+                          {selectionBlocked
+                            ? "Unavailable under this successful-export usage policy"
+                            : "Use in brief"}
+                        </span>
                         <em>{formatMediaScore(match.score)}</em>
                       </label>
                     </article>
@@ -1620,11 +2186,42 @@ function VideoWorkbench({
                     <p className="eyebrow">Selected evidence</p>
                     <h4>{selectedMatch.title ?? selectedMatch.filename ?? "Local media"}</h4>
                     <p>{selectedMatch.summary}</p>
+                    {selectedMatch.residual_binding ? (
+                      <div className="video-usage-explanation" role="note">
+                        <strong>Exact residual material</strong>
+                        <span>
+                          Parent <code>{selectedMatch.residual_binding.parent_segment_id}</code>
+                        </span>
+                        <span>
+                          Selectable source range {formatMilliseconds(selectedMatch.residual_binding.source_in_ms)}–{formatMilliseconds(selectedMatch.residual_binding.source_out_ms)}
+                        </span>
+                        <span>
+                          This synthetic identity resolves preview and editing through its verified parent; it is not a new analyzed segment row.
+                        </span>
+                      </div>
+                    ) : null}
                     <div className="meta-pills">
                       {selectedMatch.provenance.map((source) => <span key={source} className="meta-pill">{source}</span>)}
                       {selectedMatch.confidence !== null ? <span className="meta-pill">confidence {formatMediaScore(selectedMatch.confidence)}</span> : null}
                       {selectedMatch.analysis_revision !== null ? <span className="meta-pill">analysis r{selectedMatch.analysis_revision}</span> : null}
                     </div>
+                    {selectedMatch.usage ? (
+                      <div className="video-usage-explanation" role="note">
+                        <strong>Successful export usage</strong>
+                        {selectedMatch.result_type === "video_segment" ? (
+                          <>
+                            <span>Used source ranges: {formatUsageIntervals(selectedMatch.usage.used_intervals)}</span>
+                            <span>Available remainder: {formatUsageIntervals(selectedMatch.usage.residual_intervals)}</span>
+                          </>
+                        ) : (
+                          <span>
+                            {selectedMatch.usage.used
+                              ? `This image occurs in ${selectedMatch.usage.used_in.length} successful export(s).`
+                              : "No successful export occurrence was found for this image."}
+                          </span>
+                        )}
+                      </div>
+                    ) : null}
                     {state.segment?.transcript.length ? (
                       <details className="video-transcript">
                         <summary>Timestamped transcript</summary>
@@ -1658,12 +2255,17 @@ function VideoWorkbench({
                 && state.searchResults.length === 0
                 && !state.indexJobs.some((job) => isUsableJobStatus(job.status))
               )
+              || (searchUsageMode !== "all" && selectedRefs.length === 0)
             }
             onClick={() => setMaterialsConfirmed(true)}
           >
             Use these materials
           </button>
-          <span>Selected references will remain traceable through the brief and timeline.</span>
+          <span>
+            {searchUsageMode === "all"
+              ? "Selected references will remain traceable through the brief and timeline."
+              : "Usage-aware modes require at least one explicit selection from the current verified search."}
+          </span>
         </div>
         </section>
         ) : null}
@@ -1823,7 +2425,12 @@ function VideoWorkbench({
               <div className="video-storyboard" aria-label="Editable storyboard">
                 {timelineClips.map((clip, index) => {
                   const sourceMatch = [...state.project?.candidates ?? [], ...state.searchResults]
-                    .find((match) => match.id === clip.segment_id || match.asset_id === clip.asset_id);
+                    .find((match) => (
+                      match.id === clip.provenance.match_id
+                      || match.id === clip.segment_id
+                      || match.parent_segment_id === clip.segment_id
+                      || match.asset_id === clip.asset_id
+                    ));
                   const thumb = resolveVideoResourceUrl(apiBase, sourceMatch?.thumbnail_url);
                   return (
                     <article className="video-clip-card" key={clip.id}>
@@ -1839,6 +2446,11 @@ function VideoWorkbench({
                           {typeof clip.source_out_ms === "number" ? ` → ${formatMilliseconds(clip.source_out_ms)}` : ""}
                           {` · timeline ${formatMilliseconds(clip.timeline_start_ms)} · ${formatMilliseconds(clip.timeline_duration_ms)}`}
                         </small>
+                        {sourceMatch?.residual_binding ? (
+                          <small>
+                            Exact residual <code>{sourceMatch.id}</code> from parent <code>{sourceMatch.residual_binding.parent_segment_id}</code>
+                          </small>
+                        ) : null}
                       </div>
                       <div className="video-clip-actions" aria-label={`Edit clip ${index + 1}`}>
                         <button type="button" aria-label={`Move clip ${index + 1} earlier`} disabled={index === 0 || isWriting} onClick={() => void applyTimelineOperations([{ op: "move_clip", clip_id: clip.id, to_index: index - 1 }])}>←</button>

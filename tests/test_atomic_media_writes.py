@@ -1,26 +1,39 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from backend.src import DESKTOP_TOKEN_HEADER, create_app
+from backend.src.media.blueprint import BlueprintService
 from backend.src.media.director import CreativeDirector
-from backend.src.media.timeline import TimelineService
+from backend.src.media.timeline import (
+    BlueprintLegacyTimelineWriteUnavailable,
+    TimelineService,
+)
 from core.db import ImageIndexRepository
 from core.config import Settings
-from core.media_db import MediaRepository, canonical_json
+from core.media_db import BlueprintIntegrityError, MediaRepository, canonical_json
 
 
 class _FixtureRetrieval:
     def __init__(self, candidate: dict[str, object]):
         self.candidate = candidate
 
-    def search(self, _payload: dict[str, object]) -> dict[str, object]:
+    def search(
+        self,
+        _payload: dict[str, object],
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, object]:
+        if connection is None or not connection.in_transaction:
+            raise AssertionError("brief retrieval must share the writer transaction")
         return {
             "object": "mixed.search",
             "schema_version": "1",
@@ -28,6 +41,34 @@ class _FixtureRetrieval:
             "search_revision": "fixture-search",
             "analysis_heads": {},
         }
+
+
+def _blueprint_semantic() -> dict[str, object]:
+    return {
+        "intent": {
+            "goal": "Turn the selected local material into a short story",
+            "stance": None,
+            "audience": "individual creators",
+            "platform": "short-video",
+        },
+        "script": {"blocks": [{"block_id": "opening", "text": "A remembered moment."}]},
+        "direction": {
+            "theme": "memory",
+            "narrative_arc": "fragment to story",
+            "emotion": "warm",
+            "tone": "natural",
+            "pace": "measured",
+        },
+        "output": {"duration_target_ms": 3_000, "aspect_ratio": "16:9"},
+        "constraints": {"must_include": [], "must_exclude": []},
+        "material_hints": [],
+        "reference_refs": [],
+        "technique_refs": [],
+        "bindings": {"creator_context": None, "wiki_generation": None},
+        "assumptions": [],
+        "missing_evidence": [],
+        "open_decisions": [],
+    }
 
 
 class AtomicMediaWriteTests(unittest.TestCase):
@@ -65,6 +106,22 @@ class AtomicMediaWriteTests(unittest.TestCase):
             "result_type": "image_asset",
             "kind": "image",
             "score": 1.0,
+            "analysis_status": "current",
+            "analysis_run_id": "fixture-analysis-run",
+            "analysis_revision": 1,
+            "canonical_image_observation": {
+                "object": "memolens.canonical_image_observation",
+                "schema_version": "1",
+                "status": "current",
+                "authority": "canonical_image_analysis",
+                "provenance_status": "verified_current",
+                "asset_id": str(self.asset["id"]),
+                "analysis_binding": {
+                    "analysis_run_id": "fixture-analysis-run",
+                    "revision": 1,
+                    "content_sha256": "a" * 64,
+                },
+            },
         }
 
     def tearDown(self) -> None:
@@ -174,6 +231,182 @@ class AtomicMediaWriteTests(unittest.TestCase):
             [row["revision"] for row in self.repository.timeline_revisions(timeline_id)],
             [2, 1],
         )
+
+    def test_direct_legacy_timeline_creation_serializes_with_blueprint_commit(self) -> None:
+        project = self.repository.create_project(
+            "Timeline versus Blueprint",
+            {
+                "duration_ms": 3_000,
+                "aspect_ratio": "16:9",
+                "candidate_refs": [self.candidate],
+            },
+            {"created_by": "fixture"},
+        )
+        project_id = str(project["id"])
+        brief = self.repository.get_brief(project_id, 1)
+        assert brief is not None
+        timeline_service = TimelineService(self.repository)
+        blueprint_service = BlueprintService(self.repository)
+        original_check = timeline_service._has_blueprint_head
+        head_checked = threading.Event()
+        allow_timeline_write = threading.Event()
+        blueprint_started = threading.Event()
+        blueprint_completed = threading.Event()
+
+        def paused_head_check(
+            checked_project_id: str,
+            *,
+            connection: sqlite3.Connection | None,
+        ) -> bool:
+            result = original_check(checked_project_id, connection=connection)
+            head_checked.set()
+            if not allow_timeline_write.wait(timeout=5):
+                raise TimeoutError("test did not release the Timeline transaction")
+            return result
+
+        def commit_blueprint():
+            blueprint_started.set()
+            try:
+                return blueprint_service.commit_proposal(
+                    project_id,
+                    {
+                        "expected_head": None,
+                        "initial_legacy_brief": {
+                            "revision": 1,
+                            "content_sha256": str(brief["content_sha256"]),
+                        },
+                        "source_candidate_sha256": None,
+                        "semantic": _blueprint_semantic(),
+                    },
+                    idempotency_key="timeline-blueprint-race",
+                )
+            finally:
+                blueprint_completed.set()
+
+        with patch.object(timeline_service, "_has_blueprint_head", side_effect=paused_head_check):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                timeline_future = pool.submit(timeline_service.create_from_project, project_id)
+                self.assertTrue(head_checked.wait(timeout=2))
+                blueprint_future = pool.submit(commit_blueprint)
+                self.assertTrue(blueprint_started.wait(timeout=2))
+                # BEGIN IMMEDIATE is already held by the direct Timeline call,
+                # so a Blueprint command cannot linearize between its head
+                # check and Timeline insert.
+                self.assertFalse(blueprint_completed.wait(timeout=0.25))
+                allow_timeline_write.set()
+                timeline_result = timeline_future.result(timeout=5)
+                blueprint_result = blueprint_future.result(timeout=5)
+
+        self.assertEqual(timeline_result["timeline"]["project_id"], project_id)
+        self.assertEqual(blueprint_result.response_status, 201)
+
+    def test_blueprint_head_makes_legacy_timeline_read_only_and_not_renderable(self) -> None:
+        project = self.repository.create_project(
+            "Legacy Timeline after Blueprint",
+            {
+                "duration_ms": 3_000,
+                "aspect_ratio": "16:9",
+                "candidate_refs": [self.candidate],
+            },
+            {"created_by": "fixture"},
+        )
+        project_id = str(project["id"])
+        brief = self.repository.get_brief(project_id, 1)
+        assert brief is not None
+        timeline_service = TimelineService(self.repository)
+        created = timeline_service.create_from_project(project_id)
+        timeline_id = str(created["timeline"]["id"])
+        clip_id = str(created["timeline"]["tracks"][0]["clips"][0]["id"])
+        operations = timeline_service.normalize_operations(
+            timeline_id,
+            1,
+            [{"op": "set_volume", "clip_id": clip_id, "volume_db": -3}],
+        )
+        BlueprintService(self.repository).commit_proposal(
+            project_id,
+            {
+                "expected_head": None,
+                "initial_legacy_brief": {
+                    "revision": 1,
+                    "content_sha256": str(brief["content_sha256"]),
+                },
+                "source_candidate_sha256": None,
+                "semantic": _blueprint_semantic(),
+            },
+            idempotency_key="legacy-timeline-read-only",
+        )
+
+        with self.assertRaises(BlueprintLegacyTimelineWriteUnavailable):
+            timeline_service.revise(
+                timeline_id,
+                base_revision=1,
+                operations=operations,
+            )
+        self.assertEqual(
+            [row["revision"] for row in self.repository.timeline_revisions(timeline_id)],
+            [1],
+        )
+
+        token = "blueprint-legacy-render-token"
+        environment = patch.dict(
+            os.environ,
+            {
+                "APP_CONFIG_PATH": str(
+                    Path(__file__).resolve().parents[1] / "config.yaml"
+                ),
+                "MEMOLENS_APP_STATE_DIR": str(self.root / "state"),
+                "IMAGE_LIBRARY_DIR": str(self.library),
+                "SQLITE_DB_PATH": str(self.db_path),
+                "MEMOLENS_DESKTOP_SESSION_TOKEN": token,
+                "MINIMAX_KEY": "",
+                "OPENAI_API_KEY": "",
+            },
+            clear=False,
+        )
+        environment.start()
+        app = create_app(Settings.from_env())
+        runner = app.extensions["render_job_runner"]
+        runner.submit = lambda _job_id: None
+        try:
+            response = app.test_client().post(
+                "/v1/renders",
+                json={
+                    "db_path": str(self.db_path),
+                    "timeline_id": timeline_id,
+                    "timeline_revision": 1,
+                    "expected_timeline_sha256": str(created["content_sha256"]),
+                    "profile": "preview-low",
+                    "output": {"root_id": "app-preview-root"},
+                },
+                headers={
+                    DESKTOP_TOKEN_HEADER: token,
+                    "Idempotency-Key": "legacy-render-after-blueprint",
+                },
+            )
+            self.assertEqual(response.status_code, 409, response.json)
+            self.assertEqual(
+                response.json["code"],
+                "blueprint_legacy_timeline_write_unavailable",
+            )
+        finally:
+            runner.shutdown()
+            app.extensions["media_job_runner"].shutdown()
+            environment.stop()
+
+        with self.repository._connect() as connection:
+            connection.execute("DROP TRIGGER trg_blueprint_heads_no_delete")
+            connection.execute(
+                "DELETE FROM creative_blueprint_heads WHERE project_id=?",
+                (project_id,),
+            )
+        with self.assertRaisesRegex(BlueprintIntegrityError, "blueprint_head_missing"):
+            timeline_service.revise(
+                timeline_id,
+                base_revision=1,
+                operations=operations,
+            )
+        with self.assertRaisesRegex(BlueprintIntegrityError, "blueprint_head_missing"):
+            timeline_service.create_from_project(project_id)
 
     def test_resume_replay_increments_attempt_once_and_cancel_replay_mutates_once(self) -> None:
         video_content = b"fixture-video"
@@ -315,6 +548,21 @@ class AtomicMediaWriteTests(unittest.TestCase):
                     "UPDATE output_roots SET status='revoked' WHERE id=?",
                     (app.extensions["app_preview_root_id"],),
                 )
+            brief = repository.get_brief(str(project["id"]), 1)
+            assert brief is not None
+            BlueprintService(repository).commit_proposal(
+                str(project["id"]),
+                {
+                    "expected_head": None,
+                    "initial_legacy_brief": {
+                        "revision": 1,
+                        "content_sha256": str(brief["content_sha256"]),
+                    },
+                    "source_candidate_sha256": None,
+                    "semantic": _blueprint_semantic(),
+                },
+                idempotency_key="render-replay-blueprint-head",
+            )
             replay = client.post("/v1/renders", json=payload, headers=headers)
             self.assertEqual(replay.status_code, 202)
             self.assertEqual(replay.json, first.json)

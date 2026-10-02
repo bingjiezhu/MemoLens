@@ -4,7 +4,9 @@
 
 **A private media home for creators — remembered locally, ready when you make the next post.**
 
-Keep media in the folder you already use. MemoLens indexes **photos** on your machine and imports **videos** from Create → Video first cut. Inbox is for light review, not a cleanup chore; Create brings back source-grounded moments when you make the next post. Originals stay on disk. Preview export is a bounded **720p Save As** — never an overwrite of the source.
+Keep photos and videos in the folder you already use. Discuss a project in **Codex or DeepSeek Harness**, then refine its saved Timeline in the shared Browser editor. The local companion owns folder approval, background scanning, pairing and export; it is not a second AI chat. Originals stay untouched, and Save creates a new project revision.
+
+**Development preview:** local scanning, grounded first cuts, reversible editing and **silent 1080p hard-cut packages** are implemented. Audio mixing, captions, transitions and a complete one-prompt finished-film workflow are not. Start with the [supported workflow and troubleshooting](docs/user-guide.md); see [release validation and remaining limits](docs/releases/2026-10-02-readiness.md).
 
 **License.** Source-available dual license: [non-commercial PolyForm Noncommercial 1.0.0](LICENSE) · [commercial use needs a separate grant](COMMERCIAL-LICENSE.md).
 
@@ -14,7 +16,7 @@ Keep media in the folder you already use. MemoLens indexes **photos** on your ma
   </a>
 </p>
 
-<p align="center"><sub>50-second walkthrough (English captions, instrumental score, no voiceover). <a href="https://github.com/bingjiezhu/MemoLens/releases/download/promo/memolens-promo.mp4">Play MP4</a> · <a href="docs/assets/memolens-promo.mp4">download</a></sub></p>
+<p align="center"><sub>Historical 0.5 desktop walkthrough; not a demonstration of the current plugin workflow. <a href="https://github.com/bingjiezhu/MemoLens/releases/download/promo/memolens-promo.mp4">Play MP4</a> · <a href="docs/assets/memolens-promo.mp4">download</a></sub></p>
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
@@ -46,42 +48,76 @@ Keep media in the folder you already use. MemoLens indexes **photos** on your ma
 
 ## What you get
 
-Four rooms, one local loop: **Home → Library → Memories → Create**.
+One shared project across the agent, Browser editor and native companion. The screenshots above show the retained 0.5 desktop design.
 
 | Room | What it is for |
 | --- | --- |
-| **Library** | Choose the folder you already use. Index **photos** here. Review new photos and videos in **Inbox** (Keep, Archive, Favorite, Ready, Undo). Confirm a small **Creator Memory** profile — unconfirmed guesses never become defaults. |
+| **Library** | Native folder approval; plugin bootstrap creates a resumable mixed-media scan. Inbox review and confirmed Creator Memory remain local and reversible. |
 | **Memories** | Rediscover themes, Keyword Galaxy, duplicates, and baskets from the same SQLite index. |
-| **Create** | Photo story, or **Video first cut**: idea → material → brief → timeline → 720p preview → Save As. **Videos are imported here**, not by Library photo indexing. |
+| **Create** | Open an existing project by its exact ID; inspect Blueprint, build Coverage and Timeline, and request native export. The older brief/720p-preview workflow remains separate. |
+| **Browser editor** | Select, seek, trim, reorder, replace, split, remove, Save/Discard and inspect/restore Timeline history under project-specific pairing. |
 | **Home** | A calm summary of Inbox and Creator Memory so the next action is obvious. |
 
 Also included:
 
 - Natural-language search with exclusions, quality-aware ranking, and near-duplicate suppression
-- Typed, reversible hard-cut timeline edits (reorder, replace, trim, crop, fit)
-- Local 720p H.264/AAC preview, then Electron Save As that never overwrites an existing destination
+- Canonical Timeline edits share the same project state across Codex and DeepSeek; the separate Unsaved Draft Lab never saves a project
+- Canonical export creates video, script, manifest and an exact usage list; it never overwrites original media or an existing package
 - Optional vision / query model profiles (MiniMax, Vertex/Gemini, OpenAI-compatible, DashScope, Ollama). No key required: metadata and semantic-hash fallbacks still run
 - Optional [Photon](photon-bot/README.md) Discord bridge over the same local API (not an in-app chat)
 
-**Current limits (honest):** video search is deterministic metadata and optional sidecar text, not full semantic video understanding. Final 1080p export stays fail-closed. Reverse geocoding is off by default.
+**Current limits:** metadata/semantic-hash fallback is not visual understanding. Browser source playback is muted; canonical 1080p export is silent. The old 720p preview is a separate compatibility path. Full audio/caption/transition editing, portable editable project bundles and real-model cross-host acceptance remain unfinished. Reverse geocoding is off by default.
 
 ---
 
 ## Quick start
 
-**Needs:** macOS for the desktop app · Python 3.10+ (3.11 recommended) · Node.js 22.12+ · FFmpeg/ffprobe 6+
+**Needs:** macOS for the desktop companion · Node.js 22.12+ · Python 3.10+ with an admitted SQLite runtime · FFmpeg/ffprobe 6+. Install [Homebrew](https://brew.sh) and Node.js before the commands below. Homebrew Python 3.14 is the tested macOS route; its actual linked SQLite must still pass the bundled WAL-safety check. Setup creates the project virtual environment and installs dependencies; it does not install Python or Node.js. The standalone plugin supports Python 3.10+. DeepSeek Harness additionally requires Node.js 22.19+ or 24+.
 
 ```bash
 git clone https://github.com/bingjiezhu/MemoLens.git
 cd MemoLens
 cp .env.example .env          # optional: provider key or Ollama
-npm run setup:mac             # venv, Node deps, Homebrew FFmpeg if missing
+brew install python@3.14 ffmpeg
+MEMOLENS_PYTHON="$(brew --prefix python@3.14)/bin/python3.14" npm run setup:mac
 ./Launch\ MemoLens.command
 ```
 
 After setup you can also `npm run electron`.
 
-**First run**
+### Install the agent plugin
+
+From this repository, with Codex CLI installed:
+
+```bash
+source .venv/bin/activate     # launch CLI hosts from this shell to use Python 3.10+
+python3 --version
+codex plugin marketplace add "$(pwd)"
+codex plugin add memolens@memolens-local
+```
+
+Both adapters start `python3` from the host process's PATH. `MEMOLENS_PYTHON` selects Core's setup runtime only. For Codex Desktop, ensure its plugin process can also resolve Python 3.10+; activating a virtual environment in a separate terminal does not update an already-running desktop app.
+
+Start a new Codex task and ask MemoLens to set up your Library. When prompted, open the native companion and choose the folder there. Leave it running for scanning, pairing and editing. To install in DeepSeek Harness Web:
+
+```bash
+dsh plugin --profile web add "$(pwd)/.agents/plugins/plugins/memolens"
+dsh --profile web --dump-config
+dsh --profile web
+```
+
+DeepSeek support is a developer-preview adapter, not a guarantee for every Harness version. See [host setup and exact compatibility](.agents/plugins/plugins/memolens/deepseek-harness/README.md).
+
+### First project
+
+1. Ask the agent for Library scan status and an exact project ID. A completed scan is not yet a creative proposal or an editable Timeline.
+2. Prepare a source-grounded Blueprint with the agent and approve only the necessary project operations in the native pairing dialog.
+3. In **Create → Video first cut → Open existing project**, enter that ID. Inspect the proposal, materialize Coverage and the first cut; missing evidence remains a gap, not an invented clip.
+4. Ask the agent to open that project in the **MemoLens Canonical Editor**. Save writes a new revision; Discard does not. Export remains in the native project workspace and is currently silent.
+
+The detailed [user guide](docs/user-guide.md) covers expired pairing, missing evidence and recovery. The plugin does not require a separate MemoLens model key; automatic vision analysis is a distinct optional provider capability.
+
+**Optional existing desktop workflow**
 
 1. **Library** — pick your media folder and build the **photo** index.
 2. **Create → Video first cut** — import MP4/MOV/M4V so they join the same library, then review everything in **Inbox**.
@@ -98,16 +134,15 @@ npm run demo:library          # 12 photos + 2 clips; gitignored
 
 Then choose `./demo-photo-library` in the app.
 
-**Browser fallback** (same API, no native folder picker):
+**Browser development mode** (not a replacement for native folder or export authority):
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt && npm install
-python3 backend/app.py        # http://127.0.0.1:5519
+npm run setup:mac
+bash scripts/run_python.sh backend/app.py  # http://127.0.0.1:5519
 npm run dev                   # http://127.0.0.1:5173
 ```
 
-Set library paths in **Library → Advanced settings**. Photos index from Library; videos still enter through **Create → Video first cut**. One-shot stack: `npm run dev:local`.
+Use a disposable app-state and preconfigured test Library for diagnostics. Normal Library selection belongs to the native picker, not an arbitrary browser path. One-shot development stack: `npm run dev:local`.
 
 **Developers:** `npm test` · `npm run verify:local` · [CONTRIBUTING.md](CONTRIBUTING.md)
 
@@ -130,14 +165,14 @@ export QUERY_VLM_PROFILE=ollama_gemma4_e4b
 
 If `VERTEX_ACCESS_TOKEN` is unset, the backend tries `gcloud` application-default then `gcloud auth print-access-token`. Optional CLIP/DINO: `pip install -r requirements-local-models.txt`.
 
-Without the desktop picker:
+For explicitly isolated headless development only:
 
 ```bash
 export IMAGE_LIBRARY_DIR="/absolute/path/to/your/photos"
-export SQLITE_DB_PATH="$IMAGE_LIBRARY_DIR/photo_index.db"
+export SQLITE_DB_PATH="/absolute/path/to/disposable-state/photo_index.db"
 ```
 
-Existing indexes can refresh offline `aesthetic_score` with `npm run quality:backfill -- --force`.
+Use the managed app indexing/rebuild workflow for current libraries. Legacy direct-backfill scripts reject managed databases and are not a supported way to change canonical analysis.
 
 ---
 
@@ -151,14 +186,14 @@ Existing indexes can refresh offline `aesthetic_score` with `npm run quality:bac
   <img src="docs/assets/memolens-architecture.png" alt="MemoLens architecture — local-first layers from user surfaces to SQLite" width="100%" />
 </p>
 
-<p align="center"><sub>Editable artboard: <code>docs/assets/memolens-architecture.html</code></sub></p>
+<p align="center"><sub>Historical desktop architecture artboard. Current ownership and project flow are described below.</sub></p>
 
 ```text
-Remember  →  Review  →  Find  →  Direct  →  Edit  →  Preview
-                              ↑
-             authenticated Flask :5519 (loopback only)
-                              ↑
-                    Electron  ·  Browser
+Library → evidence → Blueprint → Coverage → Timeline → silent export → Usage
+                              ↑                   ↑
+                    Codex / DeepSeek       shared Browser editor
+                              └──── one local Core ────┘
+                        native companion: permissions and runtime
 ```
 
 | Layer | Where | Role |
@@ -167,9 +202,10 @@ Remember  →  Review  →  Find  →  Direct  →  Edit  →  Preview
 | Desktop | `electron/` | Folder / Save As pickers, Application Support SQLite, Flask supervisor, IPC |
 | API | `backend/` | Loopback HTTP; photo index vs video import are separate routes |
 | Intelligence | `indexing/`, `backend/src/retrieval/`, `backend/src/media/`, `core/` | Photo vision, mixed search, inbox, director, timeline, 720p render |
-| Data | `core/db.py`, `core/media_db.py` | Image index + media schema v3; originals never overwritten |
+| Data | `core/db.py`, `core/media_db.py` | Managed image/media schema v20, immutable revisions and export usage; originals never overwritten |
+| Agent adapter | `.agents/plugins/plugins/memolens/` | Shared read-only data tools, independently paired writes and a project-bound Browser editor |
 
-Photo index: `POST /v1/indexing/jobs`. Video import: **Create → Video first cut** → `POST /v1/assets/import`. The React app is repo-root `src/`; `frontend/` is legacy Python shims, not the UI. Optional read-only MCP plugin: `.agents/` (desktop app does not need it).
+The React companion is repo-root `src/`; `frontend/` is legacy Python compatibility code, not the UI. Agent and Browser surfaces share Core contracts; neither gains native folder, export or publication authority from ordinary read access. See the [spec index](docs/specs/README.md) for implementation and remaining work.
 
 ```text
 backend/     Flask API          electron/    desktop shell
@@ -187,7 +223,7 @@ Bind: `http://127.0.0.1:5519`. Do not tunnel this port. Writes need the desktop 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/healthz` | Identity, liveness, desktop challenge |
-| `GET` / `PUT` | `/v1/settings` | Library paths and active profiles |
+| `GET` / `PUT` | `/v1/settings` | Settings read / bounded profile updates; not a generic folder-authority grant |
 | `POST` | `/v1/indexing/jobs` | Photo folder index / rebuild |
 | `POST` | `/v1/assets/import` | Discover and enqueue video analysis |
 | `POST` | `/v1/search/mixed` | Photos + timestamped video segments |

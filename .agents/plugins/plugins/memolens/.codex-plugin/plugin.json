@@ -1,7 +1,7 @@
 {
   "name": "memolens",
-  "version": "0.5.0+codex.20260813051622",
-  "description": "Use confirmed creator preferences to find, review, and shape private local photo and video moments into an unsaved, provenance-grounded Timeline 1.0 draft.",
+  "version": "0.10.1+codex.20261002082027",
+  "description": "Start path-free native Library setup, navigate private media evidence, and use one shared Browser editor for canonical edits, video Split, occurrence Remove, history, and append-only restore.",
   "author": {
     "name": "MemoLens contributors",
     "url": "https://github.com/bingjiezhu/MemoLens"
@@ -18,32 +18,53 @@
     "memories",
     "privacy",
     "creator-memory",
-    "media-inbox"
+    "media-inbox",
+    "media-wiki",
+    "project-resume",
+    "creative-blueprint"
   ],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "MemoLens",
     "shortDescription": "Your private creator library, ready to shape a story.",
-    "longDescription": "MemoLens gives Codex a calm, local-first path from creator context to story: read only preferences the user confirmed, find private photos and current video moments, review the non-destructive Media Inbox, and arrange selections into an unsaved hard-cut Timeline 1.0 draft. Safe-default access is read-only SQLite, and no third-party model API key is required. Inbox and profile changes stay in the MemoLens app; the plugin cannot save, render, export, delete, or write to arbitrary paths.",
+    "longDescription": "MemoLens gives Codex a local-first path from an unconfigured host to a canonical editing surface. Its path-free Library bootstrap tools queue only a bounded local intent; they never accept a folder or database path, and Electron's native chooser remains the sole source of filesystem authority. A staged result is not yet a Core Library, scan, project, Blueprint, or editor. A committed result creates the exact Core Library/database, deterministic project, minimal unverified Blueprint, and one queued resumable scan; use memolens_status and inspect database.library_scan for its path-free progress. Scan completion still does not make the editor ready. Once separately grounded Coverage, a canonical Timeline, and an active project pairing exist, Codex can read confirmed preferences, navigate a live media Wiki, resume the exact persisted Creative Blueprint proposal, and open one canonical Timeline editor by project ID in Codex's in-app Browser. The graphical editor provides a ruler, scrub playhead, zoom, verified same-session thumbnails, drag reorder, trim handles, video Split at playhead, and Remove clip from Timeline. The original controls require timeline.apply_edit; Split and Remove require the independent timeline.apply_structural_edit action and one exact top-level structural_edit. Split uses absolute source time, at least 100 ms per child, and a 256-clip cap. Remove changes only the Timeline occurrence and leaves original media unchanged. With separately approved timeline.preview_media, supported MP4/H.264 clips can play through a verified source-preview proxy. Raw MP4 transport may contain audio, while the page disables audio playback and keeps output muted; audio-stream presence, content, and mix are not attested, and this is not transition, render, export, or final-fidelity proof. The plugin derives and cross-checks Blueprint, Coverage, current Timeline N, read-only historical K, fixed-source, and same-Beat replacement state. Stage remains noncanonical; explicit Save appends one ordinary edit, structural edit, or K-as-N+1 restore only after its separately scoped action, exact CAS, and canonical reread. Pairing secrets and desktop/main tokens stay server-side. The separate Unsaved Draft Lab retains its broader Timeline 1.0 experiments as Not saved and process-scoped. Desktop/Electron remains native authority, pairing approval/revoke, runtime management, and a Timeline-v2-compatible reader, not the primary editing interface.",
     "developerName": "MemoLens contributors",
     "category": "Productivity",
     "capabilities": [
+      "Path-free native Library bootstrap intent and status",
       "Private local media search",
       "Photo and video memory discovery",
       "Confirmed Creator Memory context",
       "Read-only Media Inbox review",
+      "Live Agent Media Wiki navigation",
+      "Exact asset and video-span evidence",
       "Provenance-grounded timeline drafting",
-      "Read-only timeline review"
+      "Canonical Codex Browser timeline editing",
+      "Graphical ruler, playhead, zoom, drag and trim controls",
+      "Video Split and Timeline-occurrence Remove controls",
+      "Verified session-bound clip thumbnails",
+      "Native-approved source preview with muted output",
+      "Paired exact-CAS Timeline revision save",
+      "Read-only canonical Timeline history",
+      "Paired append-only Timeline restore",
+      "Process-scoped Unsaved Draft Lab",
+      "Read-only timeline review",
+      "Cross-Agent project resume",
+      "Canonical Creative Blueprint proposal reading",
+      "Blueprint-only operation history",
+      "Creative Blueprint shadow and validation",
+      "Native-approved Agent proposal pairing",
+      "Revision-scoped decision authority resume"
     ],
     "websiteURL": "https://github.com/bingjiezhu/MemoLens",
     "brandColor": "#426B5A",
     "composerIcon": "./assets/memolens.svg",
     "logo": "./assets/memolens.svg",
     "defaultPrompt": [
-      "Use my confirmed creator style to find moments for a one-minute story.",
-      "Show my unreviewed photo and video inbox, then suggest what to keep for this idea.",
-      "Turn these MemoLens moments into an unsaved hard-cut timeline draft for review."
+      "If MemoLens has no confirmed Library, start path-free setup; otherwise show its media Wiki and follow the best idea to evidence.",
+      "Resume my latest MemoLens project, read its canonical Blueprint proposal, and show what remains unresolved.",
+      "Open the MemoLens Canonical Editor to split a video, remove one occurrence without deleting its source, or restore a revision."
     ]
   }
 }

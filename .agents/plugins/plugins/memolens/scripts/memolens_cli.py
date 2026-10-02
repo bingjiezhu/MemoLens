@@ -6,9 +6,16 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any, Sequence
 
+from memolens_agent import AgentPairingWorkflow
+from memolens_agent_client import PAIRING_ACTIONS
+from memolens_creative_blueprint import (
+    BLUEPRINT_TRANSPORT_JSON_LIMITS,
+    decode_blueprint_candidate,
+)
 from memolens_core import (
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT,
@@ -16,15 +23,36 @@ from memolens_core import (
     MemoLensGateway,
     json_ready,
 )
+from memolens_library_bootstrap import (
+    library_bootstrap_status,
+    start_library_bootstrap,
+)
+from memolens_strict_json import StrictJsonError, decode_strict_json
+
+
+_AGENT_IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
+
+
+class MemoLensArgumentParser(argparse.ArgumentParser):
+    """Turn command-line contract errors into the same JSON error surface."""
+
+    def error(self, message: str) -> None:
+        raise MemoLensError(
+            "Command arguments are invalid or unsupported.", code="invalid_argument"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = MemoLensArgumentParser(
         prog="memolens",
         description=(
-            "Read-only confirmed Creator Memory, Media Inbox, local media search, and "
-            "unsaved Timeline 1.0 drafting. The unauthenticated local API is disabled unless "
-            "MEMOLENS_PLUGIN_TRUST_LOCAL_API=1 and never grants write access. Outputs JSON."
+            "Read confirmed Creator Memory, Media Inbox, live Media Wiki, cross-Agent "
+            "project resume, Creative Blueprint candidate preflight, local media search, and "
+            "unsaved Timeline 1.0 drafting. A native-approved short-lived pairing can also "
+            "submit reversible Blueprint proposals. The "
+            "unauthenticated local API is disabled unless "
+            "MEMOLENS_PLUGIN_TRUST_LOCAL_API=1 and never grants write access; paired writes "
+            "use a separate proof protocol. Outputs JSON."
         ),
     )
     parser.add_argument(
@@ -32,7 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             f"Loopback MemoLens URL (default: MEMOLENS_BASE_URL or {DEFAULT_BASE_URL}); "
-            "ignored unless local API trust is explicitly enabled"
+            "read-only API use still requires explicit trust, while Agent pairing is an "
+            "independent native-approved protocol"
         ),
     )
     parser.add_argument(
@@ -58,6 +87,27 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "status",
         help="Report safe-default read-only SQLite and optional local-API status",
+    )
+
+    library_bootstrap_start = subparsers.add_parser(
+        "library-bootstrap-start",
+        help=(
+            "Queue a path-free request for MemoLens native Library selection; "
+            "does not contact the backend or create a Library database or project"
+        ),
+    )
+    library_bootstrap_start.add_argument(
+        "--request-idempotency-key",
+        required=True,
+        help="Stable 1-200 character retry key; the raw key is never persisted",
+    )
+
+    library_bootstrap_status_parser = subparsers.add_parser(
+        "library-bootstrap-status",
+        help="Read the path-free state of one queued native Library request",
+    )
+    library_bootstrap_status_parser.add_argument(
+        "request_id", help="Opaque request ID returned by library-bootstrap-start"
     )
 
     subparsers.add_parser(
@@ -102,6 +152,46 @@ def build_parser() -> argparse.ArgumentParser:
         "media-get", help="Read one indexed media asset and its current video segments"
     )
     media_get.add_argument("asset_id", help="Stable MemoLens asset ID")
+
+    subparsers.add_parser(
+        "wiki-status",
+        help="Describe live Agent Media Wiki coverage and known gaps",
+    )
+
+    wiki_list = subparsers.add_parser(
+        "wiki-list",
+        help="Browse compact live Wiki asset-page summaries",
+    )
+    wiki_list.add_argument(
+        "--kind",
+        dest="kinds",
+        action="append",
+        choices=("image", "video", "audio"),
+        help="Repeat to select media kinds; defaults to all kinds",
+    )
+    wiki_list.add_argument("--limit", type=int, default=24, help="Pages, 1-100")
+    wiki_list.add_argument("--cursor", default=None, help="Opaque live keyset cursor")
+
+    wiki_search = subparsers.add_parser(
+        "wiki-search",
+        help="Find live Wiki pages and evidence references for a story idea",
+    )
+    wiki_search.add_argument("query", help="Natural-language media request")
+    wiki_search.add_argument("--limit", type=int, default=12, help="Results, 1-36")
+
+    wiki_open = subparsers.add_parser(
+        "wiki-open",
+        help="Open one memolens:// Library, Asset, or current Span page",
+    )
+    wiki_open.add_argument("page_id", help="Stable memolens:// Wiki page URI")
+
+    wiki_evidence = subparsers.add_parser(
+        "wiki-evidence",
+        help="Resolve one memolens:// asset or current-span evidence URI",
+    )
+    wiki_evidence.add_argument(
+        "evidence_id", help="Stable memolens:// Wiki evidence URI"
+    )
 
     inbox_list = subparsers.add_parser(
         "inbox-list",
@@ -167,6 +257,130 @@ def build_parser() -> argparse.ArgumentParser:
     )
     timeline_get.add_argument("timeline_id")
     timeline_get.add_argument("--revision", type=int, default=None)
+
+    project_list = subparsers.add_parser(
+        "project-list",
+        help="List resumable creative projects through read-only SQLite",
+    )
+    project_list.add_argument(
+        "--status",
+        choices=("current", "draft", "active", "archived", "all"),
+        default="current",
+        help="Project state filter; current includes draft and active",
+    )
+    project_list.add_argument("--limit", type=int, default=24, help="Results, 1-100")
+    project_list.add_argument(
+        "--cursor", default=None, help="Opaque cursor from a prior page"
+    )
+
+    project_open = subparsers.add_parser(
+        "project-open",
+        help="Open a bounded cross-Agent project resume capsule",
+    )
+    project_open.add_argument("project_id", help="Stable MemoLens project ID")
+
+    project_history = subparsers.add_parser(
+        "project-history",
+        help="Read bounded persisted timeline revision summaries for a project",
+    )
+    project_history.add_argument("project_id", help="Stable MemoLens project ID")
+    project_history.add_argument(
+        "--limit", type=int, default=50, help="Revision summaries, 1-100"
+    )
+
+    blueprint_shadow = subparsers.add_parser(
+        "blueprint-shadow",
+        help="Project the latest legacy brief into a non-authoritative Blueprint candidate",
+    )
+    blueprint_shadow.add_argument("project_id", help="Stable MemoLens project ID")
+
+    blueprint_get = subparsers.add_parser(
+        "blueprint-get",
+        help="Read the canonical persisted Blueprint head or one exact revision",
+    )
+    blueprint_get.add_argument("project_id", help="Stable MemoLens project ID")
+    blueprint_get.add_argument(
+        "--revision", type=int, default=None, help="Exact immutable revision"
+    )
+
+    blueprint_history = subparsers.add_parser(
+        "blueprint-history",
+        help="Read the bounded Blueprint-only operation ledger",
+    )
+    blueprint_history.add_argument("project_id", help="Stable MemoLens project ID")
+    blueprint_history.add_argument(
+        "--limit", type=int, default=50, help="Operation summaries, 1-100"
+    )
+
+    blueprint_validate = subparsers.add_parser(
+        "blueprint-validate",
+        help="Strictly validate a Creative Blueprint candidate without persisting it",
+    )
+    blueprint_validate.add_argument(
+        "--input", required=True, help="Candidate JSON file, or - to read stdin"
+    )
+
+    agent_pair = subparsers.add_parser(
+        "agent-pair",
+        help="Request a short-lived native-approved capability for one existing Blueprint project",
+    )
+    agent_pair.add_argument("project_id", help="Existing Creative Blueprint project ID")
+    agent_pair.add_argument(
+        "--client-label",
+        default="Generic Agent CLI",
+        help="Unverified display label shown in the native pairing review",
+    )
+    agent_pair.add_argument(
+        "--ttl-seconds", type=int, default=900, help="Requested lifetime, 60-1800 seconds"
+    )
+    agent_pair.add_argument(
+        "--max-operations", type=int, default=20, help="Requested write count, 1-32"
+    )
+    agent_pair.add_argument(
+        "--action",
+        dest="actions",
+        action="append",
+        choices=PAIRING_ACTIONS,
+        help="Repeat to narrow scope; defaults to proposal commit and restore",
+    )
+
+    agent_pair_status = subparsers.add_parser(
+        "agent-pair-status",
+        help="Refresh the native review or active capability status without exposing its proof",
+    )
+    agent_pair_status.add_argument("project_id", help="Paired Creative Blueprint project ID")
+
+    agent_capability_status = subparsers.add_parser(
+        "agent-capability-status",
+        help="Report whether the stored project capability is ready, expired, denied, or revoked",
+    )
+    agent_capability_status.add_argument(
+        "project_id", help="Paired Creative Blueprint project ID"
+    )
+
+    blueprint_commit = subparsers.add_parser(
+        "blueprint-commit",
+        help="Submit one exact-CAS unverified Blueprint proposal through an active pairing",
+    )
+    blueprint_commit.add_argument("project_id", help="Paired Creative Blueprint project ID")
+    blueprint_commit.add_argument(
+        "--input", required=True, help="B1 commit command JSON file, or - for stdin"
+    )
+    blueprint_commit.add_argument(
+        "--idempotency-key", required=True, help="Stable retry key for this exact command"
+    )
+
+    blueprint_restore = subparsers.add_parser(
+        "blueprint-restore",
+        help="Restore semantic content as a new unverified revision through an active pairing",
+    )
+    blueprint_restore.add_argument("project_id", help="Paired Creative Blueprint project ID")
+    blueprint_restore.add_argument(
+        "--input", required=True, help="B1 restore command JSON file, or - for stdin"
+    )
+    blueprint_restore.add_argument(
+        "--idempotency-key", required=True, help="Stable retry key for this exact command"
+    )
     return parser
 
 
@@ -189,8 +403,155 @@ def _load_json_input(path: str) -> Any:
         ) from exc
 
 
+def _load_blueprint_input(path: str) -> dict[str, Any]:
+    maximum = BLUEPRINT_TRANSPORT_JSON_LIMITS.max_bytes
+    try:
+        if path == "-":
+            raw = sys.stdin.buffer.read(maximum + 1)
+        else:
+            with Path(path).open("rb") as handle:
+                raw = handle.read(maximum + 1)
+    except OSError as exc:
+        raise MemoLensError(
+            "Blueprint input could not be read.", code="invalid_argument"
+        ) from exc
+    try:
+        return decode_blueprint_candidate(raw)
+    except StrictJsonError as exc:
+        raise MemoLensError(
+            "Blueprint input is not strict bounded JSON.", code="invalid_argument"
+        ) from exc
+
+
+def _load_blueprint_command_input(path: str, *, command: str) -> dict[str, Any]:
+    maximum = BLUEPRINT_TRANSPORT_JSON_LIMITS.max_bytes
+    try:
+        if path == "-":
+            raw = sys.stdin.buffer.read(maximum + 1)
+        else:
+            with Path(path).open("rb") as handle:
+                raw = handle.read(maximum + 1)
+    except OSError as exc:
+        raise MemoLensError(
+            "Blueprint command input could not be read.", code="invalid_argument"
+        ) from exc
+    try:
+        payload = decode_strict_json(
+            raw,
+            require_object=True,
+            limits=BLUEPRINT_TRANSPORT_JSON_LIMITS,
+        )
+    except StrictJsonError as exc:
+        raise MemoLensError(
+            "Blueprint command input is not strict bounded JSON.",
+            code="invalid_argument",
+        ) from exc
+    required = (
+        {"expected_head", "initial_legacy_brief", "source_candidate_sha256", "semantic"}
+        if command == "commit"
+        else {"expected_head", "restore_from"}
+    )
+    if type(payload) is not dict or set(payload) != required:
+        raise MemoLensError(
+            "Blueprint command input has an unsupported shape.",
+            code="invalid_argument",
+        )
+    return payload
+
+
+def _agent_workflow(args: argparse.Namespace) -> AgentPairingWorkflow:
+    return AgentPairingWorkflow(base_url=args.base_url, timeout=args.timeout)
+
+
+def _run_agent_command(args: argparse.Namespace) -> dict[str, Any]:
+    workflow = _agent_workflow(args)
+    if args.command == "agent-pair":
+        read = _gateway(args).blueprint_get(args.project_id)
+        selection = read.get("selection") if isinstance(read, dict) else None
+        current_head = selection.get("current_head") if isinstance(selection, dict) else None
+        if not isinstance(current_head, dict):
+            raise MemoLensError(
+                "The project has no exact Creative Blueprint head to pair.",
+                code="blueprint_head_not_found",
+            )
+        label = str(args.client_label or "").strip()
+        if not 1 <= len(label) <= 120:
+            raise MemoLensError(
+                "Client label must contain 1-120 characters.", code="invalid_argument"
+            )
+        if not 60 <= args.ttl_seconds <= 1800:
+            raise MemoLensError(
+                "Pairing lifetime must be between 60 and 1800 seconds.",
+                code="invalid_argument",
+            )
+        if not 1 <= args.max_operations <= 32:
+            raise MemoLensError(
+                "Pairing operation count must be between 1 and 32.",
+                code="invalid_argument",
+            )
+        return workflow.create(
+            project_id=args.project_id,
+            current_head=current_head,
+            claimed_client_label=label,
+            ttl_seconds=args.ttl_seconds,
+            max_operations=args.max_operations,
+            actions=args.actions,
+        )
+    if args.command in {"agent-pair-status", "agent-capability-status"}:
+        return workflow.status(args.project_id)
+    if args.command in {"blueprint-commit", "blueprint-restore"}:
+        command = "commit" if args.command == "blueprint-commit" else "restore"
+        if _AGENT_IDEMPOTENCY_KEY.fullmatch(args.idempotency_key) is None:
+            raise MemoLensError(
+                "Idempotency key must be 1-200 bounded ASCII characters.",
+                code="invalid_argument",
+            )
+        return workflow.write(
+            command=command,
+            project_id=args.project_id,
+            body=_load_blueprint_command_input(args.input, command=command),
+            idempotency_key=args.idempotency_key,
+        )
+    raise MemoLensError("Unknown Agent command.", code="invalid_argument")
+
+
+def _run_blueprint_command(
+    args: argparse.Namespace, gateway: MemoLensGateway
+) -> dict[str, Any]:
+    if args.command == "blueprint-shadow":
+        return gateway.blueprint_shadow(args.project_id)
+    if args.command == "blueprint-get":
+        return gateway.blueprint_get(args.project_id, revision=args.revision)
+    if args.command == "blueprint-history":
+        return gateway.blueprint_history(args.project_id, limit=args.limit)
+    return gateway.blueprint_validate(_load_blueprint_input(args.input))
+
+
+def _run_library_bootstrap_command(args: argparse.Namespace) -> dict[str, Any]:
+    if args.db_path is not None or args.library_dir is not None:
+        raise MemoLensError(
+            "Library bootstrap does not accept database or Library locators.",
+            code="invalid_argument",
+        )
+    if args.command == "library-bootstrap-start":
+        return start_library_bootstrap(args.request_idempotency_key)
+    return library_bootstrap_status(args.request_id)
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    if args.command in {"library-bootstrap-start", "library-bootstrap-status"}:
+        return _run_library_bootstrap_command(args)
+    if args.command in {
+        "agent-pair",
+        "agent-pair-status",
+        "agent-capability-status",
+        "blueprint-commit",
+        "blueprint-restore",
+    }:
+        return _run_agent_command(args)
     gateway = _gateway(args)
+    if args.command.startswith("blueprint-"):
+        return _run_blueprint_command(args, gateway)
     if args.command == "status":
         return gateway.status()
     if args.command == "creator-context":
@@ -207,6 +568,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.command == "media-get":
         return gateway.media_get(args.asset_id)
+    if args.command == "wiki-status":
+        return gateway.wiki_status()
+    if args.command == "wiki-list":
+        return gateway.wiki_list(
+            kinds=args.kinds, limit=args.limit, cursor=args.cursor
+        )
+    if args.command == "wiki-search":
+        return gateway.wiki_search(args.query, limit=args.limit)
+    if args.command == "wiki-open":
+        return gateway.wiki_open(args.page_id)
+    if args.command == "wiki-evidence":
+        return gateway.wiki_evidence(args.evidence_id)
     if args.command == "inbox-list":
         return gateway.inbox_list(
             state=args.state,
@@ -254,23 +627,39 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.command == "timeline-get":
         return gateway.timeline_get(args.timeline_id, revision=args.revision)
+    if args.command == "project-list":
+        return gateway.project_list(
+            status=args.status,
+            limit=args.limit,
+            cursor=args.cursor,
+        )
+    if args.command == "project-open":
+        return gateway.project_open(args.project_id)
+    if args.command == "project-history":
+        return gateway.project_history(args.project_id, limit=args.limit)
     raise MemoLensError("Unknown command.", code="invalid_argument")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
     try:
+        args = parser.parse_args(argv)
         result = run(args)
     except MemoLensError as exc:
+        command = getattr(locals().get("args", None), "command", "")
+        project_write_attempted = command in {"blueprint-commit", "blueprint-restore"}
+        app_state_write_attempted = command == "library-bootstrap-start"
         result = {
             "object": "memolens.error",
             "status": "error",
             "error": {"code": exc.code, "message": str(exc)},
             "safety": {
-                "read_only": True,
+                "read_only": not project_write_attempted and not app_state_write_attempted,
+                "project_write_attempted": project_write_attempted,
+                "app_state_intent_write_attempted": app_state_write_attempted,
                 "photos_modified": False,
                 "remote_network_allowed": False,
+                "arbitrary_path_write_allowed": False,
             },
         }
         print(json.dumps(json_ready(result), ensure_ascii=False, indent=2))

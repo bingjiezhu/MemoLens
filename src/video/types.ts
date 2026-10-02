@@ -1,5 +1,8 @@
+import type { AtlasCanonicalImageObservation } from "../query/types.js";
+
 export type MediaKind = "image" | "video" | "audio";
 export type CreativeResultType = "image_asset" | "video_segment";
+export type CreativeAnalysisStatus = "current" | "pending" | "unknown";
 export type MediaJobStatus =
   | "queued"
   | "running"
@@ -98,7 +101,10 @@ export interface CreativeAssetMatch {
   result_type: CreativeResultType;
   id: string;
   asset_id: string;
+  asset_sha256?: string | null;
   asset_source_id: string;
+  parent_segment_id?: string | null;
+  residual_binding?: ResidualBinding | null;
   filename?: string | null;
   title?: string | null;
   start_ms: number | null;
@@ -110,10 +116,71 @@ export interface CreativeAssetMatch {
   matched_terms: string[];
   score: number;
   confidence: number | null;
+  analysis_status: CreativeAnalysisStatus;
+  analysis_run_id: string | null;
   analysis_revision: number | null;
+  canonical_image_observation: AtlasCanonicalImageObservation | null;
   provenance: string[];
   reasons?: string[];
   warnings?: string[];
+  usage?: CanonicalUsageProjection | null;
+}
+
+export interface ResidualBinding {
+  object: "memolens.residual_binding";
+  contract_version: "1";
+  residual_id: string;
+  parent_segment_id: string;
+  asset_id: string;
+  asset_sha256: string;
+  asset_source_id: string;
+  source_binding_sha256: string;
+  analysis_run_id: string;
+  analysis_revision: number;
+  input_asset_sha256: string;
+  parent_start_ms: number;
+  parent_end_ms: number;
+  source_in_ms: number;
+  source_out_ms: number;
+  usage_revision: string;
+  parent_usage_projection_sha256: string;
+}
+
+export interface CanonicalUsageProjection {
+  asset_id: string;
+  media_kind: "image" | "video";
+  occurrence_count: number;
+  used: boolean;
+  used_in: Array<{ project_id: string; export_revision: number }>;
+  source_domain: [number, number] | null;
+  candidate_domain: [number, number] | null;
+  used_intervals: Array<[number, number]>;
+  residual_intervals: Array<[number, number]>;
+  fully_used: boolean;
+  has_residual: boolean;
+}
+
+export type CanonicalUsagePolicy = "allow_reuse" | "prefer_unused" | "unused_only";
+export type SearchUsageMode = "all" | "prefer_unused" | "unused_only";
+
+export interface CanonicalUsageSelectionCandidate {
+  id: string;
+  asset_id: string;
+  asset_source_id: string;
+  result_type: CreativeResultType;
+  analysis_run_id: string | null;
+  analysis_revision: number | null;
+  start_ms: number | null;
+  end_ms: number | null;
+  usage: CanonicalUsageProjection;
+  residual_binding?: ResidualBinding;
+}
+
+export interface CanonicalUsageSelection {
+  policy: CanonicalUsagePolicy;
+  usage_revision: string;
+  derivative_revision: string;
+  candidates: CanonicalUsageSelectionCandidate[];
 }
 
 export interface MixedSearchResponse {
@@ -123,6 +190,9 @@ export interface MixedSearchResponse {
   status: string;
   results: CreativeAssetMatch[];
   candidate_count: number;
+  derivative_revision: string;
+  usage_revision?: string | null;
+  usage_policy?: CanonicalUsagePolicy | null;
   message?: string | null;
   refinement_job?: MediaJob | null;
 }
@@ -407,6 +477,7 @@ export interface RenderJob {
 }
 
 export interface DesktopArtifactSaveRequest {
+  renderJobId: string;
   artifactUrl: string;
   suggestedFilename: string;
   expectedSha256: string;

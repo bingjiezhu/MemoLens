@@ -117,6 +117,12 @@ class IndexingInput:
     image: UploadedImageInput | None = None
 
 
+@dataclass(frozen=True)
+class IndexingRootIdentity:
+    device: int
+    inode: int
+
+
 @dataclass
 class IndexingRequest:
     model: str | None
@@ -125,6 +131,7 @@ class IndexingRequest:
     reindex: bool = False
     limit: int | None = None
     persist_to_server: bool = False
+    library_root_identity: IndexingRootIdentity | None = None
 
 
 @dataclass
@@ -361,6 +368,32 @@ def _boolean(value: object, field: str) -> bool:
     return value
 
 
+def _indexing_root_identity(value: object) -> IndexingRootIdentity | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"device", "inode"}:
+        raise ValueError(
+            "`library_root_identity` must contain only decimal `device` and `inode` strings."
+        )
+
+    parsed: dict[str, int] = {}
+    for field_name in ("device", "inode"):
+        raw_value = value.get(field_name)
+        if (
+            not isinstance(raw_value, str)
+            or not raw_value
+            or len(raw_value) > 32
+            or not raw_value.isascii()
+            or not raw_value.isdecimal()
+            or (len(raw_value) > 1 and raw_value.startswith("0"))
+        ):
+            raise ValueError(
+                "`library_root_identity` must contain only canonical decimal strings."
+            )
+        parsed[field_name] = int(raw_value, 10)
+    return IndexingRootIdentity(device=parsed["device"], inode=parsed["inode"])
+
+
 def parse_indexing_request(
     payload: dict[str, object],
     default_image_dir: str,
@@ -387,6 +420,9 @@ def parse_indexing_request(
     if persist_to_server is None:
         persist_to_server = uploaded_image is None
     persist_to_server = _boolean(persist_to_server, "persist_to_server")
+    library_root_identity = _indexing_root_identity(
+        payload.get("library_root_identity")
+    )
 
     return IndexingRequest(
         model=payload.get("model") if isinstance(payload.get("model"), str) else default_model,
@@ -400,6 +436,7 @@ def parse_indexing_request(
         reindex=reindex,
         limit=limit,
         persist_to_server=persist_to_server,
+        library_root_identity=library_root_identity,
     )
 
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canResumePersistedVideoSession,
   createVideoScopeKey,
   persistVideoSession,
   readPersistedVideoSession,
@@ -75,4 +76,36 @@ test("storage failures never interrupt the SQLite-backed workflow", () => {
     timelineRevision: null,
   }));
   assert.equal(readPersistedVideoSession(storage, scope), null);
+});
+
+test("scope reset is a barrier before a persisted project can resume", () => {
+  const oldScope = createVideoScopeKey("/photos", "/state/old.db");
+  const nextScope = createVideoScopeKey("/photos", "/state/next.db");
+  const common = {
+    canUseBackend: true,
+    dbPath: "/state/next.db",
+    requestedScopeKey: nextScope,
+    hasProject: false,
+  };
+
+  assert.equal(canResumePersistedVideoSession({
+    ...common,
+    stateScopeKey: oldScope,
+    projectPhase: "ready",
+  }), false);
+  assert.equal(canResumePersistedVideoSession({
+    ...common,
+    stateScopeKey: nextScope,
+    projectPhase: "idle",
+  }), true);
+  assert.equal(canResumePersistedVideoSession({
+    ...common,
+    stateScopeKey: nextScope,
+    projectPhase: "loading",
+  }), true);
+  assert.equal(canResumePersistedVideoSession({
+    ...common,
+    stateScopeKey: nextScope,
+    projectPhase: "error",
+  }), false);
 });

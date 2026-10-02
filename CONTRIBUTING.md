@@ -4,7 +4,7 @@ Thanks for helping make private photo libraries easier to explore without turnin
 
 The React UI lives in repo-root `src/`. `frontend/` is legacy Python compatibility imports only — do not add UI there. Flask retrieval lives in `backend/src/retrieval/`. The optional MCP plugin lives under `.agents/` and is not required for the desktop app.
 
-Public homepage: English [`README.md`](README.md) and Chinese [`README.zh-CN.md`](README.zh-CN.md), linked at the top of each. Keep product claims in both files in sync (Library indexes photos; videos enter through Create → Video first cut; preview is 720p Save As).
+Public homepage: English [`README.md`](README.md) and Chinese [`README.zh-CN.md`](README.zh-CN.md), linked at the top of each. Keep claims synchronized: plugin-first mixed Library bootstrap, canonical editing and silent export, with the legacy desktop preview clearly separate. Do not describe unfinished audio/caption/transition work as shipped.
 
 ## Development setup
 
@@ -19,10 +19,8 @@ npm run setup:mac
 Browser / API loop:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-npm ci
+npm run setup:mac
+bash scripts/run_python.sh scripts/check_sqlite_runtime.py --json
 ffmpeg -version
 npm run dev:local
 ```
@@ -34,6 +32,8 @@ The backend binds to loopback by default. Use a disposable photo folder and data
 ```bash
 npm test                 # Python unit + plugin + Electron/Node tests
 npm run check            # lint, tests, local verify, and production build
+npm run test:plugin-package # actual npm package, schemas, license and CLI
+npm run test:production-oracles # builds the Electron inputs before exact tests
 cd photon-bot && npm ci && npm audit --audit-level=high && npm test && npm run build
 ```
 

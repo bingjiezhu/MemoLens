@@ -12,12 +12,17 @@ import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from backend.src import DESKTOP_TOKEN_HEADER, create_app
+from backend.src import (
+    DESKTOP_TOKEN_HEADER,
+    create_app,
+    shutdown_runtime_extensions,
+)
 from backend.src.media.director import CreativeDirector
 from backend.src.media.render import RenderJobRunner
 from backend.src.media.retrieval import MixedRetrievalService
@@ -36,11 +41,14 @@ from backend.src.media.video import (
 from core.db import ImageIndexRepository
 from core.config import Settings
 from core.media_db import (
+    CanonicalExportIntegrityError,
     IdempotencyConflictError,
     MediaMigrationError,
     MediaRepository,
+    SCHEMA_VERSION,
     sha256_path,
 )
+from tests import test_timeline_lowering_integration as timeline_integration
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -110,10 +118,7 @@ def _test_environment(root: Path, library: Path, token: str):
 
 
 def _shutdown_app(app) -> None:
-    for extension in ("media_job_runner", "render_job_runner"):
-        runner = app.extensions.get(extension)
-        if runner is not None:
-            runner.shutdown()
+    shutdown_runtime_extensions(app.extensions)
 
 
 def _register_bytes(
@@ -179,6 +184,7 @@ class MediaRepositoryContractTests(unittest.TestCase):
         self.repository, self.library, self.db_path = _initialize_repository(self.root)
 
     def tearDown(self) -> None:
+        self.repository.close()
         self.temporary_directory.cleanup()
 
     def test_additive_schema_has_stable_database_identity_and_verified_migrations(self) -> None:
@@ -186,7 +192,7 @@ class MediaRepositoryContractTests(unittest.TestCase):
         self.repository.ensure_schema(self.library)
 
         self.assertEqual(self.repository.database_uuid, database_uuid)
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             migrations = connection.execute(
                 "SELECT version,name FROM schema_migrations ORDER BY version"
             ).fetchall()
@@ -206,9 +212,26 @@ class MediaRepositoryContractTests(unittest.TestCase):
                 (1, "image_index_baseline"),
                 (2, "video_creative_workbench"),
                 (3, "creator_memory_media_inbox"),
+                (4, "canonical_blueprint_proposal_ledger"),
+                (5, "paired_agent_decision_authority"),
+                (6, "canonical_coverage_plan_baseline"),
+                (7, "canonical_timeline_first_cut"),
+                (8, "canonical_export_usage_ledger"),
+                (9, "canonical_timeline_reconciliation"),
+                (10, "canonical_timeline_persistent_edit"),
+                (11, "paired_agent_canonical_timeline_edit"),
+                (12, "paired_agent_project_command_receipt_convergence"),
+                (13, "paired_agent_canonical_timeline_restore"),
+                (14, "canonical_image_publication_bridge"),
+                (15, "paired_agent_timeline_preview_media"),
+                (16, "provider_egress_one_shot_authority"),
+                (17, "canonical_image_read_cutover"),
+                (18, "canonical_timeline_structural_edit"),
+                (19, "canonical_export_output_root_anchor"),
+                (20, "plugin_first_library_bootstrap"),
             ],
         )
-        self.assertEqual(meta, (3,))
+        self.assertEqual(meta, (SCHEMA_VERSION,))
         self.assertTrue(
             {
                 "image_index",
@@ -224,14 +247,50 @@ class MediaRepositoryContractTests(unittest.TestCase):
                 "idempotency_records",
                 "asset_review_revisions",
                 "creator_profile_revisions",
+                "creative_blueprint_revisions",
+                "creative_blueprint_heads",
+                "creative_blueprint_operations",
+                "blueprint_command_receipts",
+                "agent_project_capabilities",
+                "agent_pairing_confirmation_receipts",
+                "agent_project_command_receipts",
+                "agent_project_capability_events",
+                "blueprint_decision_authority_events",
+                "blueprint_decision_authority_heads",
+                "blueprint_decision_authority_receipts",
+                "blueprint_desktop_receipt_integrity",
+                "coverage_plan_operations",
+                "coverage_plan_revisions",
+                "coverage_plan_heads",
+                "coverage_plan_receipts",
+                "image_analysis_job_bindings",
+                "image_analysis_attempt_authorities",
+                "image_analysis_attempt_states",
+                "image_analysis_results",
+                "image_analysis_artifacts",
+                "image_analysis_heads",
+                "image_projection_changes",
+                "image_publish_receipts",
+                "legacy_image_aliases",
+                "image_projection_generations",
+                "image_projection_aliases",
+                "image_projection_rows",
+                "image_projection_receipts",
+                "image_projection_manifests",
+                "provider_egress_grants",
+                "provider_egress_manifests",
+                "image_projection_read_manifests",
+                "library_bootstrap_receipts",
             }.issubset(tables)
         )
+        self.assertNotIn("agent_blueprint_command_receipts", tables)
 
     def test_migration_checksum_tampering_fails_closed(self) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             connection.execute(
                 "UPDATE schema_migrations SET checksum='tampered' WHERE version=2"
             )
+            connection.commit()
 
         with self.assertRaisesRegex(MediaMigrationError, "migration_checksum_mismatch"):
             self.repository.ensure_schema(self.library)
@@ -340,6 +399,85 @@ class MediaRepositoryContractTests(unittest.TestCase):
         }
         self.assertEqual(heads[str(asset["id"])], revision_two["analysis_run_id"])
         self.assertEqual(current_video_ids, {"segment-r2"})
+
+    def test_analysis_commit_rejects_media_outside_probed_source_domain(self) -> None:
+        root_id = str(self.repository.library_roots()[0]["id"])
+        asset = _register_bytes(
+            self.repository,
+            root_id,
+            self.library,
+            "source-domain.mp4",
+            content=b"synthetic source-domain bytes",
+        )
+        self.repository.update_asset_probe(
+            str(asset["id"]),
+            {
+                "duration_ms": 2_000,
+                "width": 320,
+                "height": 180,
+                "rotation_degrees": 0,
+                "captured_at": None,
+                "codec": {"video_codec": "fixture", "audio_streams": []},
+            },
+        )
+        job = self.repository.create_analysis_job(asset_id=str(asset["id"]))
+        segments, frames = _analysis_payload(job, 1)
+
+        invalid_segments = copy.deepcopy(segments)
+        invalid_segments[0]["end_ms"] = 2_001
+        with self.assertRaisesRegex(ValueError, "indexed asset duration"):
+            self.repository.commit_video_analysis(
+                job_id=str(job["id"]),
+                segments=invalid_segments,
+                keyframes=frames,
+                transcripts=[],
+            )
+
+        invalid_frames = copy.deepcopy(frames)
+        invalid_frames[0]["timestamp_ms"] = 2_000
+        with self.assertRaisesRegex(ValueError, "indexed asset duration"):
+            self.repository.commit_video_analysis(
+                job_id=str(job["id"]),
+                segments=segments,
+                keyframes=invalid_frames,
+                transcripts=[],
+            )
+
+        with self.assertRaisesRegex(ValueError, "indexed asset duration"):
+            self.repository.commit_video_analysis(
+                job_id=str(job["id"]),
+                segments=segments,
+                keyframes=frames,
+                transcripts=[
+                    {
+                        "id": "transcript-outside-domain",
+                        "start_ms": 1_900,
+                        "end_ms": 2_001,
+                        "text": "outside",
+                    }
+                ],
+            )
+
+        with closing(self.repository._connect()) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM video_segments WHERE analysis_run_id=?",
+                    (job["analysis_run_id"],),
+                ).fetchone()[0],
+                0,
+            )
+
+        committed = self.repository.commit_video_analysis(
+            job_id=str(job["id"]),
+            segments=segments,
+            keyframes=frames,
+            transcripts=[],
+        )
+        self.assertEqual(committed["segment_count"], 1)
+        self.assertEqual(
+            self.repository.get_media_job(str(job["id"]))["status"],
+            "succeeded",
+        )
 
     def test_idempotency_replays_frozen_response_and_rejects_payload_conflict(self) -> None:
         claim = self.repository.claim_idempotency(
@@ -499,7 +637,7 @@ class MediaRepositoryContractTests(unittest.TestCase):
                 transcripts=[],
             )
 
-        with self.repository._connect() as connection:
+        with closing(self.repository._connect()) as connection:
             segment_count = connection.execute(
                 "SELECT COUNT(*) FROM video_segments WHERE asset_id=?",
                 (video["id"],),
@@ -654,6 +792,10 @@ class MediaRouteSecurityContractTests(unittest.TestCase):
             ("POST", "/v1/index/jobs/not-found/cancel"),
             ("POST", "/v1/index/jobs/not-found/resume"),
             ("POST", "/v1/creative/briefs"),
+            ("POST", "/v1/creative/projects/not-found/timeline/reconcile"),
+            ("POST", "/v1/creative/projects/not-found/timeline/edit"),
+            ("POST", "/v1/creative/projects/not-found/timeline/structural-edit"),
+            ("POST", "/v1/creative/projects/not-found/timeline/restore"),
             ("POST", "/v1/creative/projects/not-found/timelines"),
             ("POST", "/v1/timelines/not-found/validate"),
             ("POST", "/v1/timelines/not-found/revise"),
@@ -689,6 +831,10 @@ class MediaRouteSecurityContractTests(unittest.TestCase):
             ("POST", "/v1/index/jobs/not-found/cancel"),
             ("POST", "/v1/index/jobs/not-found/resume"),
             ("POST", "/v1/creative/briefs"),
+            ("POST", "/v1/creative/projects/not-found/timeline/reconcile"),
+            ("POST", "/v1/creative/projects/not-found/timeline/edit"),
+            ("POST", "/v1/creative/projects/not-found/timeline/structural-edit"),
+            ("POST", "/v1/creative/projects/not-found/timeline/restore"),
             ("POST", "/v1/creative/projects/not-found/timelines"),
             ("POST", "/v1/timelines/not-found/revise"),
             ("POST", "/v1/renders"),
@@ -730,7 +876,6 @@ class MediaRouteSecurityContractTests(unittest.TestCase):
 
     def test_read_only_media_surfaces_keep_loopback_codex_and_trusted_browser_access(self) -> None:
         requests = (
-            ("GET", "/v1/media/capabilities", None, 200),
             ("GET", "/v1/index/jobs", None, 200),
             ("GET", "/v1/index/jobs/not-found", None, 404),
             ("POST", "/v1/search/mixed", {}, 400),
@@ -751,22 +896,52 @@ class MediaRouteSecurityContractTests(unittest.TestCase):
 
         response = self.client.get(
             "/v1/media/capabilities",
-            headers={"Origin": "http://127.0.0.1:5173"},
+            headers={
+                "Origin": "http://127.0.0.1:5173",
+                DESKTOP_TOKEN_HEADER: self.token,
+            },
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Access-Control-Allow-Origin"], "http://127.0.0.1:5173")
 
         untrusted = self.client.get(
             "/v1/media/capabilities",
-            headers={"Origin": "http://127.0.0.1:9999"},
+            headers={
+                "Origin": "http://127.0.0.1:9999",
+                DESKTOP_TOKEN_HEADER: self.token,
+            },
         )
         self.assertEqual(untrusted.status_code, 403)
 
         non_loopback = self.client.get(
             "/v1/media/capabilities",
+            headers={DESKTOP_TOKEN_HEADER: self.token},
             environ_overrides={"REMOTE_ADDR": "10.0.0.8"},
         )
         self.assertEqual(non_loopback.status_code, 403)
+
+        no_desktop_authority = self.client.get("/v1/media/capabilities")
+        self.assertEqual(no_desktop_authority.status_code, 401)
+        self.assertEqual(
+            no_desktop_authority.json["code"],
+            "desktop_auth_required",
+        )
+
+    def test_mixed_search_maps_derivative_cold_audit_failure_to_stable_conflict(self) -> None:
+        service = self.app.extensions["mixed_retrieval_service"]
+        with patch.object(
+            service,
+            "search",
+            side_effect=CanonicalExportIntegrityError(
+                "canonical_export_revision_invalid"
+            ),
+        ):
+            response = self.client.post(
+                "/v1/search/mixed",
+                json={"query": "material"},
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json["code"], "canonical_export_integrity_error")
 
     def test_trusted_browser_origin_does_not_turn_read_access_into_write_authority(self) -> None:
         response = self.client.post(
@@ -800,6 +975,7 @@ class StartupRecoveryContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="memolens-media-recovery-") as temporary:
             root = Path(temporary).resolve()
             repository, library, _ = _initialize_repository(root)
+            self.addCleanup(repository.close)
             root_id = str(repository.library_roots()[0]["id"])
             video = _register_bytes(
                 repository,
@@ -851,6 +1027,7 @@ class StartupRecoveryContractTests(unittest.TestCase):
 
             other_root = root / "other-database"
             other_repository, other_library, _ = _initialize_repository(other_root)
+            self.addCleanup(other_repository.close)
             other_root_id = str(other_repository.library_roots()[0]["id"])
             other_video = _register_bytes(
                 other_repository,
@@ -863,10 +1040,35 @@ class StartupRecoveryContractTests(unittest.TestCase):
 
             token = "startup-recovery-desktop-token"
             environment = _test_environment(root, library, token)
+            probe_entered = Event()
+            release_probe = Event()
+            submitted: list[str] = []
+            original_submit = MediaJobRunner.submit
+
+            def observe_submit(runner, job_id):
+                submitted.append(job_id)
+                return original_submit(runner, job_id)
+
+            def gated_probe(*_args, **_kwargs):
+                probe_entered.set()
+                if not release_probe.wait(5):
+                    raise RuntimeError("test video probe barrier timed out")
+                raise MediaCapabilityError("fixture_probe_stopped", "Controlled test probe completed.")
+
+            submission_patch = patch.object(MediaJobRunner, "submit", autospec=True, side_effect=observe_submit)
+            probe_patch = patch("backend.src.media.video.ffprobe", side_effect=gated_probe)
             environment.start()
-            app = create_app(Settings.from_env())
-            client = app.test_client()
+            submission_patch.start()
+            probe_patch.start()
+            app = None
             try:
+                app = create_app(Settings.from_env())
+                client = app.test_client()
+                # Recovery submission is synchronous; assert its absence before
+                # observing state. The event gate prevents a wrongly submitted
+                # worker from finishing fast enough to conceal the regression.
+                self.assertEqual(submitted, [], "Interrupted video work requires explicit resume.")
+                self.assertFalse(probe_entered.is_set())
                 recovered_repository = app.extensions["media_repository"]
                 recovered_media = recovered_repository.get_media_job(str(media_job["id"]))
                 recovered_render = recovered_repository.get_render_job(str(render_job["id"]))
@@ -876,7 +1078,7 @@ class StartupRecoveryContractTests(unittest.TestCase):
                 self.assertEqual(recovered_render["status"], "interrupted")
                 self.assertEqual(recovered_render["error"]["code"], "process_interrupted")
                 self.assertEqual(recovered_repository.active_job_count(), 0)
-                with recovered_repository._connect() as connection:
+                with closing(recovered_repository._connect()) as connection:
                     analysis_status = connection.execute(
                         "SELECT status FROM analysis_runs WHERE id=?",
                         (media_job["analysis_run_id"],),
@@ -914,8 +1116,21 @@ class StartupRecoveryContractTests(unittest.TestCase):
                     return set()
 
                 self.assertFalse(keys(public_payload) & forbidden_keys)
+
+                self.assertTrue(app.extensions["media_job_runner"].resume(str(media_job["id"])))
+                self.assertTrue(probe_entered.wait(5), "Explicit resume never reached the video worker.")
+                resumed = recovered_repository.get_media_job(str(media_job["id"]))
+                self.assertEqual(submitted, [media_job["id"]])
+                self.assertEqual(resumed["status"], "running")
+                self.assertEqual(resumed["attempt"], int(media_job["attempt"]) + 1)
+                self.assertIsNone(resumed["error"])
+                self.assertEqual(recovered_repository.active_job_count(), 1)
             finally:
-                _shutdown_app(app)
+                release_probe.set()
+                if app is not None:
+                    _shutdown_app(app)
+                probe_patch.stop()
+                submission_patch.stop()
                 environment.stop()
 
 
@@ -948,6 +1163,7 @@ class RealVideoPipelineContractTests(unittest.TestCase):
         db_path = state / "media.db"
         ImageIndexRepository(db_path).ensure_schema()
         repository = MediaRepository(db_path)
+        self.addCleanup(repository.close)
         repository.ensure_schema(self.demo_library)
         root_id = str(repository.library_roots()[0]["id"])
         video_path = self.demo_library / "demo_mountain_to_coast.mp4"
@@ -986,19 +1202,21 @@ class RealVideoPipelineContractTests(unittest.TestCase):
         self.assertAlmostEqual(int(asset["duration_ms"]), 9_000, delta=150)
         search_service = MixedRetrievalService(repository)
         image_path = self.demo_library / "2022-04-18_quiet_mountain_sunrise.jpg"
-        image_stat = image_path.stat()
-        image_asset = repository.upsert_asset_source(
-            root_id=root_id,
-            relative_path=image_path.name,
-            filename=image_path.name,
-            kind="image",
-            sha256=sha256_file(image_path),
-            mime_type="image/jpeg",
-            file_size=image_stat.st_size,
-            mtime_ns=image_stat.st_mtime_ns,
-            source_file_id=str(image_stat.st_ino),
+        image_asset = (
+            timeline_integration.TimelineLoweringIntegrationTests._register_image(
+                SimpleNamespace(
+                    repository=repository,
+                    library=self.demo_library,
+                    db_path=db_path,
+                ),
+                image_path.name,
+                image_path.read_bytes(),
+            )
         )
-        repository.update_image_probe(str(image_asset["id"]), width=1_440, height=960)
+        current_image = repository.get_current_image_analysis(str(image_asset["id"]))
+        self.assertIsNotNone(current_image)
+        assert current_image is not None
+        self.assertEqual(current_image["projection"]["status"], "current")
         mixed = search_service.search(
             {"query": "mountain", "types": ["image", "video"], "top_k": 100}
         )
@@ -1012,6 +1230,24 @@ class RealVideoPipelineContractTests(unittest.TestCase):
         self.assertTrue(search["results"])
         first_match = search["results"][0]
         self.assertEqual(first_match["result_type"], "video_segment")
+        self.assertEqual(first_match["asset_sha256"], asset["sha256"])
+        raw_candidates, _analysis_heads = repository.mixed_candidates()
+        raw_match = next(
+            candidate
+            for candidate in raw_candidates
+            if candidate["id"] == first_match["id"]
+        )
+        self.assertEqual(raw_match["input_asset_sha256"], asset["sha256"])
+        self.assertRegex(raw_match["source_binding_sha256"], r"^[0-9a-f]{64}$")
+        self.assertFalse(
+            {
+                "source_library_root_id",
+                "source_observed_size",
+                "source_observed_mtime_ns",
+                "source_file_id",
+            }
+            & set(raw_match)
+        )
         segment = repository.get_segment(str(first_match["id"]))
         assert segment is not None
         self.assertTrue(segment["keyframes"])

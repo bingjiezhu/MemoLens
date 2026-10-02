@@ -101,6 +101,7 @@ class MediaImportServiceTests(unittest.TestCase):
             }
 
         plan = self.service.prepare_import(
+            root_id=self.root_id,
             root=self.library,
             payload={
                 "relative_paths": [image_path.name, video_path.name],
@@ -220,7 +221,10 @@ class MediaImportServiceTests(unittest.TestCase):
 
     def test_discovery_receives_the_existing_time_file_and_byte_budgets(self) -> None:
         service = MediaImportService(self.repository, self.runner, clock=lambda: 12.5)
-        with patch("backend.src.media.importing.discover_media", return_value=[]) as discover:
+        with patch(
+            "backend.src.media.importing.collect_media_relative_paths",
+            return_value=[],
+        ) as discover:
             result = service.import_assets(
                 root_id=self.root_id,
                 root=self.library,
@@ -229,13 +233,14 @@ class MediaImportServiceTests(unittest.TestCase):
 
         self.assertEqual(result.status, "succeeded")
         discover.assert_called_once_with(
-            self.library,
+            unittest.mock.ANY,
             recursive=False,
             files=None,
             extensions=unittest.mock.ANY,
             max_files=500,
             max_total_bytes=20 * 1024 * 1024 * 1024,
             deadline=42.5,
+            clock=unittest.mock.ANY,
         )
         self.assertEqual(
             discover.call_args.kwargs["extensions"],
@@ -247,7 +252,10 @@ class MediaImportServiceTests(unittest.TestCase):
         video_path.write_bytes(hashlib.sha256(b"video").digest())
         ticks = iter((10.0, 40.1))
         service = MediaImportService(self.repository, self.runner, clock=lambda: next(ticks))
-        with patch("backend.src.media.importing.discover_media", return_value=[video_path]):
+        with patch(
+            "backend.src.media.importing.collect_media_relative_paths",
+            return_value=[Path(video_path.name)],
+        ):
             with self.assertRaisesRegex(
                 ValueError,
                 "import_manifest_timeout: synchronous import exceeded 30 seconds; "

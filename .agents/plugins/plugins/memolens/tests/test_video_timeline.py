@@ -440,43 +440,10 @@ class VideoTimelineTests(unittest.TestCase):
         self.assertNotIn("absolute_path", match)
         self.assertNotIn("database_path", result)
 
-    def test_mixed_search_returns_one_ranked_photo_video_result_set(self) -> None:
-        result = self.gateway().mixed_search("海边日落", limit=6)
-        self.assertEqual(result["object"], "memolens.mixed_search")
-        self.assertEqual(result["ranking"], "reciprocal_rank_fusion")
-        self.assertEqual(result["branch_errors"], [])
-        self.assertEqual(
-            {item["result_type"] for item in result["results"]},
-            {"image", "video_segment"},
-        )
-        self.assertEqual(result["results"][0]["media_kind"], "image")
-        self.assertTrue(
-            all(item["rank_score"] > 0 for item in result["results"])
-        )
-        image = next(
-            item for item in result["results"] if item["result_type"] == "image"
-        )
-        self.assertEqual(image["asset_id"], "asset_image")
-        self.assertEqual(image["asset_source_id"], "src_image")
-        self.assertEqual(image["asset_sha256"], IMAGE_SHA)
-        self.assertNotIn("absolute_path", image)
-        self.assertNotIn("path_status", image)
-
-        draft = self.gateway().timeline_draft(
-            project_id="proj_image",
-            items=[
-                {
-                    "kind": "image",
-                    "asset_id": image["asset_id"],
-                    "asset_source_id": image["asset_source_id"],
-                    "asset_sha256": image["asset_sha256"],
-                    "timeline_duration_ms": 3000,
-                    "match_id": image["asset_id"],
-                }
-            ],
-            created_at="2026-08-12T14:00:00Z",
-        )
-        self.assertTrue(draft["validation"]["valid"])
+    def test_mixed_search_rejects_legacy_schema_without_derivative_authority(self) -> None:
+        with self.assertRaises(MemoLensError) as raised:
+            self.gateway().mixed_search("海边日落", limit=6)
+        self.assertEqual(raised.exception.code, "derivative_authority_unavailable")
 
     def test_creator_context_is_confirmed_sanitized_and_legacy_safe(self) -> None:
         context = self.gateway().creator_context()
@@ -566,10 +533,17 @@ class VideoTimelineTests(unittest.TestCase):
                 ],
             )
             connection.commit()
-        self.assertEqual(self.gateway().search("海边日落")["results"], [])
-        mixed = self.gateway().mixed_search("海边日落")
-        self.assertEqual(mixed["results"], [])
-        self.assertEqual(self.gateway().video_search("海边日落")["results"], [])
+        gateway = self.gateway()
+        with self.assertRaises(MemoLensError) as photo_search:
+            gateway.search("海边日落")
+        self.assertEqual(
+            photo_search.exception.code,
+            "canonical_image_authority_unavailable",
+        )
+        with self.assertRaises(MemoLensError) as mixed:
+            gateway.mixed_search("海边日落")
+        self.assertEqual(mixed.exception.code, "derivative_authority_unavailable")
+        self.assertEqual(gateway.video_search("海边日落")["results"], [])
 
     def test_failed_higher_analysis_revision_is_never_searchable(self) -> None:
         result = self.gateway().video_search("幽灵")
@@ -775,6 +749,211 @@ class VideoTimelineTests(unittest.TestCase):
         self.assertEqual(clip["timeline_duration_ms"], 2000)
         self.assertTrue(validate_timeline(revised)["valid"])
 
+    def test_split_clip_creates_two_exact_source_ranges_without_changing_duration(self) -> None:
+        timeline = _make_timeline()
+        clip = timeline["tracks"][0]["clips"][0]
+        revised = revise_timeline_draft(
+            timeline=timeline,
+            operations=[
+                {
+                    "op": "split_clip",
+                    "clip_id": clip["id"],
+                    "offset_ms": 1250,
+                }
+            ],
+            created_at="2026-08-12T13:00:00Z",
+        )
+        left, right = revised["tracks"][0]["clips"]
+        self.assertEqual((left["source_in_ms"], left["source_out_ms"]), (1000, 2250))
+        self.assertEqual((right["source_in_ms"], right["source_out_ms"]), (2250, 4000))
+        self.assertEqual((left["timeline_start_ms"], right["timeline_start_ms"]), (0, 1250))
+        self.assertEqual(revised["format"]["duration_ms"], 3000)
+        self.assertNotEqual(left["id"], right["id"])
+        self.assertTrue(validate_timeline(revised)["valid"])
+
+    def test_audio_split_rebinds_outer_fades_to_valid_child_ranges(self) -> None:
+        timeline = draft_timeline(
+            project_id="proj_audio_split",
+            items=_draft_items()
+            + [
+                {
+                    "kind": "audio",
+                    "asset_id": "asset_audio",
+                    "asset_source_id": "src_audio",
+                    "asset_sha256": AUDIO_SHA,
+                    "source_in_ms": 0,
+                    "source_out_ms": 3000,
+                    "timeline_duration_ms": 3000,
+                    "fade_in_ms": 1000,
+                    "fade_out_ms": 1000,
+                    "reason": "Music bed",
+                    "match_id": "asset_audio",
+                }
+            ],
+            created_at="2026-08-12T12:00:00Z",
+        )
+        audio_track = next(
+            track for track in timeline["tracks"] if track["type"] == "audio"
+        )
+        revised = revise_timeline_draft(
+            timeline=timeline,
+            operations=[
+                {
+                    "op": "split_clip",
+                    "clip_id": audio_track["clips"][0]["id"],
+                    "offset_ms": 500,
+                }
+            ],
+            created_at="2026-08-12T13:00:00Z",
+        )
+        revised_audio = next(
+            track for track in revised["tracks"] if track["type"] == "audio"
+        )
+        left, right = revised_audio["clips"]
+        self.assertEqual((left["fade_in_ms"], left["fade_out_ms"]), (250, 0))
+        self.assertEqual((right["fade_in_ms"], right["fade_out_ms"]), (0, 1000))
+        self.assertEqual((left["source_in_ms"], left["source_out_ms"]), (0, 500))
+        self.assertEqual((right["source_in_ms"], right["source_out_ms"]), (500, 3000))
+        self.assertTrue(validate_timeline(revised)["valid"])
+
+    def test_ripple_edits_preserve_existing_track_gaps(self) -> None:
+        timeline = draft_timeline(
+            project_id="proj_ripple_gaps",
+            items=_draft_items()
+            + [
+                {
+                    "kind": "video",
+                    "asset_id": "asset_video_2",
+                    "asset_source_id": "src_video_2",
+                    "asset_sha256": "d" * 64,
+                    "segment_id": "seg_second",
+                    "analysis_run_id": "arun_second",
+                    "analysis_revision": 1,
+                    "source_in_ms": 5000,
+                    "source_out_ms": 7000,
+                    "timeline_duration_ms": 2000,
+                    "reason": "Second shot",
+                    "match_id": "seg_second",
+                }
+            ],
+            created_at="2026-08-12T12:00:00Z",
+        )
+        first, second = timeline["tracks"][0]["clips"]
+        second["timeline_start_ms"] = 5000
+        timeline["format"]["duration_ms"] = 7000
+        self.assertTrue(validate_timeline(timeline)["valid"])
+
+        trimmed = revise_timeline_draft(
+            timeline=timeline,
+            operations=[
+                {
+                    "op": "trim_clip",
+                    "clip_id": first["id"],
+                    "source_in_ms": 1000,
+                    "source_out_ms": 3000,
+                    "ripple": True,
+                }
+            ],
+            created_at="2026-08-12T13:00:00Z",
+        )
+        self.assertEqual(
+            [clip["timeline_start_ms"] for clip in trimmed["tracks"][0]["clips"]],
+            [0, 4000],
+        )
+        self.assertEqual(trimmed["format"]["duration_ms"], 6000)
+
+        deleted = revise_timeline_draft(
+            timeline=timeline,
+            operations=[{"op": "delete_clip", "clip_id": first["id"]}],
+            created_at="2026-08-12T13:00:00Z",
+        )
+        self.assertEqual(deleted["tracks"][0]["clips"][0]["timeline_start_ms"], 2000)
+        self.assertEqual(deleted["format"]["duration_ms"], 4000)
+
+        replaced = revise_timeline_draft(
+            timeline=timeline,
+            operations=[
+                {
+                    "op": "replace_clip",
+                    "clip_id": first["id"],
+                    "asset_id": "asset_video_replacement",
+                    "asset_source_id": "src_video_replacement",
+                    "asset_sha256": "e" * 64,
+                    "segment_id": "seg_replacement",
+                    "analysis_run_id": "arun_replacement",
+                    "analysis_revision": 1,
+                    "source_in_ms": 10000,
+                    "source_out_ms": 14000,
+                    "ripple": True,
+                }
+            ],
+            created_at="2026-08-12T13:00:00Z",
+        )
+        self.assertEqual(
+            [clip["timeline_start_ms"] for clip in replaced["tracks"][0]["clips"]],
+            [0, 6000],
+        )
+        self.assertEqual(replaced["format"]["duration_ms"], 8000)
+        self.assertTrue(validate_timeline(replaced)["valid"])
+
+    def test_reorder_ripple_trim_and_delete_are_typed_editor_operations(self) -> None:
+        items = _draft_items() + [
+            {
+                "kind": "video",
+                "asset_id": "asset_video_2",
+                "asset_source_id": "src_video_2",
+                "asset_sha256": "d" * 64,
+                "segment_id": "seg_second",
+                "analysis_run_id": "arun_second",
+                "analysis_revision": 1,
+                "source_in_ms": 5000,
+                "source_out_ms": 7000,
+                "timeline_duration_ms": 2000,
+                "reason": "结尾动作",
+                "match_id": "seg_second",
+            }
+        ]
+        timeline = draft_timeline(
+            project_id="proj_demo",
+            items=items,
+            created_at="2026-08-12T12:00:00Z",
+        )
+        first, second = timeline["tracks"][0]["clips"]
+        reordered = revise_timeline_draft(
+            timeline=timeline,
+            operations=[{"op": "move_clip", "clip_id": second["id"], "to_index": 0}],
+            created_at="2026-08-12T13:00:00Z",
+        )
+        reordered_clips = reordered["tracks"][0]["clips"]
+        self.assertEqual([clip["id"] for clip in reordered_clips], [second["id"], first["id"]])
+        self.assertEqual([clip["timeline_start_ms"] for clip in reordered_clips], [0, 2000])
+
+        trimmed = revise_timeline_draft(
+            timeline=reordered,
+            operations=[
+                {
+                    "op": "trim_clip",
+                    "clip_id": second["id"],
+                    "source_in_ms": 5000,
+                    "source_out_ms": 6000,
+                    "ripple": True,
+                }
+            ],
+            created_at="2026-08-12T14:00:00Z",
+        )
+        trimmed_clips = trimmed["tracks"][0]["clips"]
+        self.assertEqual([clip["timeline_start_ms"] for clip in trimmed_clips], [0, 1000])
+        self.assertEqual(trimmed["format"]["duration_ms"], 4000)
+
+        deleted = revise_timeline_draft(
+            timeline=trimmed,
+            operations=[{"op": "delete_clip", "clip_id": second["id"]}],
+            created_at="2026-08-12T15:00:00Z",
+        )
+        self.assertEqual([clip["id"] for clip in deleted["tracks"][0]["clips"]], [first["id"]])
+        self.assertEqual(deleted["format"]["duration_ms"], 3000)
+        self.assertTrue(validate_timeline(deleted)["valid"])
+
     def test_persisted_immutable_timeline_list_and_get_support_final_table(self) -> None:
         gateway = self.gateway()
         listed = gateway.timeline_list(project_id="proj_demo")
@@ -818,9 +997,13 @@ class VideoTimelineTests(unittest.TestCase):
         ):
             self.assertFalse(status["capabilities"][capability])
 
-    def test_mcp_exposes_only_read_or_in_memory_tools_with_accurate_annotations(self) -> None:
+    def test_mcp_exposes_read_tools_and_two_explicit_editor_handoffs(self) -> None:
         self.assertEqual(SERVER_INFO["version"], PLUGIN_VERSION)
         expected_titles = {
+            "memolens_library_bootstrap_start": (
+                "Ask MemoLens to confirm a local Library"
+            ),
+            "memolens_library_bootstrap_status": "Check native Library request",
             "memolens_status": "Check MemoLens readiness",
             "memolens_search": "Find photo memories",
             "memolens_creator_context": "Read confirmed creator context",
@@ -830,14 +1013,28 @@ class VideoTimelineTests(unittest.TestCase):
             "memolens_video_search": "Find moments inside videos",
             "memolens_media_list": "Browse indexed media",
             "memolens_media_get": "Open media details",
+            "memolens_wiki_status": "Check the live media Wiki",
+            "memolens_wiki_list": "Browse live media Wiki pages",
+            "memolens_wiki_search": "Find live Wiki pages and evidence",
+            "memolens_wiki_open": "Open a live media Wiki page",
+            "memolens_wiki_evidence": "Read exact media Wiki evidence",
             "memolens_inbox_list": "Review the media inbox",
             "memolens_timeline_draft": "Shape an unsaved story timeline",
             "memolens_timeline_revise_draft": (
                 "Refine the unsaved story timeline"
             ),
             "memolens_timeline_validate": "Check the timeline draft",
+            "memolens_canonical_editor_handoff": "Open the MemoLens Canonical Editor",
+            "memolens_editor_handoff": "Open the MemoLens Unsaved Draft Lab",
             "memolens_timeline_list": "Browse existing timeline history",
             "memolens_timeline_get": "Open an existing timeline revision",
+            "memolens_project_list": "List resumable creative projects",
+            "memolens_project_open": "Resume an existing creative project",
+            "memolens_project_history": "Review project revision history",
+            "memolens_blueprint_shadow": "Read a legacy Blueprint shadow",
+            "memolens_blueprint_get": "Read the persisted Creative Blueprint",
+            "memolens_blueprint_history": "Review Blueprint operation history",
+            "memolens_blueprint_validate": "Validate a Creative Blueprint candidate",
         }
         self.assertEqual(
             {tool["name"]: tool["title"] for tool in TOOLS},
@@ -850,13 +1047,22 @@ class VideoTimelineTests(unittest.TestCase):
             )
         )
         for tool in TOOLS:
+            read_only = tool["name"] not in {
+                "memolens_library_bootstrap_start",
+                "memolens_canonical_editor_handoff",
+                "memolens_editor_handoff",
+            }
+            idempotent = tool["name"] not in {
+                "memolens_canonical_editor_handoff",
+                "memolens_editor_handoff",
+            }
             self.assertEqual(
                 tool["annotations"],
                 {
                     "title": expected_titles[tool["name"]],
-                    "readOnlyHint": True,
+                    "readOnlyHint": read_only,
                     "destructiveHint": False,
-                    "idempotentHint": True,
+                    "idempotentHint": idempotent,
                     "openWorldHint": False,
                 },
             )
@@ -865,6 +1071,20 @@ class VideoTimelineTests(unittest.TestCase):
         }
         self.assertFalse(exact["memolens_creator_context"]["additionalProperties"])
         self.assertFalse(exact["memolens_inbox_list"]["additionalProperties"])
+        self.assertFalse(exact["memolens_project_list"]["additionalProperties"])
+        self.assertFalse(exact["memolens_project_open"]["additionalProperties"])
+        self.assertFalse(exact["memolens_project_history"]["additionalProperties"])
+        self.assertFalse(exact["memolens_blueprint_shadow"]["additionalProperties"])
+        self.assertFalse(exact["memolens_blueprint_get"]["additionalProperties"])
+        self.assertFalse(exact["memolens_blueprint_history"]["additionalProperties"])
+        self.assertFalse(exact["memolens_blueprint_validate"]["additionalProperties"])
+        canonical_input = next(
+            tool["inputSchema"] for tool in TOOLS
+            if tool["name"] == "memolens_canonical_editor_handoff"
+        )
+        self.assertEqual(set(canonical_input["properties"]), {"project_id"})
+        self.assertEqual(canonical_input["required"], ["project_id"])
+        self.assertFalse(canonical_input["additionalProperties"])
 
     def test_cli_video_search_is_clean_json_from_non_repo_cwd(self) -> None:
         env = os.environ.copy()

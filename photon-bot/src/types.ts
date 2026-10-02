@@ -4,6 +4,12 @@ export type IncomingMessage = {
   senderName?: string;
   text: string;
   receivedAt: string;
+  /**
+   * Runtime-only capability minted by a platform adapter after it has applied
+   * the complete inbound access policy. It is deliberately opaque: callers
+   * can carry it, but only the minting adapter can validate it.
+   */
+  admission?: object;
 };
 
 export type BotReply = {
@@ -52,6 +58,6 @@ export type MessagePlatformAdapter = {
     onMessage: MessageHandler;
     onError: (error: Error) => void;
   }): Promise<void>;
-  sendReply(chatId: string, reply: BotReply): Promise<void>;
+  sendReply(chatId: string, reply: BotReply, admission?: object): Promise<void>;
   close(): Promise<void>;
 };

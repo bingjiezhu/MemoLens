@@ -1,11 +1,14 @@
 # Spec 006：Creator Memory & Media Inbox
 
+> **Supersession note（2026-08-22）**：本规范的 Inbox、不可变 review/Creator revisions、确认后沉淀偏好和原件不动原则继续有效；“Codex 是唯一对话表面”“plugin 永久只读”“App 或 Codex 内描述创意”等边界升级为 [ML-015 Agent-Agnostic Creative Protocol](015-agent-agnostic-creative-protocol/spec.md)。最新三层记忆、素材 Wiki、usage 与创作链决策见 [43 问产品对齐记录](product-decisions-43-questions-2026-08-22.md)。冲突范围采用新决策，既有代码不因此被视为已经实现目标协议。
+
 - 状态：`IMPLEMENTED`
+- 验证状态：`NOT VALIDATED`；进入结果型声明前仍须通过 [Spec 004-A 与组合决策](implementation-decisions-2026-08-20.md)
 - 目标版本：MemoLens `0.5.0`
 - API 路径：`/v1`（响应 `schema_version: "1"`）
 - 数据库目标版本：`3`
-- 最后更新：2026-08-12
-- 依赖：Spec 005《Video Creative Workbench》（已随 0.3.0 发布）。Spec 004 检索/隐私 benchmark 仍是当时的发布门槛表述，**本仓库没有这份文件**。
+- 最后更新：2026-08-22（增加产品决策 supersession；主体实现审计仍为 2026-08-12/20）
+- 依赖：Spec 005《Video Creative Workbench》；[Spec 004](004-evidence-backed-retrieval-privacy-benchmark/spec.md) 仍是检索效果与隐私结果型声明的发布门槛
 
 本文使用 RFC 2119 风格术语：**MUST（必须）**、**MUST NOT（禁止）**、**SHOULD（应该）**。
 

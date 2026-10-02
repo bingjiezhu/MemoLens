@@ -3,6 +3,7 @@ from __future__ import annotations
 import requests
 
 from core.config import Settings
+from core.network_policy import NetworkPolicyError, require_offline_safe_url
 from core.schemas import GeoMetadata
 
 
@@ -15,18 +16,21 @@ class ReverseGeocoder:
             return GeoMetadata()
 
         try:
-            response = requests.get(
-                "https://nominatim.openstreetmap.org/reverse",
-                params={
-                    "format": "jsonv2",
-                    "lat": lat,
-                    "lon": lon,
-                },
-                headers={"User-Agent": self.settings.geocode_user_agent},
-                timeout=10,
-            )
+            require_offline_safe_url("https://nominatim.openstreetmap.org/reverse")
+            with requests.Session() as session:
+                session.trust_env = False
+                response = session.get(
+                    "https://nominatim.openstreetmap.org/reverse",
+                    params={
+                        "format": "jsonv2",
+                        "lat": lat,
+                        "lon": lon,
+                    },
+                    headers={"User-Agent": self.settings.geocode_user_agent},
+                    timeout=10,
+                )
             response.raise_for_status()
-        except requests.RequestException:
+        except (NetworkPolicyError, requests.RequestException):
             return GeoMetadata()
 
         payload = response.json()

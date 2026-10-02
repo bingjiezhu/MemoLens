@@ -1,10 +1,18 @@
 import type {
   AssetImportResult,
+  CanonicalUsagePolicy,
+  CreativeAssetMatch,
   MediaJob,
   MixedSearchResponse,
+  SearchUsageMode,
   VideoCapabilityStatus,
   VideoSegmentDetail,
 } from "../types";
+import {
+  CanonicalUsageIntegrityError,
+  requireCanonicalUsageRevision,
+} from "../usage";
+import { isResidualCandidateId } from "../residual";
 import {
   asNullableNumber,
   asNullableString,
@@ -206,15 +214,74 @@ export async function changeMediaJob(
   return normalizeJob(payload.job ?? payload);
 }
 
-export async function searchMixedAssets(input: {
+interface MixedSearchInput {
   apiBase: string;
   query: string;
   dbPath?: string | null;
   topK?: number;
   orientation?: string | null;
   excludedTerms?: string[];
+  usageMode?: SearchUsageMode;
+  allowReuse?: boolean;
+  usedIn?: { projectId: string; exportRevision?: number | null } | null;
+  residualOf?: string | null;
   signal?: AbortSignal;
-}): Promise<MixedSearchResponse> {
+}
+
+function requestedUsagePolicy(input: MixedSearchInput): CanonicalUsagePolicy | null {
+  if (input.usageMode === "unused_only" || input.allowReuse === false) {
+    return "unused_only";
+  }
+  if (input.usageMode === "prefer_unused") return "prefer_unused";
+  if (
+    input.allowReuse !== undefined
+    || input.usedIn !== undefined && input.usedIn !== null
+    || Boolean(input.residualOf)
+  ) {
+    return "allow_reuse";
+  }
+  return null;
+}
+
+function requireUsagePolicyMatch(
+  match: CreativeAssetMatch,
+  input: MixedSearchInput,
+  policy: CanonicalUsagePolicy,
+): void {
+  const usage = match.usage;
+  if (!usage) {
+    throw new CanonicalUsageIntegrityError("a usage-aware result omitted usage.");
+  }
+  if (policy === "unused_only") {
+    const admitted = match.result_type === "image_asset"
+      ? !usage.used
+      : match.result_type === "video_segment"
+        && usage.used_intervals.length === 0;
+    if (!admitted) {
+      throw new CanonicalUsageIntegrityError("a result violates the no-reuse policy.");
+    }
+  }
+  if (input.usedIn) {
+    const admitted = match.result_type === "image_asset"
+      ? usage.used
+      : match.result_type === "video_segment" && usage.used_intervals.length > 0;
+    if (!admitted) {
+      throw new CanonicalUsageIntegrityError("a result violates the used-in selector.");
+    }
+  }
+  if (input.residualOf && (
+    match.result_type !== "video_segment"
+    || match.asset_id !== input.residualOf
+    || !isResidualCandidateId(match.id)
+    || match.residual_binding === null
+    || match.residual_binding === undefined
+  )) {
+    throw new CanonicalUsageIntegrityError("a result violates the residual-of selector.");
+  }
+}
+
+export async function searchMixedAssets(input: MixedSearchInput): Promise<MixedSearchResponse> {
+  const usagePolicy = requestedUsagePolicy(input);
   const payload = await requestJson(input.apiBase, "/v1/search/mixed", {
     method: "POST",
     body: {
@@ -225,6 +292,18 @@ export async function searchMixedAssets(input: {
       filters: {
         orientation: input.orientation || undefined,
         excluded_terms: input.excludedTerms?.length ? input.excludedTerms : undefined,
+        unused_only: input.usageMode === "unused_only" ? true : undefined,
+        prefer_unused: input.usageMode === "prefer_unused" ? true : undefined,
+        allow_reuse: input.usageMode === "unused_only"
+          ? false
+          : input.allowReuse,
+        used_in: input.usedIn
+          ? {
+              project_id: input.usedIn.projectId,
+              export_revision: input.usedIn.exportRevision ?? undefined,
+            }
+          : undefined,
+        residual_of: input.residualOf || undefined,
       },
       refinement: {
         mode: "auto",
@@ -242,13 +321,42 @@ export async function searchMixedAssets(input: {
       ? raw.data
       : [];
   const rawRefinement = asRecord(raw.refinement_job);
+  const derivativeRevision = requireCanonicalUsageRevision(raw.derivative_revision);
+  const results = usagePolicy === null
+    ? values.map((value) => normalizeMatch(value, {
+        requireCanonicalImageObservation: true,
+      })).filter((item) => item.id && item.asset_id)
+    : values.map((value) => normalizeMatch(value, {
+        requireCanonicalUsage: true,
+        requireCanonicalImageObservation: true,
+      }));
+  let usageRevision: string | null = null;
+  if (usagePolicy !== null) {
+    usageRevision = requireCanonicalUsageRevision(raw.usage_revision);
+    for (const match of results) {
+      requireUsagePolicyMatch(match, input, usagePolicy);
+      if (
+        isResidualCandidateId(match.id)
+        && match.residual_binding?.usage_revision !== usageRevision
+      ) {
+        throw new CanonicalUsageIntegrityError(
+          "a residual candidate belongs to another Usage revision.",
+        );
+      }
+    }
+  } else if (raw.usage_revision !== undefined && raw.usage_revision !== null) {
+    usageRevision = requireCanonicalUsageRevision(raw.usage_revision);
+  }
   return {
     object: asString(raw.object, "mixed.search"),
     schema_version: asString(raw.schema_version, "1"),
     id: asString(raw.id, `search-${Date.now()}`),
     status: asString(raw.status, "completed"),
-    results: values.map(normalizeMatch).filter((item) => item.id && item.asset_id),
+    results,
     candidate_count: asNumber(raw.candidate_count, values.length),
+    derivative_revision: derivativeRevision,
+    usage_revision: usageRevision,
+    usage_policy: usagePolicy,
     message: asNullableString(raw.message),
     refinement_job: Object.keys(rawRefinement).length > 0
       ? normalizeJob(rawRefinement)

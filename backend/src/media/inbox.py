@@ -162,12 +162,12 @@ class MediaInboxService:
         keyframe_id = row["representative_keyframe_id"]
         thumbnail_url = (
             f"/v1/assets/{row['id']}/thumbnail"
-            if kind == "image"
+            if kind == "image" and row["source_availability"] == "available"
             else f"/v1/keyframes/{keyframe_id}"
             if kind == "video" and keyframe_id
             else None
         )
-        return {
+        presented = {
             "id": str(row["id"]),
             "kind": kind,
             "filename": str(row["filename"]),
@@ -176,8 +176,15 @@ class MediaInboxService:
             "height": row["height"],
             "duration_ms": row["duration_ms"],
             "thumbnail_url": thumbnail_url,
+            "source_availability": row["source_availability"],
             "review": row["review"],
         }
+        if kind == "image":
+            presented["analysis_status"] = row["analysis_status"]
+            presented["canonical_image_observation"] = row[
+                "canonical_image_observation"
+            ]
+        return presented
 
     @staticmethod
     def _encode_cursor(sort_value: str, asset_id: str) -> str:

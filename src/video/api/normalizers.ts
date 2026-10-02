@@ -1,4 +1,5 @@
 import type {
+  CreativeAnalysisStatus,
   CreativeAssetMatch,
   CreativeProject,
   CreativeTimeline,
@@ -7,6 +8,92 @@ import type {
   RenderJob,
   RenderKind,
 } from "../types";
+import {
+  CanonicalUsageIntegrityError,
+  normalizeCanonicalUsageProjection,
+} from "../usage";
+import { normalizeAtlasCanonicalImageObservation } from "../../query/api";
+import {
+  isResidualCandidateId,
+  normalizeResidualBinding,
+} from "../residual";
+
+const ANALYSIS_STATUSES = new Set<CreativeAnalysisStatus>([
+  "current",
+  "pending",
+  "unknown",
+]);
+
+interface NormalizedAnalysisEvidence {
+  analysis_status: CreativeAnalysisStatus;
+  analysis_run_id: string | null;
+  analysis_revision: number | null;
+}
+
+function exactAnalysisRunId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 256
+    && !value.includes("\0")
+    && value === value.trim();
+}
+
+function exactAnalysisRevision(value: unknown): value is number {
+  return Number.isSafeInteger(value)
+    && (value as number) >= 1
+    && (value as number) <= 1_000_000;
+}
+
+function normalizeAnalysisEvidence(
+  raw: Record<string, unknown>,
+  resultType: CreativeAssetMatch["result_type"],
+  options: { requireCanonical: boolean },
+): NormalizedAnalysisEvidence {
+  const rawStatus = raw.analysis_status;
+  const statusIsMissing = rawStatus === undefined;
+  const statusIsSupported = ANALYSIS_STATUSES.has(rawStatus as CreativeAnalysisStatus);
+  const hasExactBinding = exactAnalysisRunId(raw.analysis_run_id)
+    && exactAnalysisRevision(raw.analysis_revision);
+  const hasExactNullBinding = raw.analysis_run_id === null
+    && raw.analysis_revision === null;
+
+  let status: CreativeAnalysisStatus;
+  if (statusIsSupported) {
+    status = rawStatus as CreativeAnalysisStatus;
+  } else if (statusIsMissing && resultType === "video_segment" && hasExactBinding) {
+    // Pre-analysis_status video responses already carried a closed run/revision binding.
+    status = "current";
+  } else {
+    // Missing image status must never promote an old or forged binding to current.
+    status = "unknown";
+  }
+
+  const evidenceIsCanonical = status === "current"
+    ? hasExactBinding
+    : hasExactNullBinding;
+  const legacyStatusIsAdmissible = !statusIsMissing
+    || (resultType === "video_segment" ? hasExactBinding : hasExactNullBinding);
+  if (options.requireCanonical && (!statusIsSupported && !statusIsMissing)) {
+    throw new CanonicalUsageIntegrityError("candidate analysis_status is invalid.");
+  }
+  if (options.requireCanonical && (!legacyStatusIsAdmissible || !evidenceIsCanonical)) {
+    throw new CanonicalUsageIntegrityError(
+      "candidate analysis status and canonical binding are inconsistent.",
+    );
+  }
+  if (!evidenceIsCanonical) {
+    return {
+      analysis_status: "unknown",
+      analysis_run_id: null,
+      analysis_revision: null,
+    };
+  }
+  return {
+    analysis_status: status,
+    analysis_run_id: status === "current" ? raw.analysis_run_id as string : null,
+    analysis_revision: status === "current" ? raw.analysis_revision as number : null,
+  };
+}
 
 export function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -90,20 +177,60 @@ export function normalizeJob(rawValue: unknown): MediaJob {
   };
 }
 
-export function normalizeMatch(rawValue: unknown): CreativeAssetMatch {
+export function normalizeMatch(
+  rawValue: unknown,
+  options: {
+    requireCanonicalUsage?: boolean;
+    requireCanonicalImageObservation?: boolean;
+  } = {},
+): CreativeAssetMatch {
   const raw = asRecord(rawValue);
   const resultType = asString(
     raw.result_type ?? raw.type,
     "image_asset",
   ) as CreativeAssetMatch["result_type"];
   const id = asString(raw.id ?? raw.segment_id ?? raw.asset_id);
-  return {
+  const analysisEvidence = normalizeAnalysisEvidence(raw, resultType, {
+    requireCanonical: options.requireCanonicalUsage === true,
+  });
+  if (options.requireCanonicalUsage && (
+    typeof raw.id !== "string"
+    || raw.id.length === 0
+    || raw.id !== id
+    || typeof raw.asset_id !== "string"
+    || raw.asset_id.length === 0
+    || raw.asset_id !== asString(raw.asset_id)
+    || typeof raw.asset_source_id !== "string"
+    || raw.asset_source_id.length === 0
+    || raw.asset_source_id !== asString(raw.asset_source_id)
+    || (raw.result_type !== "image_asset" && raw.result_type !== "video_segment")
+    || (
+      raw.result_type === "image_asset"
+      && (
+        raw.start_ms !== null
+        || raw.end_ms !== null
+      )
+    )
+    || (
+      raw.result_type === "video_segment"
+      && (
+        !Number.isSafeInteger(raw.start_ms)
+        || !Number.isSafeInteger(raw.end_ms)
+      )
+    )
+  )) {
+    throw new CanonicalUsageIntegrityError("candidate identity or source interval is invalid.");
+  }
+  const normalized: CreativeAssetMatch = {
     object: asString(raw.object, "creative_asset_match"),
     schema_version: asString(raw.schema_version, "1"),
     result_type: resultType,
     id,
     asset_id: asString(raw.asset_id, id),
+    asset_sha256: asNullableString(raw.asset_sha256),
     asset_source_id: asString(raw.asset_source_id ?? raw.source_id),
+    parent_segment_id: null,
+    residual_binding: null,
     filename: asNullableString(raw.filename),
     title: asNullableString(raw.title),
     start_ms: asNullableNumber(raw.start_ms),
@@ -115,11 +242,94 @@ export function normalizeMatch(rawValue: unknown): CreativeAssetMatch {
     matched_terms: asStringList(raw.matched_terms),
     score: asNumber(raw.score, 0),
     confidence: asNullableNumber(raw.confidence),
-    analysis_revision: asNullableNumber(raw.analysis_revision),
+    ...analysisEvidence,
+    canonical_image_observation: null,
     provenance: asStringList(raw.provenance),
     reasons: asStringList(raw.reasons),
     warnings: asStringList(raw.warnings),
+    usage: null,
   };
+  if (isResidualCandidateId(normalized.id)) {
+    if (
+      normalized.result_type !== "video_segment"
+      || typeof raw.parent_segment_id !== "string"
+    ) {
+      throw new CanonicalUsageIntegrityError(
+        "a residual candidate omitted its exact persisted parent segment.",
+      );
+    }
+    const binding = normalizeResidualBinding(raw.residual_binding, normalized);
+    if (
+      binding.parent_segment_id !== raw.parent_segment_id
+      || normalized.asset_sha256 !== binding.asset_sha256
+    ) {
+      throw new CanonicalUsageIntegrityError(
+        "a residual candidate contradicts its parent or asset binding.",
+      );
+    }
+    const thumbnail = asNullableString(raw.thumbnail_url ?? raw.poster_url);
+    if (thumbnail?.includes(encodeURIComponent(normalized.id))) {
+      throw new CanonicalUsageIntegrityError(
+        "a residual candidate attempted to resolve preview media through its synthetic identity.",
+      );
+    }
+    normalized.parent_segment_id = binding.parent_segment_id;
+    normalized.residual_binding = binding;
+  } else if (raw.parent_segment_id !== undefined || raw.residual_binding !== undefined) {
+    throw new CanonicalUsageIntegrityError(
+      "an ordinary candidate carries residual-only authority fields.",
+    );
+  }
+  if (resultType === "image_asset" && analysisEvidence.analysis_status === "current") {
+    try {
+      const observation = normalizeAtlasCanonicalImageObservation(
+        raw.canonical_image_observation,
+        normalized.asset_id,
+      );
+      if (
+        observation.analysis_binding.analysis_run_id !== normalized.analysis_run_id
+        || observation.analysis_binding.revision !== normalized.analysis_revision
+      ) {
+        throw new Error("analysis binding mismatch");
+      }
+      normalized.canonical_image_observation = observation;
+    } catch {
+      if (options.requireCanonicalImageObservation || options.requireCanonicalUsage) {
+        throw new CanonicalUsageIntegrityError(
+          "a current image result omitted its exact canonical observation.",
+        );
+      }
+    }
+  } else if (
+    resultType === "image_asset"
+    && options.requireCanonicalImageObservation
+  ) {
+    throw new CanonicalUsageIntegrityError(
+      "a non-current image cannot be selected as grounded evidence.",
+    );
+  }
+  const hasUsage = raw.usage !== undefined && raw.usage !== null;
+  if (options.requireCanonicalUsage && !hasUsage) {
+    throw new CanonicalUsageIntegrityError("a usage-aware result omitted usage.");
+  }
+  if (hasUsage) {
+    normalized.usage = normalizeCanonicalUsageProjection(raw.usage, normalized);
+    if (
+      normalized.residual_binding
+      && (
+        normalized.usage.media_kind !== "video"
+        || normalized.usage.used_intervals.length !== 0
+        || normalized.usage.residual_intervals.length !== 1
+        || normalized.usage.residual_intervals[0][0] !== normalized.start_ms
+        || normalized.usage.residual_intervals[0][1] !== normalized.end_ms
+      )
+    ) {
+      throw new CanonicalUsageIntegrityError(
+        "a residual candidate carries a non-residual Usage projection.",
+      );
+    }
+  }
+  return normalized;
 }
 
 export function normalizeProject(rawValue: unknown): CreativeProject {
@@ -164,7 +374,7 @@ export function normalizeProject(rawValue: unknown): CreativeProject {
         : null,
       applied_profile_fields: asStringList(brief.applied_profile_fields),
     },
-    candidates: candidates.map(normalizeMatch),
+    candidates: candidates.map((value) => normalizeMatch(value)),
     latest_timeline_id: asNullableString(raw.latest_timeline_id ?? latestTimeline.id),
     latest_timeline_revision: asNullableNumber(
       raw.latest_timeline_revision ?? latestTimeline.revision,

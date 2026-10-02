@@ -2,6 +2,7 @@ import type { BotConfig } from "./config.js";
 import { BackendClient } from "./backendClient.js";
 import { formatNextBatchReply, formatNoSessionReply, formatReply } from "./formatReply.js";
 import { resolveImageBatch } from "./imageResolver.js";
+import { requirePhotonProductionAction } from "./productionSurfaceRegistry.js";
 import { SessionStore } from "./sessionStore.js";
 import type { BotReply, IncomingMessage, SessionState } from "./types.js";
 
@@ -9,6 +10,7 @@ export type AgentDependencies = {
   config: BotConfig;
   backendClient: BackendClient;
   sessionStore: SessionStore;
+  requireMessageAdmission: (message: IncomingMessage) => void;
 };
 
 export function createAgent(dependencies: AgentDependencies) {
@@ -22,6 +24,10 @@ export async function handleIncomingMessage(
   message: IncomingMessage,
   dependencies: AgentDependencies,
 ): Promise<BotReply> {
+  // Do not let a direct/internal caller borrow the Discord adapter's authority.
+  // The real adapter mints an opaque, chat-bound admission only after applying
+  // the complete user/channel allowlist policy.
+  dependencies.requireMessageAdmission(message);
   dependencies.sessionStore.sweep();
 
   const text = message.text.trim();
@@ -44,6 +50,7 @@ export async function handleIncomingMessage(
   }
 
   if (isOriginalImageRequest(text) && session) {
+    requirePhotonProductionAction("photon_bot.discord.resolve_originals");
     const batch = resolveImageBatch(
       dependencies.config.imageLibraryDir,
       session.lastRelativePaths.slice(0, 2),
@@ -51,19 +58,21 @@ export async function handleIncomingMessage(
     );
     return {
       text: batch.imagePaths.length
-        ? "I sent the first two original images."
-        : "The previous results are still available, but the original image paths could not be resolved.",
+        ? "I sent sanitized JPEG copies of the first two matching images."
+        : "The previous results are still available, but the matching image paths could not be resolved safely.",
       imagePaths: batch.imagePaths,
     };
   }
 
   const effectiveQuery = buildEffectiveQuery(text, session);
+  requirePhotonProductionAction("photon_bot.discord.query_photos");
   const result = await dependencies.backendClient.queryPhotos({
     text: effectiveQuery,
     topK: dependencies.config.defaultTopK,
   });
 
   const relativePaths = result.data.map((item) => item.relative_path);
+  requirePhotonProductionAction("photon_bot.discord.resolve_originals");
   const initialBatch = resolveImageBatch(
     dependencies.config.imageLibraryDir,
     relativePaths,
@@ -88,6 +97,7 @@ function buildNextBatchReply(
   dependencies: AgentDependencies,
 ): BotReply {
   const remainingPaths = session.lastRelativePaths.slice(session.lastResultOffset);
+  requirePhotonProductionAction("photon_bot.discord.resolve_originals");
   const batch = resolveImageBatch(
     dependencies.config.imageLibraryDir,
     remainingPaths,
@@ -122,7 +132,12 @@ function isNextBatchRequest(text: string): boolean {
 
 function isOriginalImageRequest(text: string): boolean {
   const normalized = normalizeText(text);
-  return normalized.includes("sendfirsttwooriginals") || normalized.includes("sendfirst2originals");
+  return (
+    normalized === "sendfirsttwo" ||
+    normalized === "sendfirst2" ||
+    normalized.includes("sendfirsttwooriginals") ||
+    normalized.includes("sendfirst2originals")
+  );
 }
 
 function isRefinementFollowUp(text: string): boolean {

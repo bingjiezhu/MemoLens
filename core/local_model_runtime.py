@@ -5,12 +5,18 @@ import platform
 import re
 import shutil
 import subprocess
+from ipaddress import ip_address
 from dataclasses import dataclass
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 import requests
 
 from .config import VLMProfileCatalogEntry
+from .network_policy import require_offline_safe_url
+
+
+OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
 
 
 @dataclass(frozen=True)
@@ -198,9 +204,27 @@ def _run_command(command: list[str], *, timeout: int) -> str | None:
 
 def _is_ollama_reachable() -> bool:
     try:
-        response = requests.get("http://127.0.0.1:11434/api/tags", timeout=0.5)
+        parsed = urlsplit(OLLAMA_TAGS_URL)
+        address = ip_address(parsed.hostname or "")
+    except ValueError:
+        return False
+    if (
+        parsed.scheme != "http"
+        or not address.is_loopback
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.port is None
+    ):
+        return False
+    require_offline_safe_url(OLLAMA_TAGS_URL)
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        response = session.get(OLLAMA_TAGS_URL, timeout=0.5)
     except requests.RequestException:
         return False
+    finally:
+        session.close()
     return response.ok
 
 

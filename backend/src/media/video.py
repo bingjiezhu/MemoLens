@@ -21,7 +21,14 @@ from typing import Callable, Iterable, Sequence
 import numpy as np
 from PIL import Image, ImageStat
 
+from core.image_analysis_job_contract import ImageAnalysisJobContractError
+from core.image_analysis_persistence import ImageAnalysisPersistenceError
 from core.media_db import MediaRepository, new_id
+
+from .image_analysis import ImageAnalysisJobProcessor
+from .provider_egress import ProviderImageVisionEgress
+from .source_identity import PinnedMediaSource, open_pinned_media_source
+from .worker_admission import OneShotJobAdmissionAuthority, job_identity
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v"}
@@ -41,6 +48,18 @@ FFMPEG_TIMEOUT_SECONDS = 120
 MAX_SCAN_TIMEOUT_SECONDS = 60 * 60
 PROBE_TIMEOUT_SECONDS = 20
 ALLOWED_VIDEO_DEMUXERS = {"mov", "mp4", "m4a", "3gp", "3g2", "mj2"}
+MEDIA_JOB_KIND_REGISTRY = frozenset(
+    {"image_analysis", "library_scan", "video_index"}
+)
+MEDIA_JOB_IDENTITY_FIELDS = (
+    "id",
+    "database_uuid",
+    "kind",
+    "asset_id",
+    "analysis_run_id",
+    "attempt",
+    "created_at",
+)
 
 
 class MediaCapabilityError(RuntimeError):
@@ -228,13 +247,25 @@ def binary_capability(name: str) -> dict[str, object]:
     }
 
 
-def ffprobe(path: Path, binary: str | None = None) -> dict[str, object]:
+def ffprobe(
+    path: Path,
+    binary: str | None = None,
+    *,
+    pass_fds: tuple[int, ...] = (),
+) -> dict[str, object]:
     executable = binary or resolve_binary("ffprobe")
     if executable is None:
         raise MediaCapabilityError("ffprobe_missing", "ffprobe 6+ is required for video indexing.")
     if not binary_capability("ffprobe")["available"]:
         raise MediaCapabilityError("ffprobe_unsupported", "ffprobe 6+ is required for video indexing.")
     try:
+        run_options: dict[str, object] = {
+            "capture_output": True,
+            "timeout": PROBE_TIMEOUT_SECONDS,
+            "check": False,
+        }
+        if pass_fds:
+            run_options["pass_fds"] = pass_fds
         completed = subprocess.run(
             [
                 executable,
@@ -254,9 +285,7 @@ def ffprobe(path: Path, binary: str | None = None) -> dict[str, object]:
                 "0",
                 str(path),
             ],
-            capture_output=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
-            check=False,
+            **run_options,
         )
     except subprocess.TimeoutExpired as exc:
         raise MediaCapabilityError("ffprobe_timeout", "ffprobe timed out.") from exc
@@ -482,6 +511,7 @@ def scan_video_frames(
     duration_ms: int,
     ffmpeg_binary: str,
     cancel_requested: Callable[[], bool],
+    pass_fds: tuple[int, ...] = (),
 ) -> list[ScanFrame]:
     scan_dir = workspace / "scan"
     scan_dir.mkdir(parents=True, exist_ok=True)
@@ -516,7 +546,13 @@ def scan_video_frames(
         str(MAX_SCAN_FRAMES),
         str(output_pattern),
     ]
-    process = _start_process(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    process_options: dict[str, object] = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if pass_fds:
+        process_options["pass_fds"] = pass_fds
+    process = _start_process(argv, **process_options)
     deadline = time.monotonic() + MAX_SCAN_TIMEOUT_SECONDS
     while process.poll() is None:
         if cancel_requested():
@@ -667,58 +703,520 @@ def _copy_keyframe(frame: ScanFrame, cache_root: Path, segment_id: str) -> dict[
 
 
 class MediaJobRunner:
-    """One bounded local worker for video indexing; state lives in SQLite."""
+    """Closed dispatcher with one scan slot and one media-analysis slot."""
 
-    def __init__(self, repository: MediaRepository, cache_root: Path):
+    def __init__(
+        self,
+        repository: MediaRepository,
+        cache_root: Path,
+        *,
+        image_embedding_service: object | None = None,
+        image_provider_vision_egress: ProviderImageVisionEgress | None = None,
+    ):
+        from .library_scan import LibraryScanRunner
+
         self.repository = repository
         self.cache_root = cache_root.expanduser().resolve()
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memolens-media")
+        # A scan submits children before advancing its durable cursor. Keep its
+        # traversal off the analysis slot so committed children can become usable
+        # while later batches are still being discovered.
+        self._scan_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="memolens-library-scan")
         self._submitted: set[str] = set()
         self._lock = threading.Lock()
+        self._admission_authority = OneShotJobAdmissionAuthority()
+        self._image_processor = ImageAnalysisJobProcessor(
+            repository,
+            embedding_service=image_embedding_service,
+            provider_vision_egress=image_provider_vision_egress,
+        )
+        self._library_scan_processor = LibraryScanRunner(
+            repository,
+            submit_child=self.submit,
+        )
+        self._runtime_generation: str | None = None
+        self._active_image_library_root_id: str | None = None
+        self._shutting_down = False
+
+    def _library_scan_admission_identity(
+        self,
+        job_id: str,
+        *,
+        runtime_generation: str,
+        active_library_root_id: str,
+    ) -> tuple[str, ...] | None:
+        """Bind one dispatch ticket to the receipt, root, attempt, and cursor."""
+
+        from .library_scan import LibraryScanContext, LibraryScanContractError
+
+        try:
+            context = LibraryScanContext.from_mapping(
+                self.repository.get_library_scan_context(job_id)
+            )
+        except (LibraryScanContractError, RuntimeError, ValueError):
+            return None
+        if (
+            context.job_id != job_id
+            or context.database_uuid != self.repository.database_uuid
+            or context.library_root_id != active_library_root_id
+        ):
+            return None
+        checkpoint_sha256 = hashlib.sha256(
+            json.dumps(
+                context.checkpoint_value(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        return (
+            "memolens.library_scan_admission.v1",
+            context.job_id,
+            context.database_uuid,
+            context.request_id,
+            context.library_root_id,
+            str(context.canonical_root),
+            str(context.expected_library_root_device),
+            str(context.expected_library_root_inode),
+            context.root_permission_fingerprint,
+            str(context.attempt),
+            checkpoint_sha256,
+            runtime_generation,
+        )
+
+    def activate_runtime_generation(
+        self,
+        runtime_generation: str,
+        *,
+        active_library_root_id: str,
+    ) -> None:
+        """Bind this runner to one immutable RuntimeBundle and active Library."""
+
+        if (
+            not isinstance(runtime_generation, str)
+            or re.fullmatch(r"runtime_generation_[0-9a-f]{64}", runtime_generation)
+            is None
+        ):
+            raise ValueError("Image media runner requires an exact runtime generation ID.")
+        if (
+            not isinstance(active_library_root_id, str)
+            or re.fullmatch(r"root_[0-9a-f]{24}", active_library_root_id) is None
+        ):
+            raise ValueError("Image media runner requires one exact active Library root ID.")
+        with self._lock:
+            if self._runtime_generation not in {None, runtime_generation}:
+                raise RuntimeError("Media runner is already bound to another runtime generation.")
+            if self._active_image_library_root_id not in {
+                None,
+                active_library_root_id,
+            }:
+                raise RuntimeError("Media runner is already bound to another active Library.")
+            if self._shutting_down:
+                raise RuntimeError("Media runner is shutting down.")
+            self._runtime_generation = runtime_generation
+            self._active_image_library_root_id = active_library_root_id
+
+    def recover(self) -> None:
+        """Resume interrupted image authorities, then dispatch all admitted work."""
+
+        with self._lock:
+            runtime_generation = self._runtime_generation
+            active_library_root_id = self._active_image_library_root_id
+            shutting_down = self._shutting_down
+        if (
+            runtime_generation is None
+            or active_library_root_id is None
+            or shutting_down
+        ):
+            raise RuntimeError("Media runner must be activated before recovery.")
+        database_identity = self.repository.bind_image_database_identity()
+        for scan_job_id in self._library_scan_processor.recover(
+            runtime_generation_id=runtime_generation,
+            active_library_root_id=active_library_root_id,
+        ):
+            self.submit(scan_job_id)
+        for job in self.repository.list_media_jobs(active=True, limit=100_000):
+            job_id = str(job.get("id") or "")
+            if not job_id or bool(job.get("cancel_requested")):
+                continue
+            if job.get("kind") == "image_analysis":
+                try:
+                    binding = self.repository.get_image_analysis_job_binding(job_id)
+                except (
+                    ImageAnalysisJobContractError,
+                    ImageAnalysisPersistenceError,
+                ):
+                    continue
+                if (
+                    binding is None
+                    or binding.get("library_root_id") != active_library_root_id
+                ):
+                    continue
+                if job.get("status") == "interrupted":
+                    try:
+                        self.repository.resume_image_analysis_job(
+                            job_id,
+                            runtime_generation=runtime_generation,
+                            database_file_identity=database_identity,
+                            reason="process_recovery",
+                        )
+                    except (
+                        ImageAnalysisJobContractError,
+                        ImageAnalysisPersistenceError,
+                    ):
+                        # A non-retryable or stale authority stays explicit in
+                        # SQLite; recovery never rewrites it through generic APIs.
+                        continue
+                self.submit(job_id)
+                continue
+            # A video left interrupted by activation requires explicit resume,
+            # which advances its attempt and clears the previous error. Only
+            # newly queued work (for example a live scan child) may dispatch
+            # here; interrupted jobs are also included in active=True lists.
+            if job.get("kind") == "video_index" and job.get("status") == "queued":
+                self.submit(job_id)
 
     def shutdown(self) -> None:
         with self._lock:
             submitted = list(self._submitted)
+            self._shutting_down = True
+            runtime_generation = self._runtime_generation
         for job_id in submitted:
-            self.repository.request_media_job_cancel(job_id)
-        self._executor.shutdown(wait=True, cancel_futures=False)
+            job = self.repository.get_media_job(job_id)
+            if job is not None and job.get("kind") == "image_analysis":
+                if runtime_generation is None:
+                    continue
+                try:
+                    self.repository.interrupt_image_analysis_attempt(
+                        job_id,
+                        runtime_generation=runtime_generation,
+                        expected_attempt=int(job.get("attempt") or 0),
+                        detail="runtime_retired",
+                    )
+                except (
+                    ImageAnalysisJobContractError,
+                    ImageAnalysisPersistenceError,
+                ):
+                    # A newer runtime may already own a later attempt.  The old
+                    # runner must never cancel or mutate that authority.
+                    pass
+            elif job is not None and job.get("kind") == "library_scan":
+                if runtime_generation is None:
+                    continue
+                try:
+                    self._library_scan_processor.interrupt(
+                        job_id,
+                        runtime_generation_id=runtime_generation,
+                        active_library_root_id=str(
+                            self._active_image_library_root_id or ""
+                        ),
+                    )
+                except (OSError, RuntimeError, ValueError):
+                    pass
+            else:
+                self.repository.request_media_job_cancel(job_id)
+        try:
+            self._scan_executor.shutdown(wait=True, cancel_futures=False)
+        finally:
+            self._executor.shutdown(wait=True, cancel_futures=False)
 
     def submit(self, job_id: str) -> None:
+        job = self.repository.get_media_job(job_id)
+        kind = job.get("kind") if job is not None else None
+        admitted_statuses = (
+            {"queued"}
+            if kind in {"image_analysis", "library_scan"}
+            else {"queued", "interrupted"}
+        )
+        if (
+            job is None
+            or str(job.get("id") or "") != job_id
+            or str(job.get("database_uuid") or "") != self.repository.database_uuid
+            or job.get("status") not in admitted_statuses
+            or bool(job.get("cancel_requested"))
+        ):
+            return
         with self._lock:
-            if job_id in self._submitted:
+            runtime_generation = self._runtime_generation
+            active_library_root_id = self._active_image_library_root_id
+            if self._shutting_down:
                 return
+        if kind == "library_scan":
+            if runtime_generation is None or active_library_root_id is None:
+                return
+            identity = self._library_scan_admission_identity(
+                job_id,
+                runtime_generation=runtime_generation,
+                active_library_root_id=active_library_root_id,
+            )
+            if identity is None:
+                return
+        elif kind == "image_analysis":
+            if runtime_generation is None or active_library_root_id is None:
+                return
+            try:
+                binding = self.repository.get_image_analysis_job_binding(job_id)
+            except (
+                ImageAnalysisJobContractError,
+                ImageAnalysisPersistenceError,
+            ):
+                return
+            if binding is None:
+                return
+            if binding.get("runtime_generation") != runtime_generation:
+                raise ImageAnalysisPersistenceError(
+                    "image_runtime_generation_changed"
+                )
+            if binding.get("library_root_id") != active_library_root_id:
+                raise ImageAnalysisPersistenceError("image_library_scope_changed")
+            identity = job_identity(job, fields=MEDIA_JOB_IDENTITY_FIELDS)
+        else:
+            identity = job_identity(job, fields=MEDIA_JOB_IDENTITY_FIELDS)
+        with self._lock:
+            # Identity construction above can overlap runtime retirement. The
+            # final check, admission, and enqueue share the shutdown snapshot
+            # lock so no worker can be added after that snapshot is taken.
+            if self._shutting_down or job_id in self._submitted:
+                return
+            ticket = self._admission_authority.issue(job_id, identity)
             self._submitted.add(job_id)
-        self._executor.submit(self._run_and_release, job_id)
+            executor = self._scan_executor if kind == "library_scan" else self._executor
+            try:
+                executor.submit(self._run_and_release, job_id, ticket)
+            except Exception:
+                self._admission_authority.revoke(ticket)
+                self._submitted.discard(job_id)
+                raise
 
-    def _run_and_release(self, job_id: str) -> None:
+    def _run_and_release(self, job_id: str, admission_ticket: str) -> None:
         try:
-            self._run(job_id)
+            self._run(job_id, admission_ticket=admission_ticket)
         finally:
+            self._admission_authority.revoke(admission_ticket)
             with self._lock:
                 self._submitted.discard(job_id)
 
     def cancel(self, job_id: str) -> bool:
+        job = self.repository.get_media_job(job_id)
+        if job is not None and job.get("kind") == "library_scan":
+            with self._lock:
+                runtime_generation = self._runtime_generation
+                active_library_root_id = self._active_image_library_root_id
+            if runtime_generation is None or active_library_root_id is None:
+                return False
+            try:
+                self._library_scan_processor.cancel(
+                    job_id,
+                    runtime_generation_id=runtime_generation,
+                    active_library_root_id=active_library_root_id,
+                )
+            except (OSError, RuntimeError, ValueError):
+                return False
+            return True
         return self.repository.request_media_job_cancel(job_id)
 
-    def resume(self, job_id: str) -> bool:
+    def resume(self, job_id: str, *, submit: bool = True) -> bool:
+        job = self.repository.get_media_job(job_id)
+        if job is not None and job.get("kind") == "library_scan":
+            with self._lock:
+                active_library_root_id = self._active_image_library_root_id
+            if active_library_root_id is None:
+                return False
+            try:
+                self._library_scan_processor.resume(
+                    job_id,
+                    active_library_root_id=active_library_root_id,
+                )
+            except (OSError, RuntimeError, ValueError):
+                return False
+            self._submit_active_children_for_root(active_library_root_id)
+            if submit:
+                self.submit(job_id)
+            return True
+        if job is not None and job.get("kind") == "image_analysis":
+            with self._lock:
+                runtime_generation = self._runtime_generation
+                active_library_root_id = self._active_image_library_root_id
+            if runtime_generation is None or active_library_root_id is None:
+                return False
+            try:
+                binding = self.repository.get_image_analysis_job_binding(job_id)
+                if (
+                    binding is None
+                    or binding.get("library_root_id") != active_library_root_id
+                ):
+                    return False
+                self.repository.resume_image_analysis_job(
+                    job_id,
+                    runtime_generation=runtime_generation,
+                    database_file_identity=self.repository.bind_image_database_identity(),
+                    reason="explicit_resume",
+                )
+            except (
+                ImageAnalysisJobContractError,
+                ImageAnalysisPersistenceError,
+            ):
+                return False
+            self.submit(job_id)
+            return True
         if not self.repository.reset_media_job_for_resume(job_id):
             return False
         self.submit(job_id)
         return True
 
+    def _submit_active_children_for_root(self, library_root_id: str) -> None:
+        """Recover committed scan children before advancing the parent cursor."""
+
+        for child in self.repository.list_media_jobs(active=True, limit=100_000):
+            child_id = str(child.get("id") or "")
+            kind = child.get("kind")
+            if not child_id or kind not in {"image_analysis", "video_index"}:
+                continue
+            if kind == "image_analysis":
+                try:
+                    binding = self.repository.get_image_analysis_job_binding(child_id)
+                except (
+                    ImageAnalysisJobContractError,
+                    ImageAnalysisPersistenceError,
+                ):
+                    continue
+                if binding is None or binding.get("library_root_id") != library_root_id:
+                    continue
+            else:
+                asset = self.repository.get_asset(str(child.get("asset_id") or ""))
+                source = (
+                    self.repository.get_asset_source(
+                        str(asset.get("asset_source_id") or "")
+                    )
+                    if asset is not None
+                    else None
+                )
+                if source is None or source.get("library_root_id") != library_root_id:
+                    continue
+            self.submit(child_id)
+
     def _cancel_requested(self, job_id: str) -> bool:
         job = self.repository.get_media_job(job_id)
         return job is None or bool(job.get("cancel_requested"))
 
-    def _run(self, job_id: str) -> None:
+    def _open_job_source(self, asset: dict[str, object]) -> PinnedMediaSource:
+        source_record = self.repository.get_asset_source(str(asset.get("asset_source_id") or ""))
+        if (
+            source_record is None
+            or source_record.get("availability") != "available"
+            or str(source_record.get("asset_id") or "") != str(asset.get("id") or "")
+        ):
+            raise MediaCapabilityError("source_unavailable", "Video source is unavailable.")
+        try:
+            source = open_pinned_media_source(
+                library_root=Path(str(source_record["root_path"])),
+                relative_path=str(source_record["relative_path"]),
+                max_bytes=MAX_FILE_SIZE_BYTES,
+            )
+            expected = source.identity
+            if (
+                str(source_record.get("source_file_id") or "") != str(expected.inode)
+                or int(source_record.get("observed_size") or -1) != expected.size
+                or int(source_record.get("observed_mtime_ns") or -1) != expected.mtime_ns
+                or source.sha256() != str(asset.get("sha256") or "")
+            ):
+                raise ValueError("persisted source identity does not match the held file")
+            source.verify_current_identity()
+            return source
+        except (OSError, ValueError, RuntimeError) as exc:
+            if "source" in locals():
+                source.close()
+            raise MediaCapabilityError(
+                "source_changed",
+                "Video bytes or their approved Library binding changed after import; import it again.",
+            ) from exc
+
+    def _run(self, job_id: str, *, admission_ticket: object = None) -> None:
         job = self.repository.get_media_job(job_id)
+        kind = job.get("kind") if job is not None else None
+        if kind == "library_scan":
+            with self._lock:
+                runtime_generation = self._runtime_generation
+                active_library_root_id = self._active_image_library_root_id
+            if runtime_generation is None or active_library_root_id is None:
+                return
+            identity = self._library_scan_admission_identity(
+                job_id,
+                runtime_generation=runtime_generation,
+                active_library_root_id=active_library_root_id,
+            )
+            if identity is None:
+                return
+        else:
+            identity = job_identity(job or {}, fields=MEDIA_JOB_IDENTITY_FIELDS)
+        authority = getattr(self, "_admission_authority", None)
+        if authority is not None and not authority.consume(
+            admission_ticket,
+            job_id=job_id,
+            identity=identity,
+        ):
+            return
         if (
             job is None
-            or job.get("kind") != "video_index"
+            or str(job.get("id") or "") != job_id
+            or str(job.get("database_uuid") or "") != self.repository.database_uuid
             or job.get("status") not in {"queued", "interrupted"}
             or job.get("cancel_requested")
         ):
+            return
+        if kind not in MEDIA_JOB_KIND_REGISTRY:
+            self.repository.update_media_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                error={
+                    "code": "unknown_media_job_kind",
+                    "message": "The media job kind is not registered for production dispatch.",
+                },
+                finished=True,
+            )
+            return
+        if kind == "library_scan":
+            with self._lock:
+                runtime_generation = self._runtime_generation
+                active_library_root_id = self._active_image_library_root_id
+            if runtime_generation is None or active_library_root_id is None:
+                return
+            self._library_scan_processor.run(
+                job_id,
+                runtime_generation_id=runtime_generation,
+                active_library_root_id=active_library_root_id,
+                should_stop=lambda: self._shutting_down,
+            )
+            return
+        if kind == "image_analysis":
+            if job.get("status") != "queued":
+                return
+            with self._lock:
+                runtime_generation = self._runtime_generation
+                active_library_root_id = self._active_image_library_root_id
+            if runtime_generation is None or active_library_root_id is None:
+                return
+            try:
+                binding = self.repository.get_image_analysis_job_binding(job_id)
+            except (
+                ImageAnalysisJobContractError,
+                ImageAnalysisPersistenceError,
+            ):
+                return
+            if (
+                binding is None
+                or binding.get("runtime_generation") != runtime_generation
+                or binding.get("library_root_id") != active_library_root_id
+            ):
+                return
+            self._image_processor.run(
+                job_id,
+                runtime_generation=runtime_generation,
+                expected_attempt=int(job.get("attempt") or 0),
+                cancel_requested=lambda: self._cancel_requested(job_id),
+            )
             return
         asset_id = str(job.get("asset_id") or "")
         asset = self.repository.get_asset(asset_id)
@@ -732,14 +1230,16 @@ class MediaJobRunner:
             )
             return
         workspace: Path | None = None
+        pinned_source: PinnedMediaSource | None = None
         pending_keyframes: list[Path] = []
         committed = False
         try:
-            source = resolve_inside_root(Path(str(asset["root_path"])), str(asset["relative_path"]))
-            if sha256_file(source) != asset["sha256"]:
-                raise MediaCapabilityError("source_changed", "Video bytes changed after import; import it again.")
+            pinned_source = self._open_job_source(asset)
+            source = pinned_source.child_input_path
+            display_source = pinned_source.display_path
             self.repository.update_media_job(job_id, status="running", stage="probe", progress=0.05)
-            probe = ffprobe(source)
+            probe = ffprobe(source, pass_fds=pinned_source.pass_fds)
+            pinned_source.verify_current_identity()
             self.repository.update_asset_probe(asset_id, probe)
             if self._cancel_requested(job_id):
                 raise MediaCancelled("Video indexing was cancelled.")
@@ -757,11 +1257,13 @@ class MediaJobRunner:
                 duration_ms=int(probe["duration_ms"]),
                 ffmpeg_binary=ffmpeg_binary,
                 cancel_requested=lambda: self._cancel_requested(job_id),
+                pass_fds=pinned_source.pass_fds,
             )
+            pinned_source.verify_current_identity()
             revision = int(job.get("analysis_revision") or 1)
             boundaries = segment_boundaries(frames, int(probe["duration_ms"]))
             representatives = representatives_for_boundaries(frames, boundaries)
-            transcripts = parse_sidecar_subtitles(source, asset_id, revision)
+            transcripts = parse_sidecar_subtitles(display_source, asset_id, revision)
             segments: list[dict[str, object]] = []
             keyframes: list[dict[str, object]] = []
             self.repository.update_media_job(job_id, stage="segment", progress=0.65)
@@ -804,6 +1306,7 @@ class MediaJobRunner:
                     }
                 )
             self.repository.update_media_job(job_id, stage="commit", progress=0.9)
+            pinned_source.verify_current_identity()
             self.repository.commit_video_analysis(
                 job_id=job_id,
                 segments=segments,
@@ -856,6 +1359,8 @@ class MediaJobRunner:
                 finished=True,
             )
         finally:
+            if pinned_source is not None:
+                pinned_source.close()
             if workspace is not None:
                 shutil.rmtree(workspace, ignore_errors=True)
             if not committed:

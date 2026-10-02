@@ -4,6 +4,7 @@ import os
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from core.media_db import MediaRepository, sha256_path
@@ -21,6 +22,98 @@ class OutputTarget:
     directory: Path
     filename: str
     path: Path
+
+
+def _validate_export_grant(
+    repository: MediaRepository,
+    job: dict[str, object],
+) -> None:
+    """Read-only worker admission for the dormant legacy export profile.
+
+    Electron does not expose grant issuance for this lane.  Still, a durable
+    row that reaches the dispatcher must not turn a foreign, expired, revoked,
+    consumed, or scope-mismatched grant into filesystem/process authority.
+    """
+
+    grant_id = job.get("export_grant_id")
+    if not isinstance(grant_id, str) or not grant_id:
+        raise MediaCapabilityError(
+            "export_grant_required",
+            "Final export requires an Electron-issued export grant.",
+        )
+    try:
+        with repository.transaction() as connection:
+            current = connection.execute(
+                """SELECT j.*,t.project_id AS timeline_project_id
+                     FROM render_jobs AS j
+                     JOIN timelines AS t
+                       ON t.id=j.timeline_id AND t.revision=j.timeline_revision
+                    WHERE j.id=?""",
+                (str(job.get("id") or ""),),
+            ).fetchone()
+            grant = connection.execute(
+                "SELECT * FROM export_grants WHERE id=?",
+                (grant_id,),
+            ).fetchone()
+    except MediaCapabilityError:
+        raise
+    except Exception as exc:
+        raise MediaCapabilityError(
+            "export_grant_unavailable",
+            "The export grant cannot be verified by the active database.",
+        ) from exc
+
+    if current is None:
+        raise MediaCapabilityError(
+            "render_scope_changed",
+            "The durable render job binding changed before dispatch.",
+        )
+    immutable_fields = (
+        "id",
+        "database_uuid",
+        "timeline_id",
+        "timeline_revision",
+        "timeline_content_sha256",
+        "profile",
+        "output_root_id",
+        "export_grant_id",
+        "output_relative_path",
+        "attempt",
+        "created_at",
+    )
+    if any(current[field] != job.get(field) for field in immutable_fields):
+        raise MediaCapabilityError(
+            "render_scope_changed",
+            "The durable render job binding changed before dispatch.",
+        )
+    if grant is None:
+        raise MediaCapabilityError(
+            "export_grant_unavailable",
+            "The export grant is missing or no longer active.",
+        )
+    try:
+        expires_at = datetime.fromisoformat(str(grant["expires_at"]))
+    except (TypeError, ValueError) as exc:
+        raise MediaCapabilityError(
+            "export_grant_unavailable",
+            "The export grant is missing or no longer active.",
+        ) from exc
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if grant["status"] != "active" or expires_at <= datetime.now(timezone.utc):
+        raise MediaCapabilityError(
+            "export_grant_unavailable",
+            "The export grant is missing or no longer active.",
+        )
+    if not (
+        grant["output_root_id"] == job.get("output_root_id")
+        and grant["project_id"] == current["timeline_project_id"]
+        and grant["filename"] == job.get("output_relative_path")
+    ):
+        raise MediaCapabilityError(
+            "export_grant_scope_mismatch",
+            "The export grant is not bound to this timeline and native destination.",
+        )
 
 
 class _PublicationTransaction:
@@ -80,12 +173,26 @@ class _PublicationTransaction:
 
 def validate_output_target(repository: MediaRepository, job: dict[str, object]) -> OutputTarget:
     root_id = str(job["output_root_id"])
+    profile = str(job.get("profile") or "preview-low")
+    if profile == "export-1080p":
+        _validate_export_grant(repository, job)
     try:
         root, output_root = repository.validate_output_root(root_id)
     except ValueError as exc:
-        raise MediaCapabilityError("output_root_changed", "The app preview root identity changed.") from exc
-    if root["kind"] != "app_preview":
-        raise MediaCapabilityError("output_root_unavailable", "Preview requires the app output root.")
+        message = (
+            "The native export root identity changed."
+            if profile == "export-1080p"
+            else "The app preview root identity changed."
+        )
+        raise MediaCapabilityError("output_root_changed", message) from exc
+    expected_kind = "user_export" if profile == "export-1080p" else "app_preview"
+    if root["kind"] != expected_kind:
+        message = (
+            "Final export requires the native user-selected output root."
+            if profile == "export-1080p"
+            else "Preview requires the app output root."
+        )
+        raise MediaCapabilityError("output_root_unavailable", message)
     filename = str(job["output_relative_path"])
     if not filename or filename in {".", ".."} or any(value in filename for value in ("/", "\\", "\x00")):
         raise MediaCapabilityError("invalid_output_name", "Output must be one safe filename.")

@@ -15,7 +15,11 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
-from backend.src import DESKTOP_TOKEN_HEADER, create_app
+from backend.src import (
+    DESKTOP_TOKEN_HEADER,
+    create_app,
+    shutdown_runtime_extensions,
+)
 from backend.src.media.director import CreativeBriefError, CreativeDirector
 from backend.src.media.render import RenderJobRunner, _rotation_filters
 from backend.src.media.retrieval import MixedRetrievalService
@@ -35,6 +39,8 @@ from backend.src.media.video import (
 from core.config import Settings
 from core.db import ImageIndexRepository
 from core.media_db import MediaRepository, canonical_json
+from tests import test_timeline_lowering_integration as timeline_integration
+from tests.test_usage_brief_admission import _image_observation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -73,10 +79,7 @@ def _register(
 
 
 def _shutdown(app) -> None:
-    for key in ("media_job_runner", "render_job_runner"):
-        runner = app.extensions.get(key)
-        if runner is not None:
-            runner.shutdown()
+    shutdown_runtime_extensions(app.extensions)
 
 
 def _wait(repository: MediaRepository, job_id: str, timeout: float = 60) -> dict[str, object]:
@@ -120,18 +123,20 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="memolens-hardening-")
         self.root = Path(self.temporary.name).resolve()
+        self.db_path = self.root / "state" / "media.db"
         self.repository, self.library = _repository(self.root)
         self.root_id = str(self.repository.library_roots()[0]["id"])
 
     def tearDown(self) -> None:
+        self.repository.close()
         self.temporary.cleanup()
 
     def _fake_image(self, filename: str, content: bytes) -> dict[str, object]:
-        path = self.library / filename
-        path.write_bytes(content)
-        asset = _register(self.repository, self.root_id, path, kind="image")
-        self.repository.update_image_probe(str(asset["id"]), width=640, height=360)
-        return asset
+        return timeline_integration.TimelineLoweringIntegrationTests._register_image(
+            self,
+            filename,
+            content,
+        )
 
     def test_zero_score_is_not_grounding_and_constraints_cover_the_candidate_set(self) -> None:
         people = self._fake_image("people.jpg", b"people-image")
@@ -144,10 +149,17 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
             director.create_brief({"goal": "zzzz_nonexistent_42"})
         self.assertEqual(missing.exception.code, "no_grounded_matches")
 
+        selected_ids = [str(people["id"]), str(beach["id"])]
+        image_states = self.repository.canonical_image_consumer_states(selected_ids)
+        candidate_observations = [
+            image_states[asset_id]["canonical_image_observation"]
+            for asset_id in selected_ids
+        ]
         project, _ = director.create_brief(
             {
                 "goal": "people beach",
-                "candidate_refs": [people["id"], beach["id"]],
+                "candidate_refs": selected_ids,
+                "candidate_observations": candidate_observations,
                 "must_include": ["people", "beach"],
             }
         )
@@ -156,7 +168,8 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
             director.create_brief(
                 {
                     "goal": "people beach",
-                    "candidate_refs": [people["id"], beach["id"]],
+                    "candidate_refs": selected_ids,
+                    "candidate_observations": candidate_observations,
                     "must_exclude": ["people"],
                 }
             )
@@ -222,8 +235,14 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
                     "summary": "",
                     "combined_text": "",
                     "tags": [],
-                    "analysis_run_id": None,
-                    "analysis_revision": None,
+                    "analysis_run_id": "run-image-a",
+                    "analysis_revision": 1,
+                    "analysis_status": "current",
+                    "canonical_image_observation": _image_observation(
+                        "asset-image",
+                        analysis_run_id="run-image-a",
+                        analysis_revision=1,
+                    ),
                     "source_availability": "available",
                     "width": 640,
                     "height": 360,
@@ -260,7 +279,10 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
                         },
                         {**video, "id": "too-short", "start_ms": 0, "end_ms": 500},
                     ],
-                    {"asset-video": "run-current"},
+                    {
+                        "asset-image": "run-image-a",
+                        "asset-video": "run-current",
+                    },
                 )
 
         filters = {
@@ -302,6 +324,7 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
                 "confidence": None,
                 "analysis_run_id": "run-current",
                 "analysis_revision": 4,
+                "analysis_status": "current",
                 "score_components": {"lexical": 1.0, "semantic": None, "recency": 0.0},
                 "source_availability": "available",
                 "review": {
@@ -328,8 +351,9 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
                 "score": 1.0,
                 "grounded": True,
                 "confidence": None,
-                "analysis_run_id": None,
-                "analysis_revision": None,
+                "analysis_run_id": "run-image-a",
+                "analysis_revision": 1,
+                "analysis_status": "current",
                 "score_components": {"lexical": 1.0, "semantic": None, "recency": 0.0},
                 "source_availability": "available",
                 "review": {
@@ -338,7 +362,12 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
                     "favorite": False,
                     "project_ready": False,
                 },
-                "provenance": ["image_index"],
+                "provenance": ["canonical_image_analysis", "verified_image_projection"],
+                "canonical_image_observation": _image_observation(
+                    "asset-image",
+                    analysis_run_id="run-image-a",
+                    analysis_revision=1,
+                ),
             },
         ]
         self.assertEqual(
@@ -348,10 +377,16 @@ class RetrievalAndRepositoryHardeningTests(unittest.TestCase):
                 "schema_version": "1",
                 "status": "succeeded",
                 "query": "Beach Sunset",
-                "search_revision": "4abba978c53b2660845f844929512d37757b84264975d7677b3fd7204446d01e",
-                "analysis_heads": {"asset-video": "run-current"},
+                "search_revision": "82c74465058a521112b75a1b741189c31f8c59b87a32f2e0173f0debe5683430",
+                "derivative_revision": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "analysis_heads": {
+                    "asset-image": "run-image-a",
+                    "asset-video": "run-current",
+                },
                 "results": expected_results,
                 "data": expected_results,
+                "audit_results": [],
+                "audit_count": 0,
                 "candidate_count": 3,
                 "considered_count": 4,
                 "retrieval_mode": "lexical_local_fallback",
@@ -541,6 +576,7 @@ class RouteBoundaryHardeningTests(unittest.TestCase):
         mismatch = self.client.get(
             "/v1/media/capabilities",
             query_string={"db_path": str(self.root / "other.db")},
+            headers={DESKTOP_TOKEN_HEADER: self.token},
         )
         self.assertEqual(mismatch.status_code, 409)
         self.assertEqual(mismatch.json["code"], "database_binding_mismatch")
@@ -602,6 +638,7 @@ class RealRenderHardeningTests(unittest.TestCase):
         self.preview = self.repository.register_preview_root(self.root / "state" / "previews")
 
     def tearDown(self) -> None:
+        self.repository.close()
         self.temporary.cleanup()
 
     def _render(self, timeline: dict[str, object], filename: str) -> tuple[dict[str, object], Path]:
@@ -734,14 +771,15 @@ class RealRenderHardeningTests(unittest.TestCase):
             {"created_by": "test", "external_model": False},
         )
         timeline = TimelineService(self.repository).create_from_project(str(project["id"]))
-        source_path = video.resolve()
-        from core.media_db import sha256_path as real_sha256_path
+        from backend.src.media.source_identity import descriptor_sha256 as real_descriptor_sha256
 
-        with patch("backend.src.media.render.sha256_path", wraps=real_sha256_path) as digest:
+        with patch(
+            "backend.src.media.source_identity.descriptor_sha256",
+            wraps=real_descriptor_sha256,
+        ) as digest:
             finished, artifact = self._render(timeline, "short-audio-preview.mp4")
         self.assertEqual(finished["status"], "succeeded", finished.get("error"))
-        source_hashes = [call for call in digest.call_args_list if call.args and call.args[0] == source_path]
-        self.assertEqual(len(source_hashes), 1)
+        self.assertEqual(digest.call_count, 1)
         self.assertAlmostEqual(ffprobe(artifact)["duration_ms"], 6_000, delta=70)
 
     def test_fake_concat_mov_is_rejected_before_external_reference_can_open(self) -> None:

@@ -1,0 +1,228 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://memolens.local/schemas/production-surface-inventory-v1.schema.json",
+  "title": "MemoLens Production Surface Inventory v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "contract_version",
+    "inventory_sha256",
+    "negative_oracles",
+    "surface_verification",
+    "actions"
+  ],
+  "properties": {
+    "schema_version": {"const": "production-surface-inventory.v1"},
+    "contract_version": {"const": "3"},
+    "inventory_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "negative_oracles": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/negativeOracle"}
+    },
+    "surface_verification": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/surfaceVerification"}
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/action"}
+    }
+  },
+  "$defs": {
+    "surface": {
+      "enum": [
+        "electron_ipc",
+        "flask_http",
+        "mcp_tool",
+        "photon_bot",
+        "plugin_editor_action",
+        "plugin_editor_http",
+        "python_worker",
+        "render_profile"
+      ]
+    },
+    "owner": {
+      "enum": ["agent_plugin", "backend", "electron_main", "photon_bot"]
+    },
+    "effect": {
+      "enum": [
+        "egress",
+        "filesystem-read",
+        "filesystem-write",
+        "mutation",
+        "process-start",
+        "read"
+      ]
+    },
+    "authority": {
+      "enum": [
+        "agent-pairing",
+        "bot-allowlist",
+        "bootstrap-receipt",
+        "desktop-session",
+        "editor-boot-token",
+        "editor-session",
+        "electron-main",
+        "export-grant",
+        "idempotency-key",
+        "loopback-client",
+        "native-user-gesture",
+        "none",
+        "provider-credential",
+        "revision-cas",
+        "runtime-generation",
+        "source-identity",
+        "trusted-ipc-sender",
+        "worker-internal"
+      ]
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 400,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/<>-]*$"
+    },
+    "sortedUniqueIdentifiers": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/identifier"}
+    },
+    "resourceScope": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 400,
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "sortedUniqueResourceScopes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/resourceScope"}
+    },
+    "oracleClaim": {
+      "enum": [
+        "artifact-sanitization",
+        "authority-deny",
+        "branch-deny",
+        "offline-deny",
+        "registry-deny",
+        "scope-deny",
+        "surface-equality"
+      ]
+    },
+    "negativeOracle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "selector", "runner", "action_claims"],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "path": {"type": "string", "minLength": 1, "maxLength": 500},
+        "selector": {"type": "string", "minLength": 1, "maxLength": 500},
+        "runner": {"enum": ["node-test", "photon-test", "python-unittest"]},
+        "action_claims": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/actionClaims"}
+        }
+      }
+    },
+    "actionClaims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_id",
+        "authority_denials",
+        "claims",
+        "scope_denials"
+      ],
+      "properties": {
+        "action_id": {"$ref": "#/$defs/identifier"},
+        "authority_denials": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/authority"}
+        },
+        "claims": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/oracleClaim"}
+        },
+        "scope_denials": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/resourceScope"}
+        }
+      }
+    },
+    "network": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inbound", "outbound", "offline_policy"],
+      "properties": {
+        "inbound": {"enum": ["internal", "ipc", "loopback", "none", "platform", "stdio"]},
+        "outbound": {"enum": ["loopback", "none", "os-external", "provider"]},
+        "offline_policy": {"enum": ["allow", "deny"]}
+      }
+    },
+    "surfaceVerification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["surface", "mode", "status", "owner"],
+      "properties": {
+        "surface": {"$ref": "#/$defs/surface"},
+        "mode": {"enum": ["automatic", "static"]},
+        "status": {"enum": ["enforced", "pending_external_gate"]},
+        "owner": {"$ref": "#/$defs/owner"}
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "surface",
+        "owner",
+        "effects",
+        "authority",
+        "scope",
+        "network",
+        "contract_version",
+        "negative_tests"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "surface": {"$ref": "#/$defs/surface"},
+        "owner": {"$ref": "#/$defs/owner"},
+        "effects": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/effect"}
+        },
+        "authority": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/authority"}
+        },
+        "scope": {"$ref": "#/$defs/sortedUniqueResourceScopes"},
+        "network": {"$ref": "#/$defs/network"},
+        "contract_version": {"type": "string", "minLength": 1, "maxLength": 64},
+        "negative_tests": {"$ref": "#/$defs/sortedUniqueIdentifiers"}
+      }
+    }
+  }
+}

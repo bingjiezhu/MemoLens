@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 
 import { usePersistedAtlasBasket } from "./basket/usePersistedAtlasBasket";
+import { AgentDecisionAuthorityPanel } from "./blueprint/AgentDecisionAuthorityPanel";
 import { CreatorMemoryPanel } from "./creator/CreatorMemoryPanel";
 import { CreatorPreferenceContext } from "./creator/CreatorPreferenceContext";
 import {
@@ -61,13 +62,15 @@ import type {
   LocalModelRuntimeSummary,
   VlmProfileCatalogEntry,
 } from "./query/types";
+import { resolveIndexReadiness } from "./query/types";
 import { MediaInbox } from "./library/MediaInbox";
 import { fetchInbox } from "./library/api";
+import { resolveLocalApiBase } from "./localApiBase";
 
 const AtlasView = lazy(() => import("./AtlasView"));
 const VideoWorkbench = lazy(() => import("./VideoWorkbench"));
 
-const LOCAL_BACKEND_URL = "http://127.0.0.1:5519";
+const API_BASE = resolveLocalApiBase(import.meta.env.VITE_BACKEND_BASE_URL);
 
 type Workspace = "home" | "library" | "memories" | "create";
 type CreateMode = "photo" | "video";
@@ -291,7 +294,7 @@ function App() {
   const [isGeneratingInspirations, setIsGeneratingInspirations] = useState(false);
   const [aiInspirationError, setAiInspirationError] = useState<string | null>(null);
   const [isBasketOpen, setIsBasketOpen] = useState(false);
-  const apiBase = import.meta.env.VITE_BACKEND_BASE_URL ?? LOCAL_BACKEND_URL;
+  const apiBase = API_BASE;
   const [draft, setDraft] = useState<DraftResult>(() => createDraft(INITIAL_PROMPT));
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const [activePhotoId, setActivePhotoId] = useState<string | null>(draft.selected[0]?.id ?? null);
@@ -375,6 +378,9 @@ function App() {
     apiBase,
     prompt: effectivePrompt,
     contextAssetIds: basketAssetIds,
+    contextAssetObservations: basketItems.map(
+      (item) => item.canonicalImageObservation,
+    ),
     health,
     selectedImageLibraryDir: selectedFolderPath,
     selectedDbPath,
@@ -426,11 +432,6 @@ function App() {
     ?? (desktopLibraryConfigured ? health.dbPath : null)
     ?? "No database yet";
   const runtimeLabel = desktopRuntime ? "Desktop" : electronShell ? "Shell" : "Browser";
-  const canGenerateDraft = canUseMockMode || (
-    health.state === "connected"
-    && desktopLibraryConfigured
-    && Boolean(basketScope)
-  );
   const pipeline = createPipelineSteps(
     null,
     generationProgress.phase === "completed" ? DRAFT_PIPELINE_LENGTH : 0,
@@ -452,7 +453,18 @@ function App() {
         needsReindex: Boolean(scopedIndexStatus?.index_stats.needs_reindex),
       }
     : null;
-  const hasStaleIndex = Boolean(indexStats?.needsReindex);
+  const indexReadiness = resolveIndexReadiness(
+    scopedIndexStatusMatchesCurrent ? scopedIndexStatus?.index_stats : null,
+  );
+  const hasIndexedLibrary = scopedIndexStatusMatchesCurrent && indexReadiness.ready;
+  const scopedIndexCount = hasIndexedLibrary ? indexReadiness.recordCount : 0;
+  const canGenerateDraft = canUseMockMode || (
+    health.state === "connected"
+    && desktopLibraryConfigured
+    && Boolean(basketScope)
+    && hasIndexedLibrary
+  );
+  const hasStaleIndex = Boolean(indexReadiness.ready && indexStats?.needsReindex);
   const canDescribeScopedIndexHealth = scopedIndexStatusMatchesCurrent;
   const localModelRuntime = backendSettings?.local_model_runtime ?? null;
   const recommendedQueryProfile = findProfileEntry(
@@ -476,13 +488,19 @@ function App() {
       ? `Vision stays on this device using ${selectedVisionProfile.label}. If local vision is unavailable, MemoLens keeps a metadata-only local fallback.`
       : `Processed copies are sent to ${formatProviderName(selectedVisionProfile.provider)} for vision using the selected API profile. If credentials are unavailable or vision fails, MemoLens keeps a metadata-only local fallback.`
     : "Vision routing is not available to verify yet. If vision cannot run, MemoLens indexes a metadata-only fallback locally.";
-  const indexStatusLabel = scopedIndexStatusMatchesCurrent
-    ? (scopedIndexStatus?.index_stats.total_records ?? 0) > 0
-      ? hasStaleIndex
-        ? "Index needs rebuild"
-        : `Index ready · ${scopedIndexStatus?.index_stats.total_records ?? 0} photos`
-      : "Index empty"
-    : "Index status pending";
+  const indexStatusLabel = !scopedIndexStatusMatchesCurrent
+    ? "Index status pending"
+    : indexReadiness.mode === "unavailable" || indexReadiness.mode === "unknown"
+      ? `Canonical projection unavailable${indexReadiness.reasonCode ? ` · ${indexReadiness.reasonCode}` : ""}`
+      : indexReadiness.mode === "legacy"
+        ? indexReadiness.ready
+          ? `Legacy index · ${indexReadiness.recordCount} photos`
+          : "Legacy index empty"
+        : hasStaleIndex
+          ? "Index needs rebuild"
+          : indexReadiness.ready
+            ? `Index ready · ${indexReadiness.recordCount} photos`
+            : "Canonical projection ready · 0 photos";
 
   useEffect(() => {
     if ("scrollRestoration" in window.history) {
@@ -644,6 +662,10 @@ function App() {
                   fallbackRecords: nextBackendSettings.index_stats.fallback_records,
                   fallbackRatio: nextBackendSettings.index_stats.fallback_ratio,
                   needsReindex: nextBackendSettings.index_stats.needs_reindex,
+                  projectionReady: nextBackendSettings.index_stats.projection_ready ?? false,
+                  projectionStatus: nextBackendSettings.index_stats.projection_status ?? "unavailable",
+                  projectionReasonCode: nextBackendSettings.index_stats.projection_reason_code ?? null,
+                  projectionGenerationId: nextBackendSettings.index_stats.projection_generation_id ?? null,
                 }
               : undefined,
           });
@@ -956,7 +978,9 @@ function App() {
 
     setSettingsMessage(null);
     setIsSavingSettings(true);
-    const savedSettings = await saveDesktopSettings(desktopSettings);
+    const savedSettings = await saveDesktopSettings({
+      autoStartBackend: desktopSettings.autoStartBackend,
+    });
     if (savedSettings === null) {
       setSettingsMessage("Desktop settings are only available in the Electron app.");
       setIsSavingSettings(false);
@@ -980,21 +1004,6 @@ function App() {
       return;
     }
     await handlePickFolder();
-  }
-
-  function handleUseCurrentLibraryInSettings(): void {
-    if (desktopSettings === null || !selectedFolderPath) {
-      setSettingsMessage("Pick or index a library first, then copy it into the desktop settings.");
-      return;
-    }
-
-    setDesktopSettings({
-      ...desktopSettings,
-      libraryConfigured: true,
-      defaultLibraryDir: selectedFolderPath,
-      defaultDbPath: selectedDbPath ?? desktopSettings.defaultDbPath,
-    });
-    setSettingsMessage("Current library copied into the desktop settings. Save to persist it.");
   }
 
   async function handleSaveBackendSettings(): Promise<void> {
@@ -1129,66 +1138,18 @@ function App() {
     if (!selection) {
       return;
     }
-    let previousBackendSettings: BackendSettingsResponse;
-    try {
-      previousBackendSettings = backendSettings ?? await fetchBackendSettings(apiBase);
-    } catch (error) {
-      setSettingsMessage(
-        error instanceof Error
-          ? `The selected folder was not activated: ${error.message}`
-          : "The selected folder was not activated because local settings are unavailable.",
-      );
-      return;
-    }
-
-    let rebound: BackendSettingsResponse;
-    try {
-      rebound = await saveBackendSettings({
-        apiBase,
-        imageLibraryDir: selection.folderPath,
-        dbPath: selection.dbPath,
-        processImageWidth: previousBackendSettings.effective.process_image_width,
-        visionProfileName: previousBackendSettings.effective.vision_profile_name,
-        queryProfileName: previousBackendSettings.effective.query_profile_name,
-      });
-    } catch (error) {
-      setSettingsMessage(
-        error instanceof Error
-          ? `The selected folder was not activated: ${error.message}`
-          : "The selected folder was not activated because the local service could not bind it.",
-      );
-      return;
-    }
-
     let committedSettings: DesktopSettings | null = null;
     try {
-      committedSettings = await commitLocalLibrarySelection(selection);
+      committedSettings = await commitLocalLibrarySelection(selection.selectionTicket);
       if (committedSettings === null) {
         throw new Error("The desktop settings bridge is unavailable.");
       }
     } catch (commitError) {
-      let rollbackMessage = "The backend was restored to the previous library.";
-      try {
-        const restored = await saveBackendSettings({
-          apiBase,
-          imageLibraryDir: previousBackendSettings.effective.image_library_dir,
-          dbPath: previousBackendSettings.effective.db_path,
-          processImageWidth: previousBackendSettings.effective.process_image_width,
-          visionProfileName: previousBackendSettings.effective.vision_profile_name,
-          queryProfileName: previousBackendSettings.effective.query_profile_name,
-        });
-        setBackendSettings(restored);
-      } catch {
-        rollbackMessage = "The backend could not be restored automatically; retry the library selection.";
-        setBackendSettings(rebound);
-      }
       const detail = commitError instanceof Error ? commitError.message : "desktop commit failed";
-      setSettingsMessage(`The selected folder was not committed: ${detail} ${rollbackMessage}`);
-      setHealthRefreshKey((current) => current + 1);
+      setSettingsMessage(`The selected folder was not committed: ${detail}`);
       return;
     }
 
-    setBackendSettings(rebound);
     setSelectedFolderPath(selection.folderPath);
     setSelectedDbPath(selection.dbPath);
     setDesktopSettings(committedSettings);
@@ -1204,6 +1165,37 @@ function App() {
     setHasCompletedGeneration(false);
     setPhotoCreatorProvenance(null);
     pendingPhotoCreatorProvenanceRef.current = null;
+
+    let currentBackendSettings: BackendSettingsResponse;
+    try {
+      currentBackendSettings = backendSettings ?? await fetchBackendSettings(apiBase);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "local settings are unavailable";
+      setSettingsMessage(
+        `Library selection was approved, but the local service could not bind it yet: ${detail}`,
+      );
+      return;
+    }
+
+    let rebound: BackendSettingsResponse;
+    try {
+      rebound = await saveBackendSettings({
+        apiBase,
+        imageLibraryDir: selection.folderPath,
+        dbPath: selection.dbPath,
+        processImageWidth: currentBackendSettings.effective.process_image_width,
+        visionProfileName: currentBackendSettings.effective.vision_profile_name,
+        queryProfileName: currentBackendSettings.effective.query_profile_name,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "the local service rejected it";
+      setSettingsMessage(
+        `Library selection was approved, but the local service could not bind it yet: ${detail}`,
+      );
+      return;
+    }
+
+    setBackendSettings(rebound);
     setSettingsMessage("Library connected. You can index it now.");
   }
 
@@ -1230,8 +1222,6 @@ function App() {
     try {
       const result = desktopRuntime
         ? await startLocalIndexing({
-            folderPath: selectedFolderPath,
-            dbPath: selectedDbPath ?? undefined,
             reindex: hasStaleIndex,
           })
         : await startBackendIndexing({
@@ -1275,7 +1265,11 @@ function App() {
     setIndexingError(null);
     setIsIndexingControlPending(true);
     try {
-      const paused = await pauseLocalIndexing();
+      const operationId = indexingProgress?.operationId;
+      if (!operationId) {
+        throw new Error("The active indexing operation is no longer available.");
+      }
+      const paused = await pauseLocalIndexing(operationId);
       if (paused === null) {
         setIndexingError("This browser mode cannot pause local indexing. Please run the Electron app.");
       }
@@ -1290,7 +1284,11 @@ function App() {
     setIndexingError(null);
     setIsIndexingControlPending(true);
     try {
-      const resumed = await resumeLocalIndexing();
+      const operationId = indexingProgress?.operationId;
+      if (!operationId) {
+        throw new Error("The active indexing operation is no longer available.");
+      }
+      const resumed = await resumeLocalIndexing(operationId);
       if (resumed === null) {
         setIndexingError("This browser mode cannot resume local indexing. Please run the Electron app.");
       }
@@ -1312,12 +1310,6 @@ function App() {
     && !isIndexing
     && (desktopRuntime || health.state === "connected");
   const indexingActionLabel = hasStaleIndex ? "Rebuild index" : "Start indexing";
-  const hasIndexedLibrary = scopedIndexStatusMatchesCurrent
-    ? (scopedIndexStatus?.index_stats.total_records ?? 0) > 0
-    : false;
-  const scopedIndexCount = scopedIndexStatusMatchesCurrent
-    ? scopedIndexStatus?.index_stats.total_records ?? 0
-    : 0;
   const isScopedIndexStatusPending = Boolean(
     health.state === "connected"
       && currentDbScope
@@ -1355,11 +1347,13 @@ function App() {
   const visibleSuggestedQueries = atlasSuggestedQueries.slice(0, 4);
 
   async function handleGenerateInspirations(): Promise<void> {
-    if (health.state !== "connected" || !currentDbScope) {
+    if (health.state !== "connected" || !currentDbScope || !hasIndexedLibrary) {
       setAiInspirationError(
         health.state !== "connected"
           ? "Start the local service before asking AI for search ideas."
-          : "Choose a media folder before asking AI for search ideas.",
+          : !currentDbScope
+            ? "Choose a media folder before asking AI for search ideas."
+            : "A verified canonical projection must be active before asking AI for search ideas.",
       );
       return;
     }
@@ -1695,10 +1689,21 @@ function App() {
           ) : null}
 
           {indexStats && canDescribeScopedIndexHealth ? (
-            <p className={hasStaleIndex ? "inline-error" : "inline-note"}>
-              {hasStaleIndex
-                ? `Current SQLite index looks stale: ${formatPercent(indexStats.fallbackRatio)} of the ${indexStats.totalRecords} records still use filename-only fallback metadata. Rebuild the library once so ${selectedVisionProfile ? formatProviderName(selectedVisionProfile.provider) : "the configured vision profile"} can analyze the images again.`
-                : `Current SQLite index looks healthy: ${indexStats.totalRecords} records are available for retrieval.`}
+            <p
+              className={hasStaleIndex || !indexReadiness.ready ? "inline-error" : "inline-note"}
+              role={!indexReadiness.ready ? "alert" : undefined}
+            >
+              {indexReadiness.mode === "unavailable" || indexReadiness.mode === "unknown"
+                ? `Canonical projection unavailable${indexReadiness.reasonCode ? ` (${indexReadiness.reasonCode})` : ""}. Retrieval stays disabled until a verified projection is active.`
+                : indexReadiness.mode === "legacy"
+                  ? indexReadiness.ready
+                    ? `Legacy SQLite index: ${indexStats.totalRecords} records are available for retrieval in compatibility mode.`
+                    : "Legacy SQLite index is empty. Index the library before retrieval."
+                  : hasStaleIndex
+                    ? `Current SQLite index looks stale: ${formatPercent(indexStats.fallbackRatio)} of the ${indexStats.totalRecords} records still use filename-only fallback metadata. Rebuild the library once so ${selectedVisionProfile ? formatProviderName(selectedVisionProfile.provider) : "the configured vision profile"} can analyze the images again.`
+                    : indexReadiness.ready
+                      ? `Verified canonical projection: ${indexStats.totalRecords} records are available for retrieval.`
+                      : "Verified canonical projection is active but empty. Index the library before retrieval."}
             </p>
           ) : null}
           {scopedIndexStatusError ? (
@@ -1741,18 +1746,18 @@ function App() {
               {desktopSettings ? (
                 <article className="control-card">
                   <label className="settings-field">
-                    <span>Python command</span>
+                    <span>Managed Python runtime</span>
                     <input
                       className="settings-input"
                       type="text"
                       value={desktopSettings.pythonCommand}
-                      onChange={(event) =>
-                        setDesktopSettings({
-                          ...desktopSettings,
-                          pythonCommand: event.target.value,
-                        })
-                      }
+                      readOnly
+                      aria-readonly="true"
                     />
+                    <small className="settings-help">
+                      MemoLens pins Desktop to the project virtual environment. Run setup to repair
+                      or replace this managed runtime.
+                    </small>
                   </label>
 
                   <label className="toggle-field">
@@ -2015,14 +2020,6 @@ function App() {
             <button
               className="secondary-button"
               type="button"
-              onClick={() => handleUseCurrentLibraryInSettings()}
-              disabled={!desktopSettings || !selectedFolderPath}
-            >
-              Use current in desktop
-            </button>
-            <button
-              className="secondary-button"
-              type="button"
               onClick={() => handleUseCurrentLibraryInBackendSettings()}
               disabled={!backendSettings || !selectedFolderPath || !selectedDbPath}
             >
@@ -2037,6 +2034,8 @@ function App() {
             ) : null}
           </details>
         </section>
+
+        <AgentDecisionAuthorityPanel enabled={desktopRuntime} />
 
         <section className="section-block library-section" id="library">
           <div className="section-heading compact-heading">
@@ -2192,7 +2191,7 @@ function App() {
             apiBase={apiBase}
             imageLibraryDir={selectedFolderPath ?? health.imageLibraryDir ?? null}
             dbPath={selectedDbPath ?? health.dbPath ?? null}
-            canUseBackend={health.state === "connected"}
+            canUseBackend={health.state === "connected" && hasIndexedLibrary}
             refreshKey={atlasRefreshKey}
             onInspirationChange={handleAtlasInspirationChange}
             basketAssetIds={basketAssetIds}
@@ -2277,7 +2276,7 @@ function App() {
             apiBase={apiBase}
             imageLibraryDir={selectedFolderPath ?? health.imageLibraryDir ?? null}
             dbPath={selectedDbPath ?? health.dbPath ?? null}
-            canUseBackend={health.state === "connected"}
+            canUseBackend={health.state === "connected" && hasIndexedLibrary}
             desktopRuntime={desktopRuntime}
             indexedAssetCount={scopedIndexCount}
             creatorProfile={selectedCreatorProfile}
@@ -2360,7 +2359,7 @@ function App() {
               className="ai-inspire-button"
               type="button"
               onClick={() => void handleGenerateInspirations()}
-              disabled={isGeneratingInspirations || health.state !== "connected"}
+              disabled={isGeneratingInspirations || health.state !== "connected" || !hasIndexedLibrary}
             >
               {isGeneratingInspirations ? "Finding ideas…" : "Suggest ideas"}
             </button>
@@ -2389,7 +2388,12 @@ function App() {
                   className="secondary-button"
                   type="button"
                   onClick={() => void handleGenerateInspirations()}
-                  disabled={isGeneratingInspirations || health.state !== "connected" || !currentDbScope}
+                  disabled={
+                    isGeneratingInspirations
+                    || health.state !== "connected"
+                    || !currentDbScope
+                    || !hasIndexedLibrary
+                  }
                 >
                   Refresh ideas
                 </button>

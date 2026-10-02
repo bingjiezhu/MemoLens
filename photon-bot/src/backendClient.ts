@@ -1,4 +1,5 @@
 import type { BotConfig } from "./config.js";
+import { requireLocalServiceUrl } from "./networkPolicy.js";
 import type { QueryPhotosInput, RetrievalImage, RetrievalResponse } from "./types.js";
 
 export class BackendClient {
@@ -15,9 +16,11 @@ export class BackendClient {
 
   async queryPhotos(input: QueryPhotosInput): Promise<RetrievalResponse> {
     const url = `${this.config.backendBaseUrl}/v1/retrieval/query`;
+    requireLocalServiceUrl(url);
     const payload: Record<string, unknown> = {
       text: input.text,
       top_k: input.topK,
+      include_copy: false,
     };
 
     if (this.config.backendSendPathOverrides) {
@@ -33,6 +36,7 @@ export class BackendClient {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
+        redirect: "error",
         signal: AbortSignal.timeout(this.config.requestTimeoutMs),
       });
     } catch (error) {

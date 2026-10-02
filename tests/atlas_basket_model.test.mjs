@@ -36,9 +36,57 @@ function photo(id, overrides = {}) {
 }
 
 function atlasAsset(id, overrides = {}) {
+  const analysisBinding = {
+    analysis_run_id: `arun_${"1".repeat(32)}`,
+    revision: 7,
+    content_sha256: "2".repeat(64),
+  };
+  const projection = {
+    status: "current",
+    generation_id: "image_projection_generation_test",
+    processing_generation_id: "image_projection_generation_processing",
+    receipt_sha256: "3".repeat(64),
+    row_sha256: "4".repeat(64),
+    reason_code: null,
+  };
+  const stages = Object.fromEntries(
+    ["metadata", "geocode", "vision", "embedding", "quality"].map((name) => [
+      name,
+      {
+        status: "disabled",
+        provenance: {
+          producer_id: "memolens.image-worker",
+          producer_version: "1",
+          model_id: null,
+          model_version: null,
+          rule_id: "test-rule",
+          rule_version: "1",
+        },
+        output: null,
+        reason_code: "test_disabled",
+      },
+    ]),
+  );
   return {
     object: "atlas.asset",
     id,
+    asset_id: id,
+    analysis_status: "current",
+    analysis_binding: analysisBinding,
+    projection,
+    canonical_image_observation: {
+      object: "memolens.canonical_image_observation",
+      schema_version: "1",
+      status: "current",
+      authority: "canonical_image_analysis",
+      provenance_status: "verified_current",
+      asset_id: id,
+      analysis_binding: analysisBinding,
+      source_binding_sha256: "5".repeat(64),
+      projection,
+      stages,
+      reason_code: null,
+    },
     filename: `${id}.jpg`,
     relative_path: `nested/${id}.jpg`,
     title: `Atlas ${id}`,
@@ -130,11 +178,46 @@ test("Atlas conversion retains the existing query mapper and encoded preview con
     "http://127.0.0.1:5519/v1/library/previews/nested/atlas-1.jpg?width=1100&root_path=%2FUsers%2Fexample%2FMy+Photos",
   );
   assert.deepEqual(
+    converted.canonicalImageObservation,
+    asset.canonical_image_observation,
+  );
+  assert.deepEqual(
     basketItemFromSource(asset, 2, "http://127.0.0.1:5519/", "/Users/example/My Photos"),
     converted,
   );
   assert.deepEqual(
     basketItemFromSource(photo("photo-3"), 0, "ignored", null),
     basketItemFromPhotoAsset(photo("photo-3")),
+  );
+});
+
+test("Atlas basket conversion fails closed when current proof is missing or contradictory", () => {
+  const missing = atlasAsset("atlas-missing");
+  delete missing.canonical_image_observation;
+  assert.throws(
+    () => basketItemFromAtlasAsset(missing, 0, "", null),
+    /exact verified-current image observation/,
+  );
+
+  const forged = atlasAsset("atlas-forged");
+  forged.canonical_image_observation = {
+    ...forged.canonical_image_observation,
+    asset_id: "asset_other",
+  };
+  assert.throws(
+    () => basketItemFromAtlasAsset(forged, 0, "", null),
+    /exact verified-current image observation/,
+  );
+
+  const unavailable = atlasAsset("atlas-unavailable");
+  unavailable.analysis_status = "unknown";
+  unavailable.canonical_image_observation = {
+    ...unavailable.canonical_image_observation,
+    status: "unavailable",
+    provenance_status: "unavailable",
+  };
+  assert.throws(
+    () => basketItemFromAtlasAsset(unavailable, 0, "", null),
+    /exact verified-current image observation/,
   );
 });

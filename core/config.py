@@ -134,6 +134,40 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        return cls._from_environment_sources()
+
+    @classmethod
+    def for_bootstrap_candidate(
+        cls,
+        *,
+        image_library_dir: Path,
+        db_path: Path,
+    ) -> "Settings":
+        """Build one exact candidate without consulting persisted root/db settings.
+
+        Model/profile preferences remain normal application configuration, but
+        the two filesystem authorities are supplied by the native main-process
+        binding.  Keeping this as a separate constructor makes it impossible
+        for the candidate entrypoint to accidentally fall back to a default or
+        previously persisted Library.
+        """
+
+        canonical_library = image_library_dir.expanduser().resolve(strict=True)
+        if not canonical_library.is_dir():
+            raise ValueError("Bootstrap candidate Library must be an existing directory.")
+        canonical_database = db_path.expanduser().resolve(strict=False)
+        return cls._from_environment_sources(
+            image_library_dir_override=canonical_library,
+            db_path_override=canonical_database,
+        )
+
+    @classmethod
+    def _from_environment_sources(
+        cls,
+        *,
+        image_library_dir_override: Path | None = None,
+        db_path_override: Path | None = None,
+    ) -> "Settings":
         project_root = Path(__file__).resolve().parents[1]
         backend_root = project_root / "backend"
         frontend_root = project_root / "frontend"
@@ -164,21 +198,28 @@ class Settings:
         default_image_library_dir = _default_image_library_dir(project_root)
         default_db_path = app_state_dir / "storage" / "photo_index.db"
 
-        image_library_dir = Path(
-            (
-                persisted_settings.image_library_dir
-                or os.getenv("IMAGE_LIBRARY_DIR")
-                or str(app_config.get("image_library_dir", default_image_library_dir))
-            )
-        ).expanduser().resolve()
-        configured_db_path = app_config.get("sqlite_db_path")
-        resolved_db_path = (
-            persisted_settings.db_path
-            or os.getenv("SQLITE_DB_PATH")
-            or (str(configured_db_path) if configured_db_path else None)
-            or str(default_db_path)
+        image_library_dir = (
+            image_library_dir_override
+            if image_library_dir_override is not None
+            else Path(
+                (
+                    persisted_settings.image_library_dir
+                    or os.getenv("IMAGE_LIBRARY_DIR")
+                    or str(app_config.get("image_library_dir", default_image_library_dir))
+                )
+            ).expanduser().resolve()
         )
-        db_path = Path(resolved_db_path).expanduser().resolve()
+        configured_db_path = app_config.get("sqlite_db_path")
+        if db_path_override is not None:
+            db_path = db_path_override
+        else:
+            resolved_db_path = (
+                persisted_settings.db_path
+                or os.getenv("SQLITE_DB_PATH")
+                or (str(configured_db_path) if configured_db_path else None)
+                or str(default_db_path)
+            )
+            db_path = Path(resolved_db_path).expanduser().resolve()
         embedding_backend = os.getenv(
             "EMBEDDING_BACKEND",
             str(embedding_config.get("backend", SEMANTIC_HASH_BACKEND)),

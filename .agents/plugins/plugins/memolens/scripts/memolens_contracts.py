@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 import json
 import re
 from pathlib import Path
 from typing import Any
 
 
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.10.1"
 
 
 class MemoLensError(RuntimeError):
@@ -101,6 +102,184 @@ def compact_asset(raw: Any, library_dir: Path | None) -> dict[str, Any]:
         }
     asset.update(safe_absolute_path(raw.get("relative_path"), library_dir))
     return asset
+
+
+def compact_atlas_asset(raw: Any, library_dir: Path | None) -> dict[str, Any]:
+    """Preserve an already Core-verified Atlas observation without re-verifying it.
+
+    The plugin presenter has no canonical-image cryptographic authority.  It
+    only rejects a missing or internally contradictory envelope so the exact
+    Core observation cannot be stripped between Memories and the user.
+    """
+
+    if not isinstance(raw, dict):
+        raise MemoLensError(
+            "MemoLens Atlas omitted a verified-current image observation.",
+            code="canonical_image_observation_invalid",
+        )
+    asset_id = raw.get("id")
+    observation = _atlas_current_observation(
+        raw.get("canonical_image_observation"),
+        expected_asset_id=asset_id,
+    )
+    if (
+        raw.get("asset_id") != asset_id
+        or raw.get("analysis_status") != "current"
+        or raw.get("analysis_binding") != observation["analysis_binding"]
+        or raw.get("projection") != observation["projection"]
+    ):
+        raise MemoLensError(
+            "MemoLens Atlas returned contradictory current-image evidence.",
+            code="canonical_image_observation_invalid",
+        )
+    asset = compact_asset(raw, library_dir)
+    asset["asset_id"] = observation["asset_id"]
+    asset["analysis_status"] = "current"
+    asset["canonical_image_observation"] = observation
+    return asset
+
+
+def _atlas_current_observation(
+    value: Any,
+    *,
+    expected_asset_id: Any,
+) -> dict[str, Any]:
+    invalid = MemoLensError(
+        "MemoLens Atlas omitted a verified-current image observation.",
+        code="canonical_image_observation_invalid",
+    )
+    if (
+        not isinstance(expected_asset_id, str)
+        or not expected_asset_id
+        or len(expected_asset_id) > 200
+        or not isinstance(value, dict)
+        or set(value)
+        != {
+            "object",
+            "schema_version",
+            "status",
+            "authority",
+            "provenance_status",
+            "asset_id",
+            "analysis_binding",
+            "source_binding_sha256",
+            "projection",
+            "stages",
+            "reason_code",
+        }
+        or value.get("object") != "memolens.canonical_image_observation"
+        or value.get("schema_version") != "1"
+        or value.get("status") != "current"
+        or value.get("authority") != "canonical_image_analysis"
+        or value.get("provenance_status") != "verified_current"
+        or value.get("asset_id") != expected_asset_id
+        or not _is_sha256(value.get("source_binding_sha256"))
+        or value.get("reason_code") is not None
+    ):
+        raise invalid
+    binding = value.get("analysis_binding")
+    projection = value.get("projection")
+    if (
+        not isinstance(binding, dict)
+        or set(binding)
+        != {"analysis_run_id", "revision", "content_sha256"}
+        or not isinstance(binding.get("analysis_run_id"), str)
+        or not 1 <= len(binding["analysis_run_id"]) <= 200
+        or type(binding.get("revision")) is not int
+        or binding["revision"] < 1
+        or not _is_sha256(binding.get("content_sha256"))
+        or not isinstance(projection, dict)
+        or set(projection)
+        != {
+            "status",
+            "generation_id",
+            "processing_generation_id",
+            "receipt_sha256",
+            "row_sha256",
+            "reason_code",
+        }
+        or projection.get("status") != "current"
+        or not _bounded_text(projection.get("generation_id"))
+        or not _bounded_text(projection.get("processing_generation_id"))
+        or not _is_sha256(projection.get("receipt_sha256"))
+        or not _is_sha256(projection.get("row_sha256"))
+        or projection.get("reason_code") is not None
+    ):
+        raise invalid
+    stages = _atlas_observation_stages(value.get("stages"), invalid=invalid)
+    return {
+        "object": "memolens.canonical_image_observation",
+        "schema_version": "1",
+        "status": "current",
+        "authority": "canonical_image_analysis",
+        "provenance_status": "verified_current",
+        "asset_id": expected_asset_id,
+        "analysis_binding": dict(binding),
+        "source_binding_sha256": value["source_binding_sha256"],
+        "projection": dict(projection),
+        "stages": stages,
+        "reason_code": None,
+    }
+
+
+def _atlas_observation_stages(
+    value: Any,
+    *,
+    invalid: MemoLensError,
+) -> dict[str, Any]:
+    stage_names = {"metadata", "geocode", "vision", "embedding", "quality"}
+    statuses = {
+        "succeeded",
+        "partial",
+        "unsupported",
+        "disabled",
+        "failed",
+        "unknown",
+    }
+    provenance_fields = {
+        "producer_id",
+        "producer_version",
+        "model_id",
+        "model_version",
+        "rule_id",
+        "rule_version",
+    }
+    if not isinstance(value, dict) or set(value) != stage_names:
+        raise invalid
+    for stage in value.values():
+        if (
+            not isinstance(stage, dict)
+            or set(stage) != {"status", "provenance", "output", "reason_code"}
+            or stage.get("status") not in statuses
+            or not isinstance(stage.get("provenance"), dict)
+            or set(stage["provenance"]) != provenance_fields
+            or not _bounded_text(stage["provenance"].get("producer_id"))
+            or not _bounded_text(stage["provenance"].get("producer_version"))
+            or any(
+                item is not None and not _bounded_text(item)
+                for item in (
+                    stage["provenance"].get("model_id"),
+                    stage["provenance"].get("model_version"),
+                    stage["provenance"].get("rule_id"),
+                    stage["provenance"].get("rule_version"),
+                )
+            )
+            or (stage.get("output") is not None and not isinstance(stage["output"], dict))
+            or (
+                stage.get("reason_code") is not None
+                and not _bounded_text(stage["reason_code"])
+            )
+        ):
+            raise invalid
+    return deepcopy(value)
+
+
+def _bounded_text(value: Any) -> bool:
+    return isinstance(value, str) and 1 <= len(value) <= 200
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
 def parse_json_object(value: Any) -> dict[str, Any]:
@@ -275,11 +454,17 @@ def capabilities(
     *,
     legacy_search: bool,
     local_api_reads: bool,
+    blueprint_schema_available: bool,
 ) -> dict[str, bool]:
     database = database or {}
     media = bool(database.get("media_schema_available"))
     video = bool(database.get("video_search_available"))
     timelines = bool(database.get("timeline_read_available"))
+    project_list = bool(database.get("project_list_available"))
+    project_resume = bool(database.get("project_resume_available"))
+    project_history = bool(database.get("project_history_available"))
+    blueprint_read = bool(database.get("persisted_blueprint_read_available"))
+    blueprint_ledger = bool(database.get("blueprint_operation_ledger_available"))
     creator_context = bool(database.get("creator_context_available"))
     inbox = bool(database.get("inbox_available"))
     return {
@@ -295,11 +480,35 @@ def capabilities(
         "revise_timeline_draft": True,
         "validate_timeline": True,
         "read_timeline": timelines,
+        "list_projects": project_list,
+        "read_project_resume": project_resume,
+        "read_project_history": project_history,
+        "read_blueprint_shadow": bool(project_resume and blueprint_schema_available),
+        "validate_blueprint_candidate": blueprint_schema_available,
+        "read_persisted_blueprint": blueprint_read,
+        "read_blueprint_history": blueprint_ledger,
+        "read_blueprint_operation_ledger": blueprint_ledger,
+        "complete_project_history": False,
+        "request_agent_pairing_via_cli": True,
+        "write_blueprint_via_paired_cli": True,
+        "mcp_write_blueprint": False,
+        "confirm_blueprint_decisions": False,
         "creator_context": creator_context,
         "list_inbox": inbox,
+        "wiki_status": True,
+        "list_wiki_pages": media,
+        "search_wiki": bool(media and (legacy_search or video)),
+        "read_wiki_page": media,
+        "read_wiki_evidence": media,
+        "write_wiki": False,
+        "refine_wiki": False,
         "write_inbox_review": False,
         "write_creator_profile": False,
         "create_timeline": False,
+        "write_project": False,
+        # This key describes the safe-default/MCP gateway.  The separate CLI
+        # pairing protocol is advertised explicitly above and cannot widen it.
+        "write_blueprint": False,
         "save_timeline": False,
         "render_preview": False,
         "export_video": False,

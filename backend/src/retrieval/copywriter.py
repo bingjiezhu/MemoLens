@@ -17,6 +17,7 @@ from core.llm_utils import (
     request_minimax_chat_completion,
     request_vertex_generate_content,
 )
+from core.network_policy import network_target_enabled
 from core.schemas import GeneratedCopy, RetrievedImageSummary
 
 
@@ -63,7 +64,10 @@ class RetrievalCopywriter:
         image_library_dir: Path,
         image_limit: int = 0,
     ) -> GeneratedCopy:
-        if self.settings.vision_provider == "vertex" or self.settings.vision_api_key:
+        if (
+            network_target_enabled(self.settings.vision_base_url)
+            and (self.settings.vision_provider == "vertex" or self.settings.vision_api_key)
+        ):
             prepared_images = self._load_images(
                 retrieved_images=retrieved_images,
                 image_library_dir=image_library_dir,
@@ -92,7 +96,10 @@ class RetrievalCopywriter:
                 except Exception:
                     pass
 
-        if self.settings.query_provider == "vertex" or self.settings.query_api_key:
+        if (
+            network_target_enabled(self.settings.query_base_url)
+            and (self.settings.query_provider == "vertex" or self.settings.query_api_key)
+        ):
             try:
                 return self._generate_from_text_context(
                     query_text=query_text,

@@ -24,6 +24,55 @@ export interface PhotoAsset {
   imageUrl: string;
   score?: number;
   matchedTerms?: string[];
+  canonicalImageObservation?: AtlasCanonicalImageObservation;
+}
+
+export interface ImageAnalysisBinding {
+  analysis_run_id: string;
+  revision: number;
+  content_sha256: string;
+}
+
+export type ImageAnalysisStageName =
+  | "metadata"
+  | "geocode"
+  | "vision"
+  | "embedding"
+  | "quality";
+
+export interface CanonicalImageStageObservation {
+  status: "succeeded" | "partial" | "unsupported" | "disabled" | "failed" | "unknown";
+  provenance: {
+    producer_id: string;
+    producer_version: string;
+    model_id: string | null;
+    model_version: string | null;
+    rule_id: string | null;
+    rule_version: string | null;
+  };
+  output: Record<string, unknown> | null;
+  reason_code: string | null;
+}
+
+export interface AtlasCanonicalImageObservation {
+  object: "memolens.canonical_image_observation";
+  schema_version: "1";
+  status: "current";
+  authority: "canonical_image_analysis";
+  provenance_status: "verified_current";
+  asset_id: string;
+  analysis_binding: ImageAnalysisBinding;
+  source_binding_sha256: string;
+  projection: {
+    status: "current";
+    generation_id: string;
+    processing_generation_id: string;
+    receipt_sha256: string;
+    row_sha256: string;
+    reason_code: null;
+  };
+  stages: Record<ImageAnalysisStageName, CanonicalImageStageObservation>;
+  reason_code: null;
 }
 
 export type AtlasMode =
@@ -46,6 +95,11 @@ export type AtlasLens =
 export interface AtlasAsset {
   object: "atlas.asset";
   id: string;
+  asset_id: string;
+  analysis_status: "current";
+  analysis_binding: ImageAnalysisBinding;
+  projection: AtlasCanonicalImageObservation["projection"];
+  canonical_image_observation: AtlasCanonicalImageObservation;
   filename: string;
   relative_path: string;
   title: string;
@@ -382,22 +436,26 @@ export interface BackendHealth {
     fallbackRecords: number;
     fallbackRatio: number;
     needsReindex: boolean;
+    projectionReady: boolean;
+    projectionStatus: IndexProjectionStatus;
+    projectionReasonCode: string | null;
+    projectionGenerationId: string | null;
   };
 }
 
 export interface DesktopFolderSelection {
   folderPath: string;
   dbPath: string;
+  selectionTicket: string;
 }
 
 export interface DesktopIndexingStartOptions {
-  folderPath: string;
-  dbPath?: string;
   model?: string | null;
   reindex?: boolean;
 }
 
 export interface DesktopIndexingProgress {
+  operationId: string;
   phase: DesktopIndexingPhase;
   total: number;
   completed: number;
@@ -427,6 +485,10 @@ export interface DesktopSettings {
   libraryConfigured: boolean;
   defaultLibraryDir: string | null;
   defaultDbPath: string | null;
+}
+
+export interface DesktopSettingsUpdate {
+  autoStartBackend: boolean;
 }
 
 export interface DesktopBackendStatus {
@@ -490,16 +552,89 @@ export interface BackendSettingsResponse {
   available_vlm_profiles: string[];
   vlm_profile_catalog: VlmProfileCatalogEntry[];
   local_model_runtime: LocalModelRuntimeSummary;
-  index_stats?: IndexStats;
+  index_stats?: IndexStats | LegacyIndexStats;
 }
 
-export interface IndexStats {
+export type IndexProjectionStatus = "ready" | "unavailable" | "legacy";
+
+export interface IndexStatsBase {
   total_records: number;
   fallback_records: number;
   fallback_ratio: number;
   needs_reindex: boolean;
   aesthetic_records?: number;
   aesthetic_missing?: number;
+}
+
+export interface IndexStats extends IndexStatsBase {
+  projection_ready: boolean;
+  projection_status: IndexProjectionStatus;
+  projection_reason_code: string | null;
+  projection_generation_id: string | null;
+}
+
+/** Old settings payloads remain display-compatible but never grant scoped reads. */
+export interface LegacyIndexStats extends IndexStatsBase {
+  projection_ready?: undefined;
+  projection_status?: undefined;
+  projection_reason_code?: undefined;
+  projection_generation_id?: undefined;
+}
+
+export interface IndexReadiness {
+  mode: IndexProjectionStatus | "unknown";
+  ready: boolean;
+  recordCount: number;
+  reasonCode: string | null;
+  generationId: string | null;
+}
+
+export function resolveIndexReadiness(
+  stats: IndexStats | LegacyIndexStats | null | undefined,
+): IndexReadiness {
+  if (!stats) {
+    return {
+      mode: "unknown",
+      ready: false,
+      recordCount: 0,
+      reasonCode: null,
+      generationId: null,
+    };
+  }
+
+  const recordCount = Number.isFinite(stats.total_records)
+    ? Math.max(0, Math.trunc(stats.total_records))
+    : 0;
+  const reasonCode = stats.projection_reason_code?.trim() || null;
+  const generationId = stats.projection_generation_id?.trim() || null;
+
+  if (stats.projection_status === "legacy") {
+    return {
+      mode: "legacy",
+      ready: recordCount > 0,
+      recordCount,
+      reasonCode,
+      generationId,
+    };
+  }
+
+  if (stats.projection_status === "ready") {
+    return {
+      mode: "ready",
+      ready: stats.projection_ready === true && recordCount > 0,
+      recordCount,
+      reasonCode,
+      generationId,
+    };
+  }
+
+  return {
+    mode: stats.projection_status === "unavailable" ? "unavailable" : "unknown",
+    ready: false,
+    recordCount,
+    reasonCode,
+    generationId,
+  };
 }
 
 export interface ScopedIndexStatusResponse {

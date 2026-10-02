@@ -9,8 +9,6 @@ import os
 import sys
 from pathlib import Path
 
-from tqdm import tqdm
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_ROOT = PROJECT_ROOT / "backend"
@@ -19,8 +17,18 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+if not sys.flags.isolated:
+    print(
+        "MemoLens SQLite writers require isolated Python (-I); use "
+        "scripts/run_python.sh scripts/test_indexing.py.",
+        file=sys.stderr,
+    )
+    raise SystemExit(78)
+
+from core.sqlite_runtime import require_safe_sqlite_runtime  # noqa: E402
 from src import create_app  # noqa: E402
 from indexing.files import is_supported_image  # noqa: E402
+from tqdm import tqdm  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,6 +87,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    require_safe_sqlite_runtime()
 
     if args.config:
         os.environ["APP_CONFIG_PATH"] = args.config
