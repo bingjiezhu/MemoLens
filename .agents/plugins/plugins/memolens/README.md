@@ -33,6 +33,8 @@ When running DeepSeek Harness from a source checkout, use `pnpm dsh plugin --pro
 
 ## Start with an idea
 
+The 2026-10-02 isolated install/configuration smoke also passed with official DeepSeek Harness `0.2.0-rc.2`; this did not exercise a Web/model session. See the [compatibility boundary](deepseek-harness/README.md#compatibility-boundary) for exact scope.
+
 Try asking Codex or DeepSeek Harness:
 
 - “Find the strongest photo and video moments for a quiet one-minute travel story.”

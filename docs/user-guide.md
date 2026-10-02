@@ -8,7 +8,7 @@ Follow [Quick start](../README.md#quick-start). The setup script prepares Node, 
 
 Install the chosen [agent adapter](../.agents/plugins/plugins/memolens/README.md#install-a-host-adapter). Start a new Codex task, or restart DeepSeek Web, after installing an updated plugin. Data reads do not need a new MemoLens model account. Provider-backed visual analysis is a separate optional capability, and metadata fallback must not be described as visual understanding.
 
-The companion must stay running while scanning, pairing, editing or exporting. Closing the last macOS window can leave the app running; quitting the app shuts down workers safely. Reopen it to recover pending work. Do not expose port 5519 or the Browser editor port to the internet.
+The companion must stay running while scanning, pairing, editing or exporting. Closing the last macOS window can leave the app running; quitting the app shuts down workers safely. Reopen it to recover receipt-bound Library scans. Ordinary interrupted video jobs remain paused until you choose **Resume interrupted**; startup must not silently restart them. Do not expose port 5519 or the Browser editor port to the internet.
 
 ## Connect one Library
 
@@ -66,6 +66,7 @@ The older desktop 720p preview/Save As path is separate. Neither that path nor m
 | --- | --- |
 | SQLite runtime rejected | Run setup again or select a runtime that passes `scripts/check_sqlite_runtime.py`; do not remove the safety gate. |
 | Library scan stops after quit | Reopen the companion and query the same scan. Do not create a duplicate Library to restart it. |
+| A video job is Interrupted | Use **Resume interrupted** in the Video first-cut job list. Resume creates the next attempt; a completed scan does not mean all its child analyses succeeded. |
 | Plugin sees no current DB | Open the companion for the confirmed Library and restart the host. A missing binding or ambiguous managed DB must not silently select another database. |
 | No Timeline / Coverage gap | Open the exact project, inspect its Blueprint and evidence, and materialize only a current gap-free plan. |
 | Save blocked by expiry or restart | Re-pair the exact project/actions and request a fresh handoff. Previous saved revisions remain intact. |

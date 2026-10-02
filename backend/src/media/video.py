@@ -870,7 +870,11 @@ class MediaJobRunner:
                         continue
                 self.submit(job_id)
                 continue
-            if job.get("kind") == "video_index":
+            # A video left interrupted by activation requires explicit resume,
+            # which advances its attempt and clears the previous error. Only
+            # newly queued work (for example a live scan child) may dispatch
+            # here; interrupted jobs are also included in active=True lists.
+            if job.get("kind") == "video_index" and job.get("status") == "queued":
                 self.submit(job_id)
 
     def shutdown(self) -> None:

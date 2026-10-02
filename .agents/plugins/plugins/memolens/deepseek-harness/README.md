@@ -4,7 +4,9 @@ This directory documents the thin DeepSeek Harness adapter for MemoLens. The bun
 
 ## Compatibility boundary
 
-The adapter has been loader-validated against two DeepSeek Harness developer previews: the frozen `0.1.1-rc.2` snapshot at commit [`b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`](https://github.com/deepseek-ai/deepseek-harness/commit/b150a551b8d465e31e418e1b2eaf5e79bbb7d28e), and the `0.1.0-rc.5` source release at commit [`47f943859bef60e4160492346772ded9b24f765a`](https://github.com/deepseek-ai/deepseek-harness/commit/47f943859bef60e4160492346772ded9b24f765a). Both are developer previews and may make compatibility-breaking changes; unlisted snapshots require revalidation.
+On 2026-10-02, the official npm `@deepseek-ai/dsh@0.2.0-rc.2` also passed one isolated `plugin --profile web add` and `--profile web --dump-config` smoke check with Node 24.21.0 and pnpm 11.7.0. The composed configuration contained `dsh-memolens`, bundle root, stdio MCP, skill and prompt nodes; referenced client files and editor-button labels were present. This check did **not** start Web, a model/chat session or an MCP interaction, and therefore does not attest actual Web button mounting or a model-driven editor journey on 0.2.
+
+Historical loader baselines are the frozen `0.1.1-rc.2` snapshot at commit [`b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`](https://github.com/deepseek-ai/deepseek-harness/commit/b150a551b8d465e31e418e1b2eaf5e79bbb7d28e), and the `0.1.0-rc.5` source release at commit [`47f943859bef60e4160492346772ded9b24f765a`](https://github.com/deepseek-ai/deepseek-harness/commit/47f943859bef60e4160492346772ded9b24f765a). Developer previews may make compatibility-breaking changes; unlisted snapshots require revalidation.
 
 Loader and focused local validation do not prove a fresh DeepSeek model call, a real user-Library scan-worker journey, or editor readiness. Those remain separate host-acceptance gates.
 

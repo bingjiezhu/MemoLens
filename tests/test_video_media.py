@@ -14,7 +14,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1040,10 +1040,35 @@ class StartupRecoveryContractTests(unittest.TestCase):
 
             token = "startup-recovery-desktop-token"
             environment = _test_environment(root, library, token)
+            probe_entered = Event()
+            release_probe = Event()
+            submitted: list[str] = []
+            original_submit = MediaJobRunner.submit
+
+            def observe_submit(runner, job_id):
+                submitted.append(job_id)
+                return original_submit(runner, job_id)
+
+            def gated_probe(*_args, **_kwargs):
+                probe_entered.set()
+                if not release_probe.wait(5):
+                    raise RuntimeError("test video probe barrier timed out")
+                raise MediaCapabilityError("fixture_probe_stopped", "Controlled test probe completed.")
+
+            submission_patch = patch.object(MediaJobRunner, "submit", autospec=True, side_effect=observe_submit)
+            probe_patch = patch("backend.src.media.video.ffprobe", side_effect=gated_probe)
             environment.start()
-            app = create_app(Settings.from_env())
-            client = app.test_client()
+            submission_patch.start()
+            probe_patch.start()
+            app = None
             try:
+                app = create_app(Settings.from_env())
+                client = app.test_client()
+                # Recovery submission is synchronous; assert its absence before
+                # observing state. The event gate prevents a wrongly submitted
+                # worker from finishing fast enough to conceal the regression.
+                self.assertEqual(submitted, [], "Interrupted video work requires explicit resume.")
+                self.assertFalse(probe_entered.is_set())
                 recovered_repository = app.extensions["media_repository"]
                 recovered_media = recovered_repository.get_media_job(str(media_job["id"]))
                 recovered_render = recovered_repository.get_render_job(str(render_job["id"]))
@@ -1091,8 +1116,21 @@ class StartupRecoveryContractTests(unittest.TestCase):
                     return set()
 
                 self.assertFalse(keys(public_payload) & forbidden_keys)
+
+                self.assertTrue(app.extensions["media_job_runner"].resume(str(media_job["id"])))
+                self.assertTrue(probe_entered.wait(5), "Explicit resume never reached the video worker.")
+                resumed = recovered_repository.get_media_job(str(media_job["id"]))
+                self.assertEqual(submitted, [media_job["id"]])
+                self.assertEqual(resumed["status"], "running")
+                self.assertEqual(resumed["attempt"], int(media_job["attempt"]) + 1)
+                self.assertIsNone(resumed["error"])
+                self.assertEqual(recovered_repository.active_job_count(), 1)
             finally:
-                _shutdown_app(app)
+                release_probe.set()
+                if app is not None:
+                    _shutdown_app(app)
+                probe_patch.stop()
+                submission_patch.stop()
                 environment.stop()
 
 

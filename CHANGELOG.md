@@ -20,6 +20,7 @@ All notable changes to MemoLens are documented here. The project follows
 - Restored the public branch's managed database discovery, isolated verification paths, provider-aware copy and licensing metadata.
 - Preserved the earlier scan/analysis scheduling, byte-budget recovery, revision-bound preview URLs and delayed-media-error fixes.
 - Closed high-severity npm advisories through compatible dependency updates; expanded CI to include package and production-oracle checks.
+- Kept interrupted video jobs paused until explicit Resume, fixing a startup recovery race without removing the recovery-state assertions.
 
 ### Scope
 

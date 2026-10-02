@@ -17,6 +17,7 @@ Private libraries, databases, credentials, runtime caches and private conversati
 | A fresh bootstrap database lacked its managed image-index baseline on restart | Initialize the required image schema before canonical migration, retaining strict post-migration verification |
 | A plugin-created project could not be opened without renderer localStorage | Add an explicit project-ID entry, exact identity validation and stale-response protection |
 | Missing or ambiguous managed databases silently selected an unrelated older Library | Keep an unavailable explicit/native selection unavailable and stop at ambiguous higher-priority state |
+| Startup could silently restart an interrupted video and race its public recovery state | Preserve interrupted videos for explicit Resume; a deterministic event-barrier regression proves startup does not dispatch them |
 | A prior project's late validation or operation response could update a newly opened project | Bind callbacks to project, Timeline revision, scope epoch and request generation |
 | Renderer validators rejected the current Core image proof and clip fields, disabling native export | Validate the exact current image-analysis bindings in Coverage, Timeline and preview; add a production Python-to-TypeScript v1/v2 contract test |
 | The DeepSeek npm package omitted required JSON schemas | Include and verify the real packed payload, not only the source checkout |
@@ -27,6 +28,8 @@ The Browser editor retains the restored MemoLens light shell, muted sage accents
 ## Validation record
 
 Publication requires the exact candidate's GitHub CI checks to pass; see the repository Actions/PR checks for the commit-specific aggregate result. Local final-diff checks passed: 480 plugin tests, 197 Node tests, 148 renderer-model tests, 149 production-negative oracles, 37 Photon tests/build, real package closure (51 files, 3 schemas), typecheck/build, Python lint and dependency audits with no known vulnerabilities.
+
+Remote macOS validation additionally exposed an unsafe SQLite library bundled with setup-python and an interrupted-video recovery race. CI now prepares and attests Homebrew Python's actual SQLite; the application safety policy was not relaxed. The video fix preserved the original recovery assertions and passed 23 macOS-lane tests plus 48 related focused recovery tests locally. DeepSeek `0.2.0-rc.2` installation and composed configuration also passed in an isolated Node 24.21.0 environment, without starting a Web/model session.
 
 The first fresh-tree 1,113-test Core run exposed two public-branch integration mistakes: a retired legacy backfill was advertised again, and one Photon launcher bypassed the isolated Python runner. Both were corrected without weakening the boundary assertions; the complete 15-test setup module passed afterward. The strengthened creator journey and new production-to-renderer contract test also passed separately. These focused results do not replace the fresh CI aggregate gate.
 
