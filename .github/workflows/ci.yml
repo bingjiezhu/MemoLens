@@ -79,13 +79,15 @@ jobs:
         working-directory: photon-bot
       - run: npm run lint:python
       - run: npm run audit:deps
-      - run: npm run test:unit
-      - run: npm run test:plugin
+      # Fail fast on clean-checkout/runtime assumptions before the long Core
+      # suite. Every gate still runs; reordering does not replace any coverage.
+      - run: npm run test:electron
+      - run: npm run build
+      - run: npm run test:smoke
       - run: npm run test:plugin-package
       - run: npm run test:production-oracles
-      - run: npm run test:smoke
-      - run: npm run build
-      - run: npm run test:electron
+      - run: npm run test:unit
+      - run: npm run test:plugin
 
   plugin-python310:
     name: Read-only stdlib plugin compatibility (Python 3.10)

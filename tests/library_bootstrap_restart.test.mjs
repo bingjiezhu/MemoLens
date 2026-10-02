@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 
 import { commitLibraryBootstrapCandidate, getDesktopSessionToken, matchesLibraryBootstrapRuntime, probeBackendHealthV2 } from "../electron-dist/electron/backendManager.js";
-import { commitBootstrapLibraryProjection, managedPythonCommand } from "../electron-dist/electron/desktopSettings.js";
+import { commitBootstrapLibraryProjection } from "../electron-dist/electron/desktopSettings.js";
 import { runDesktopStartupRoute } from "../electron-dist/electron/desktopStartupRouter.js";
 import { LibraryBootstrapBindingStore } from "../electron-dist/electron/libraryBootstrapBinding.js";
 import { LibraryBootstrapBroker, LibraryBootstrapRequestSpool } from "../electron-dist/electron/libraryBootstrapBroker.js";
@@ -17,6 +17,13 @@ import { LibrarySelectionAuthority, NativeLibrarySelectionCoordinator } from "..
 
 test("fresh bootstrap survives shutdown and normal restart with the same database and plugin scan", { timeout: 90_000 }, async (context) => {
   const project = resolve(import.meta.dirname, "..");
+  const runtime = spawnSync("bash", [join(project, "scripts/run_python.sh"), "-c", "import sys; print(sys.executable)"], {
+    cwd: project, env: process.env, encoding: "utf8", timeout: 20_000,
+  });
+  assert.ifError(runtime.error);
+  assert.equal(runtime.status, 0, runtime.stderr || runtime.stdout);
+  const python = runtime.stdout.trim();
+  assert.ok(python, "Python runtime resolver returned no executable");
   const fixture = await realpath(await mkdtemp(join(tmpdir(), "memolens-bootstrap-restart-")));
   const stateDir = join(fixture, "state");
   const library = join(fixture, "empty-library");
@@ -40,16 +47,16 @@ test("fresh bootstrap survives shutdown and normal restart with the same databas
     MEMOLENS_PLUGIN_TRUST_LOCAL_API: "0",
   };
   for (const key of ["MEMOLENS_DB_PATH", "MEMOLENS_LIBRARY_DIR", "MEMOLENS_BOOTSTRAP_REQUEST_ID", "SQLITE_DB_PATH", "IMAGE_LIBRARY_DIR"]) delete env[key];
-  const python = process.env.MEMOLENS_PYTHON || managedPythonCommand(project);
   const cli = join(project, ".agents/plugins/plugins/memolens/scripts/memolens_cli.py");
   let child = null;
   let output = "";
   function plugin(...args) {
     const result = spawnSync(python, [cli, ...args], { cwd: project, env, encoding: "utf8", timeout: 20_000 });
+    assert.ifError(result.error);
     assert.equal(result.status, 0, result.stderr || result.stdout);
     return JSON.parse(result.stdout);
   }
-  function start(requestId = null) {
+  async function start(requestId = null) {
     output = "";
     child = spawn(python, ["-I", "-u", "backend/app.py"], {
       cwd: project, env: { ...env, ...(requestId === null ? {} : { MEMOLENS_BOOTSTRAP_REQUEST_ID: requestId }) },
@@ -57,9 +64,10 @@ test("fresh bootstrap survives shutdown and normal restart with the same databas
     });
     child.stdout.on("data", (data) => { output = (output + data).slice(-12_000); });
     child.stderr.on("data", (data) => { output = (output + data).slice(-12_000); });
+    await once(child, "spawn");
   }
   async function stop() {
-    if (child === null || child.exitCode !== null || child.signalCode !== null) return;
+    if (child === null || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
     const current = child;
     const exited = once(current, "exit");
     current.kill("SIGTERM");
@@ -87,7 +95,7 @@ test("fresh bootstrap survives shutdown and normal restart with the same databas
     const coordinator = new LibraryBootstrapCoordinator({
       bindingStore: new LibraryBootstrapBindingStore({ stateDir }), authority,
       async ensureCandidate(envelope) {
-        start(envelope.request_id);
+        await start(envelope.request_id);
         assert.ok(matchesLibraryBootstrapRuntime(await health(), {
           mode: "bootstrap_candidate", requestId: envelope.request_id,
           candidateBindingSha256: envelope.candidate_binding_sha256,
@@ -127,7 +135,7 @@ test("fresh bootstrap survives shutdown and normal restart with the same databas
     const saved = JSON.parse(await readFile(join(stateDir, "backend-settings.json"), "utf8"));
     assert.equal(saved.image_library_dir, library);
     await stop();
-    start(); // No bootstrap request ID and no explicit database/library override.
+    await start(); // No bootstrap request ID and no explicit database/library override.
     const restarted = await health();
     assert.equal(restarted.mode, "active");
     assert.equal(restarted.bootstrap_request_id, null);
@@ -144,7 +152,7 @@ test("fresh bootstrap survives shutdown and normal restart with the same databas
     assert.equal(status.database.library_scan.status, "succeeded", JSON.stringify(status.database.library_scan));
     assert.equal(status.database.library_scan.no_supported_media, true);
     await stop();
-    start();
+    await start();
     assert.equal((await health()).database_uuid, activeIdentity.database_uuid);
     assert.equal(plugin("status").database.library_scan.status, "succeeded");
     const databases = (await readdir(join(stateDir, "storage"))).filter((name) => name.endsWith(".db"));
