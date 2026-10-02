@@ -139,23 +139,25 @@ jobs:
   macos-desktop-runtime:
     name: macOS desktop runtime
     runs-on: macos-14
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.14"
-      - name: Admit source SQLite WAL runtime
-        run: >-
-          env -u PYTHONPATH -u PYTHONHOME -u PYTHONINSPECT
-          -u PYTHONSTARTUP -u PYTHONUSERBASE
-          python -I scripts/check_sqlite_runtime.py --json
+      # setup-python 3.14.7 on this runner links SQLite 3.50.4, which fails
+      # admission. Homebrew Python links its maintained SQLite dependency.
+      # Attest the actual library rather than bypassing or mocking the gate.
+      - name: Prepare admitted Homebrew Python
+        run: |
+          brew install python@3.14 sqlite
+          python_bin="$(brew --prefix python@3.14)/bin/python3.14"
+          env -u PYTHONPATH -u PYTHONHOME -u PYTHONINSPECT \
+            -u PYTHONSTARTUP -u PYTHONUSERBASE \
+            "${python_bin}" -I scripts/check_sqlite_runtime.py --json
+          "${python_bin}" -m venv .venv
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
       - run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
-      - run: python -m venv .venv
       - run: >-
           env -u PYTHONPATH -u PYTHONHOME -u PYTHONINSPECT
           -u PYTHONSTARTUP -u PYTHONUSERBASE

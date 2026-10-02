@@ -243,7 +243,7 @@ class SQLiteSetupBoundaryTests(unittest.TestCase):
             encoding="utf-8"
         )
         calls = re.findall(
-            r"(?:python|\.venv/bin/python)(?:\s+-I)?\s+scripts/check_sqlite_runtime\.py",
+            r'(?:python|\.venv/bin/python|"\$\{python_bin\}")(?:\s+-I)?\s+scripts/check_sqlite_runtime\.py',
             workflow,
         )
 
@@ -332,6 +332,16 @@ class SQLiteSetupBoundaryTests(unittest.TestCase):
                 for command in package["scripts"].values()
             )
         )
+
+    def test_macos_ci_attests_homebrew_sqlite_before_creating_venv(self) -> None:
+        workflow = (PROJECT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        macos = workflow.split("  macos-desktop-runtime:", 1)[1]
+        self.assertIn("brew install python@3.14 sqlite", macos)
+        self.assertIn('python_bin="$(brew --prefix python@3.14)/bin/python3.14"', macos)
+        admission = macos.index('"${python_bin}" -I scripts/check_sqlite_runtime.py --json')
+        environment = macos.index('"${python_bin}" -m venv .venv')
+        self.assertLess(admission, environment)
+        self.assertIn(".venv/bin/python -I scripts/check_sqlite_runtime.py --json", macos)
 
     def test_quality_backfill_admission_failure_has_zero_database_side_effects(self) -> None:
         from scripts import backfill_image_quality
