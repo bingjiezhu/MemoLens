@@ -8,25 +8,26 @@
   <style>
     :root {
       color-scheme: light;
-      --bg: #f5f5f7;
-      --panel: rgba(255, 255, 255, .82);
+      --bg: #f4f4f0;
+      --panel: #fffefa;
       --line: rgba(29, 29, 31, .1);
       --line-strong: rgba(29, 29, 31, .18);
       --text: #1d1d1f;
-      --muted: #6e6e73;
+      --muted: #686d67;
       --sage: #587265;
       --accent: #426b5a;
       --accent-soft: #e8f0eb;
       --gold: #8c7048;
       --warm: #f8f6f1;
-      --shadow: 0 12px 38px rgba(25, 35, 29, .045);
+      --shadow: 0 5px 22px rgba(25, 35, 29, .035);
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
       color: var(--text);
       background: var(--bg);
     }
     * { box-sizing: border-box; }
-    body { margin: 0; min-width: 320px; min-height: 100vh; background: radial-gradient(circle at 78% 0%, rgba(111, 145, 127, .1), transparent 36%), linear-gradient(180deg, #fbfbfd, var(--bg) 50%, #f1f1f3); }
+    body { margin: 0; min-width: 320px; min-height: 100vh; background: radial-gradient(circle at 78% 0%, rgba(111, 145, 127, .07), transparent 36%), var(--bg); }
     [hidden] { display: none !important; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
     button, input, select, output { font: inherit; }
     button, select, input {
       border: 1px solid var(--line-strong);
@@ -34,13 +35,13 @@
       color: inherit;
       background: rgba(255, 255, 255, .8);
     }
-    button { min-height: 34px; padding: .45rem .7rem; font-size: .8rem; font-weight: 550; cursor: pointer; transition: background 140ms, border-color 140ms, box-shadow 140ms; }
+    button { min-height: 40px; padding: .5rem .75rem; font-size: .8rem; font-weight: 550; cursor: pointer; transition: background 140ms, border-color 140ms, box-shadow 140ms; }
     button:hover:not(:disabled) { border-color: #9cac9f; background: #f1f5f2; }
     button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid #b5c8bb; outline-offset: 3px; }
     button:disabled { cursor: not-allowed; opacity: .46; }
     input, select { min-height: 2.25rem; min-width: 0; max-width: 100%; padding: .4rem .55rem; font-size: .84rem; }
-    main { width: min(1200px, calc(100% - 2rem)); min-width: 0; margin: 0 auto; padding: .85rem 0 3rem; }
-    .brand-bar { display: flex; justify-content: space-between; align-items: center; gap: 1rem; min-height: 62px; margin-bottom: 1.05rem; padding: 9px 15px; border: 1px solid rgba(255,255,255,.8); border-radius: 22px; background: rgba(255,255,255,.8); backdrop-filter: saturate(150%) blur(24px); box-shadow: var(--shadow); }
+    main { width: min(1200px, calc(100% - 3rem)); min-width: 0; margin: 0 auto; padding: 1rem 0 3rem; }
+    .brand-bar { display: flex; justify-content: space-between; align-items: center; gap: 1rem; min-height: 46px; margin-bottom: 1rem; padding: 0 0 10px; border-bottom: 1px solid var(--line); }
     .brand { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
     .brand-mark { position: relative; display: grid; place-items: center; flex: 0 0 36px; width: 36px; height: 36px; overflow: hidden; border-radius: 12px; background: linear-gradient(145deg, #1f2d27, #496556); box-shadow: inset 0 1px 0 rgba(255,255,255,.22); }
     .brand-mark::before, .brand-mark::after, .brand-mark > span { content: ''; position: absolute; border: 1.5px solid rgba(255,255,255,.88); border-radius: 50%; }
@@ -51,9 +52,9 @@
     .brand-text small { color: var(--muted); font-size: .68rem; font-weight: 400; letter-spacing: 0; }
     .privacy-note { display: inline-flex; align-items: center; gap: .45rem; color: var(--sage); font-size: .72rem; white-space: nowrap; }
     .privacy-note::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #788f7d; box-shadow: 0 0 0 4px rgba(120,143,125,.1); }
-    .editor-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin: 0 .3rem 1rem; }
+    .editor-heading { display: flex; justify-content: space-between; align-items: center; gap: 1rem; margin: 0 0 1rem; }
     h1, h2, h3, p { margin-top: 0; }
-    h1 { margin-bottom: .3rem; font-size: clamp(1.35rem, 2.4vw, 1.65rem); font-weight: 650; letter-spacing: -.035em; line-height: 1.15; }
+    h1 { margin-bottom: .4rem; font-size: clamp(1.65rem, 2.4vw, 2rem); font-weight: 600; letter-spacing: -.04em; line-height: 1.15; }
     h2 { font-size: 1rem; font-weight: 650; letter-spacing: -.015em; }
     h3 { font-size: .95rem; }
     p { line-height: 1.5; }
@@ -61,7 +62,7 @@
     .eyebrow { margin-bottom: .5rem; color: var(--gold); font-size: .66rem; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
     .muted { color: var(--muted); }
     .badge { display: inline-flex; align-items: center; border: 1px solid #d6dfd8; border-radius: 999px; padding: .42rem .65rem; color: #4e6659; background: #edf2ed; font-size: .74rem; line-height: 1.3; }
-    .panel { min-width: 0; border: 1px solid rgba(255,255,255,.9); border-radius: 24px; background: var(--panel); padding: 1rem; margin-bottom: .9rem; box-shadow: var(--shadow); }
+    .panel { min-width: 0; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); padding: 1.1rem; margin-bottom: 1rem; box-shadow: var(--shadow); }
     .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .9rem; }
     .summary div { min-width: 0; border-left: 2px solid #cbd6ce; padding-left: .7rem; }
     .summary span { display: block; color: var(--muted); font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; }
@@ -71,22 +72,29 @@
     .disclosure[open] > summary { margin-bottom: .75rem; }
     .disclosure > p:last-child { margin-bottom: 0; }
     .disclosure:focus-within { border-color: #bbc9bf; }
-    .source-viewer { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(16rem, .9fr); gap: 1.25rem; align-items: stretch; padding: 12px; }
-    .source-stage { position: relative; display: grid; place-items: center; min-height: 216px; overflow: hidden; border: 1px solid rgba(185,209,191,.15); border-radius: 18px; background: radial-gradient(ellipse at 90% 0%, rgba(212,173,113,.13), transparent 65%), linear-gradient(145deg, #15201b, #223129); }
+    #workspace { display: grid; grid-template-columns: minmax(0, 2fr) minmax(19rem, 1fr); gap: 1rem; align-items: stretch; }
+    #workspace > .panel { margin-bottom: 0; }
+    .source-viewer { grid-column: 1; grid-row: 1; }
+    .inspector-panel { grid-column: 2; grid-row: 1; }
+    .timeline-panel { grid-column: 1 / -1; grid-row: 2; }
+    #workspace:has(#pending:not([hidden])) .timeline-panel { grid-row: 3; }
+    #pending { grid-column: 1 / -1; grid-row: 2; }
+    #workspace > details { grid-column: 1 / -1; }
+    .source-viewer { display: grid; grid-template-rows: minmax(200px, 1fr) auto; gap: .75rem; align-items: stretch; padding: 10px; }
+    .source-stage { position: relative; display: grid; place-items: center; min-height: 200px; overflow: hidden; border: 1px solid rgba(185,209,191,.15); border-radius: 11px; background: #17221d; }
     .source-stage video, .source-stage img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #17221d; }
     .source-stage video[hidden], .source-stage img[hidden], .source-fallback[hidden] { display: none; }
     .source-fallback { z-index: 2; max-width: 26rem; margin: 0; padding: 1.3rem; color: #c0cdc3; font-size: .82rem; text-align: center; }
-    .source-controls { display: flex; flex-direction: column; justify-content: space-between; gap: .7rem; min-width: 0; padding: .5rem .45rem .4rem 0; }
-    .source-controls h2 { margin-bottom: .35rem; }
-    .source-controls input[type="range"] { width: 100%; min-height: auto; padding: 0; accent-color: var(--sage); }
-    .source-controls .field { flex: 0 0 auto; font-size: .74rem; color: var(--muted); }
-    .source-status { min-height: 2.8rem; margin-bottom: .6rem; color: var(--muted); font-size: .78rem; }
+    .source-controls { min-width: 0; padding: 0 .5rem .3rem; }
+    .source-controls h2 { margin-bottom: .3rem; font-size: .9rem; }
+    .source-controls .eyebrow { margin-bottom: .35rem; }
+    .source-status { margin-bottom: .65rem; color: var(--muted); font-size: .74rem; line-height: 1.5; }
     .source-boundary { margin: 0; color: var(--muted); font-size: .76rem; line-height: 1.55; }
     #notice { margin: 0 .3rem .8rem; color: var(--sage); font-size: .82rem; line-height: 1.45; }
     #notice:empty { display: none; }
     #notice[data-kind="error"] { color: #a04536; }
     #notice[data-kind="success"] { color: #426b5a; }
-    #pending { border-color: #e7d5ac; background: #fbf6e9; }
+    #pending { position: sticky; top: .75rem; z-index: 20; border-color: #d9c391; background: #fbf6e9; box-shadow: 0 6px 22px rgba(98,73,27,.1); }
     #pending strong { font-size: .88rem; }
     #pending p { margin: .3rem 0 0; font-size: .78rem; }
     #pending[hidden] { display: none; }
@@ -102,7 +110,7 @@
     .timeline-mode { display: inline-flex; align-items: center; min-height: 1.7rem; max-width: 100%; padding: .24rem .55rem; border: 1px solid #d6dfd8; border-radius: 999px; color: var(--sage); background: #f0f4f0; font-size: .7rem; font-weight: 550; white-space: nowrap; }
     .timeline-mode[data-pending="true"] { border-color: #d9c391; color: #806230; background: #faf1de; }
     .timeline-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .2rem 0 .6rem; }
-    .timeline-toolbar button { min-height: 31px; padding: .36rem .6rem; font-size: .75rem; }
+    .timeline-toolbar button { min-height: 40px; padding: .4rem .65rem; font-size: .75rem; }
     .timeline-toolbar .zoom-control { display: flex; align-items: center; gap: .4rem; margin-left: auto; padding-left: .7rem; border-left: 1px solid var(--line); }
     .timeline-toolbar .zoom-control label { color: var(--muted); font-size: .72rem; }
     .timeline-toolbar input[type="range"] { min-height: auto; width: min(9rem, 20vw); padding: 0; accent-color: var(--sage); }
@@ -144,20 +152,25 @@
     .inspector { min-width: 0; }
     .inspector > summary { cursor: pointer; color: var(--text); font-size: .9rem; font-weight: 650; }
     .inspector > summary::marker { color: var(--sage); }
-    .inspector-copy { margin: .5rem 0 .9rem; color: var(--muted); font-size: .77rem; }
+    .inspector-copy { margin: .45rem 0 1rem; color: var(--muted); font-size: .74rem; line-height: 1.5; }
     .clips { display: grid; gap: .8rem; }
-    .clip { min-width: 0; border: 1px solid #e4e2d8; border-radius: 20px; padding: 1rem; background: linear-gradient(145deg, #fcfbf8, #f6f5ef); }
+    .clip { min-width: 0; }
     .clip[data-pending="true"] { border-color: #d2b77e; background: #fcf7e9; }
     .clip-head { display: flex; justify-content: space-between; gap: .8rem; align-items: flex-start; }
     .clip-title { display: flex; align-items: center; gap: .55rem; }
     .clip-kind { color: var(--sage); font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; }
-    .clip-meta { margin: .4rem 0 .8rem; color: var(--muted); font-size: .76rem; overflow-wrap: anywhere; }
-    .controls { display: grid; gap: .65rem; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .clip-meta { margin: .55rem 0 .9rem; color: var(--muted); font-size: .72rem; overflow-wrap: anywhere; }
+    .clip-meta p { margin: .5rem 0 0; }
+    .controls { display: flex; flex-direction: column; gap: 1rem; }
     .control-group { border: 0; padding: 0; margin: 0; min-width: 0; }
     .control-group legend { color: #686d64; font-size: .74rem; margin-bottom: .4rem; }
     .control-row { display: flex; flex-wrap: wrap; gap: .45rem; }
-    .replacement-review { grid-column: 1 / -1; }
-    .replacement-comparison { display: grid; grid-template-columns: minmax(13rem, .82fr) minmax(0, 1.8fr); gap: .65rem; }
+    .structure-controls { order: -1; padding-bottom: .9rem; border-bottom: 1px solid var(--line); }
+    .structure-controls .source-boundary { margin-top: .55rem; font-size: .7rem; }
+    .precise-controls > fieldset { margin-top: .8rem; }
+    .precise-controls, .replacement-review { grid-column: 1 / -1; }
+    .replacement-review { padding-top: .75rem; border-top: 1px solid var(--line); }
+    .replacement-comparison { display: grid; grid-template-columns: 1fr; gap: .75rem; margin-top: .75rem; }
     .replacement-column { min-width: 0; }
     .replacement-column-title { display: block; margin-bottom: .4rem; color: var(--muted); font-size: .66rem; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; }
     .replacement-candidates { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(12rem, 100%), 1fr)); gap: .65rem; }
@@ -189,32 +202,40 @@
     .historical-clip span { margin-top: .25rem; color: var(--muted); font-size: .76rem; overflow-wrap: anywhere; }
     .loading { display: grid; place-items: center; min-height: 35vh; color: var(--muted); }
     #loading[hidden] { display: none; }
-    @media (min-width: 1100px) {
-      .source-stage { min-height: 260px; }
-      .source-controls { padding: .75rem .75rem .65rem 0; }
+    @media (max-width: 960px) {
+      #workspace { display: flex; flex-direction: column; }
+      .source-viewer { order: 0; }
+      .timeline-panel { order: 1; }
+      .inspector-panel { order: 2; }
+      #pending { order: -1; }
+      #history { order: 3; }
+      #workspace > details:last-child { order: 4; }
+      .source-stage { min-height: 0; aspect-ratio: 16 / 9; }
+      .source-viewer { grid-template-rows: auto auto; }
+      .controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .structure-controls { grid-column: 1 / -1; }
+      .replacement-review { grid-column: 1 / -1; }
     }
     @media (max-width: 760px) {
       .editor-heading { align-items: flex-start; }
       .editor-heading > .actions { justify-content: flex-end; max-width: 45%; }
       .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .source-viewer { grid-template-columns: minmax(0, 1.25fr) minmax(13rem, 1fr); gap: .8rem; }
-      .source-controls .actions { gap: .3rem; }
-      .source-controls .actions button { padding: .4rem .5rem; }
+      .source-viewer { gap: .8rem; }
       .timeline-toolbar .zoom-control { margin-left: 0; }
       .controls, .replacement-comparison { grid-template-columns: 1fr; }
     }
     @media (max-width: 580px) {
       main { width: calc(100% - 1rem); padding-top: .5rem; }
-      .brand-bar { min-height: 58px; margin-bottom: 1rem; padding: 8px 12px; border-radius: 20px; }
+      .brand-bar { min-height: 58px; margin-bottom: 1rem; padding: 8px 4px; }
       .brand-mark { flex-basis: 32px; width: 32px; height: 32px; border-radius: 10px; }
       .privacy-note { font-size: .65rem; }
       .editor-heading { display: block; margin: 0 .5rem .9rem; }
       .editor-heading > .actions { justify-content: flex-start; max-width: none; margin-top: .65rem; }
-      .source-viewer { grid-template-columns: minmax(0, 1fr); gap: .6rem; }
+      .source-viewer { gap: .6rem; }
       .source-stage { min-height: 0; aspect-ratio: 16 / 9; }
-      .source-controls { gap: .6rem; padding: .25rem .35rem .4rem; }
+      .source-controls { grid-template-columns: 1fr; gap: .6rem; padding: .25rem .35rem .4rem; }
       .source-status { min-height: 0; }
-      .panel { padding: .85rem; border-radius: 20px; }
+      .panel { padding: .85rem; border-radius: 16px; }
       .source-viewer { padding: 9px; }
       .pending-row, .history-heading, .history-selection, .history-picker, .timeline-heading { display: block; }
       .pending-row > .actions, .history-picker, .history-selection > button { margin-top: .65rem; }
@@ -222,7 +243,7 @@
       .timeline-heading .timeline-mode { margin-bottom: .6rem; white-space: normal; }
       .timeline-toolbar .zoom-control { width: 100%; padding: .5rem 0 0; border-left: 0; border-top: 1px solid var(--line); }
       .timeline-toolbar input[type="range"] { flex: 1; width: auto; }
-      .clip { padding: .8rem; border-radius: 16px; }
+      button { min-height: 44px; }
       .clip-head { flex-wrap: wrap; }
       .control-row > button { max-width: 100%; white-space: normal; }
     }
@@ -246,7 +267,7 @@
         <p class="muted">Select a clip, make a change, then Save a new version.</p>
       </div>
       <div class="actions">
-        <button id="refresh" type="button">Refresh current head</button>
+        <button id="refresh" type="button" aria-label="Refresh the latest saved version">Refresh</button>
         <span id="saved-version" class="badge" role="status">Opening saved version…</span>
       </div>
     </header>
@@ -263,57 +284,40 @@
         <div class="source-controls">
           <div>
             <div class="eyebrow">Source preview · muted</div>
-            <h2 id="source-viewer-heading">Active clip viewer</h2>
+            <h2 id="source-viewer-heading" class="sr-only">Active clip viewer</h2>
             <p id="source-status" class="source-status" role="status" aria-live="polite"></p>
-            <div class="actions">
-              <button id="play-pause" class="primary" type="button">Play</button>
-              <button id="viewer-previous" type="button">Previous clip</button>
-              <button id="viewer-next" type="button">Next clip</button>
-            </div>
           </div>
-          <label class="field" for="viewer-seek">
-            <span>Timeline position</span>
-            <input id="viewer-seek" type="range" min="0" max="1" step="1" value="0">
-          </label>
-          <details class="disclosure">
-            <summary>Preview and audio limitations</summary>
-            <p class="source-boundary">Raw MP4 preview transport may contain audio. This page disables audio playback and keeps output muted. Audio-stream presence, content, and mix are not attested; this is not final-fidelity proof.</p>
-          </details>
         </div>
       </section>
 
       <section id="pending" class="panel" hidden>
         <div class="pending-row">
           <div role="status" aria-live="polite">
-            <div class="eyebrow">Pending · not canonical</div>
+            <div class="eyebrow">Unsaved change</div>
             <strong id="pending-label"></strong>
             <p id="pending-copy" class="muted"></p>
           </div>
           <div class="actions" role="group" aria-label="Pending Timeline change actions">
             <button id="discard" type="button">Discard</button>
-            <button id="save" class="primary" type="button">Save as N+1</button>
+            <button id="save" class="primary" type="button">Save new version</button>
           </div>
         </div>
       </section>
 
-      <section class="panel" aria-labelledby="visual-timeline-heading">
+      <section class="panel timeline-panel" aria-labelledby="visual-timeline-heading">
         <div class="timeline-heading">
           <div>
-            <h2 id="visual-timeline-heading">Primary visual timeline</h2>
-            <p class="muted">Select a clip, drag to reorder, or adjust its edges. Use the inspector below to split, remove, or replace.</p>
+            <h2 id="visual-timeline-heading">Timeline</h2>
+            <p class="muted">Select a clip to edit. Drag to reorder or adjust its edges.</p>
           </div>
           <span id="timeline-mode" class="timeline-mode">Canonical head</span>
         </div>
         <div class="timeline-toolbar" role="toolbar" aria-label="Timeline view controls">
-          <button id="jump-start" type="button" aria-label="Move playhead to Timeline start">Start</button>
-          <button id="previous-clip" type="button" aria-label="Move playhead to previous clip boundary">Previous boundary</button>
-          <button id="next-clip" type="button" aria-label="Move playhead to next clip boundary">Next boundary</button>
+          <button id="play-pause" class="primary" type="button">Play</button>
           <output id="playhead-time" class="timecode" aria-label="Playhead time">00:00.000</output>
           <span class="zoom-control">
-            <button id="zoom-out" type="button" aria-label="Zoom Timeline out">−</button>
             <label for="timeline-zoom">Zoom</label>
             <input id="timeline-zoom" type="range" min="32" max="240" step="8" value="96" aria-label="Timeline zoom in pixels per second">
-            <button id="zoom-in" type="button" aria-label="Zoom Timeline in">+</button>
           </span>
         </div>
         <p id="gesture-note" class="gesture-note" role="status" aria-live="polite">Arrow keys scrub by 100 ms; Shift adds a 1 s step. Alt+Arrow reorders a focused clip.</p>
@@ -327,10 +331,10 @@
         </div>
       </section>
 
-      <section class="panel" aria-label="Clip inspector">
+      <section class="panel inspector-panel" aria-label="Clip inspector">
         <details class="inspector" open>
-          <summary>Clip inspector · trim, split, remove, replace</summary>
-          <p class="inspector-copy">These exact-value forms stage the same closed operations as the visual controls. Nothing becomes canonical until Save succeeds and the new head is reread.</p>
+          <summary>Clip inspector</summary>
+          <p id="selected-clip-label" class="inspector-copy" role="status">Select a clip</p>
           <div id="clips" class="clips"></div>
         </details>
       </section>
@@ -373,7 +377,7 @@
         </div>
         <details class="boundary disclosure">
           <summary>How changes and source previews are verified</summary>
-          <p><strong>Original media remains unchanged.</strong> Canonical timing is exact while media and authority identity are redacted. Selection, zoom, playhead, Play, Pause, and seek are transient view state. Clip geometry changes only from the server-returned pending preview. A playable video is raw verified source transport that may contain audio; this page disables audio playback and keeps output muted. It does not attest audio-stream presence, content, mix, subtitles, transitions, render, or export, and this page never receives a file path or credential.</p>
+          <p><strong>Original media remains unchanged.</strong> Canonical timing is exact while media and authority identity are redacted. Selection, zoom, playhead, Play, Pause, and seek are transient view state. Clip geometry changes only from the server-returned pending preview. Raw MP4 preview transport may contain audio. This page disables audio playback and keeps output muted. Audio-stream presence, content, and mix are not attested; this is not final-fidelity proof. It does not attest audio-stream presence, content, mix, subtitles, transitions, render, or export, and this page never receives a file path or credential.</p>
         </details>
       </details>
     </div>
@@ -396,6 +400,7 @@
         discard: document.getElementById('discard'),
         save: document.getElementById('save'),
         clips: document.getElementById('clips'),
+        selectedClipLabel: document.getElementById('selected-clip-label'),
         timelineMode: document.getElementById('timeline-mode'),
         timelineViewport: document.getElementById('visual-timeline'),
         timelineCanvas: document.getElementById('timeline-canvas'),
@@ -405,12 +410,7 @@
         playheadTime: document.getElementById('playhead-time'),
         trimProposal: document.getElementById('trim-proposal'),
         gestureNote: document.getElementById('gesture-note'),
-        jumpStart: document.getElementById('jump-start'),
-        previousClip: document.getElementById('previous-clip'),
-        nextClip: document.getElementById('next-clip'),
         timelineZoom: document.getElementById('timeline-zoom'),
-        zoomOut: document.getElementById('zoom-out'),
-        zoomIn: document.getElementById('zoom-in'),
         project: document.getElementById('project-id'),
         timeline: document.getElementById('timeline-id'),
         revision: document.getElementById('revision'),
@@ -421,9 +421,6 @@
         sourceFallback: document.getElementById('source-fallback'),
         sourceStatus: document.getElementById('source-status'),
         playPause: document.getElementById('play-pause'),
-        viewerPrevious: document.getElementById('viewer-previous'),
-        viewerNext: document.getElementById('viewer-next'),
-        viewerSeek: document.getElementById('viewer-seek'),
         history: document.getElementById('history'),
         historyRevision: document.getElementById('history-revision'),
         inspectHistory: document.getElementById('inspect-history'),
@@ -435,6 +432,7 @@
       }
       let state = null
       let busy = false
+      let actionFocusOrigin = null
       let selectedClipId = null
       let playheadMs = 0
       let zoomPixelsPerSecond = Number(ui.timelineZoom.value)
@@ -486,21 +484,39 @@
       }
 
       function setBusy(value) {
-        if (value && !busy) pauseSourcePreview()
+        if (value && !busy) {
+          const active = document.activeElement
+          actionFocusOrigin = active && (
+            ui.clips.contains(active) || ui.timelineTrack.contains(active) || ui.pending.contains(active)
+          ) ? active : null
+          pauseSourcePreview()
+        }
         busy = value
         render()
+        if (!value) {
+          const origin = actionFocusOrigin
+          actionFocusOrigin = null
+          if (!origin || document.hidden || (
+            document.activeElement !== document.body && document.activeElement !== origin
+          )) return
+          const target = state.pending
+            ? ui.save.disabled ? ui.discard : ui.save
+            : [...ui.timelineTrack.querySelectorAll('.timeline-clip')]
+              .find(node => node.dataset.clipId === selectedClipId)?.querySelector('.timeline-clip-body')
+          target?.focus()
+        }
       }
 
       function editSummary(edit) {
         if (edit.op === 'move_clip') return `Move clip to position ${edit.to_index + 1}`
-        if (edit.op === 'trim_clip') return `Trim video to ${edit.source_in_ms}–${edit.source_out_ms} ms`
-        if (edit.op === 'set_clip_duration') return `Set image duration to ${edit.duration_ms} ms`
-        return `Replace clip with Coverage assignment ${edit.assignment_id}`
+        if (edit.op === 'trim_clip') return `Trim video to ${formatTime(edit.source_in_ms)}–${formatTime(edit.source_out_ms)}`
+        if (edit.op === 'set_clip_duration') return `Set image duration to ${formatTime(edit.duration_ms)}`
+        return 'Replace clip material'
       }
 
       function structuralEditSummary(structuralEdit) {
         if (structuralEdit.op === 'split_clip') {
-          return `Split video at absolute source ${structuralEdit.source_split_ms} ms`
+          return `Split video at source ${formatTime(structuralEdit.source_split_ms)}`
         }
         return 'Remove clip from Timeline'
       }
@@ -573,6 +589,19 @@
           node.dataset.selected = String(selected)
           node.querySelector('.timeline-clip-body')?.setAttribute('aria-pressed', String(selected))
         }
+        syncSelectedInspector()
+      }
+
+      function syncSelectedInspector() {
+        if (!state) return
+        const clips = displayedTimeline().tracks[0].clips
+        const index = clips.findIndex(clip => clip.clip_id === selectedClipId)
+        for (const card of ui.clips.querySelectorAll('.clip')) {
+          card.hidden = card.dataset.clipId !== selectedClipId
+        }
+        ui.selectedClipLabel.textContent = index < 0
+          ? 'Select a clip'
+          : `Clip ${index + 1} of ${clips.length}`
       }
 
       function cancelImageClock() {
@@ -662,7 +691,7 @@
           case 'canonical_editor_history_read_only':
             return 'Historical revision K is read-only timing evidence; this viewer has no historical source grant. Refresh current N to return to its source preview.'
           case 'canonical_editor_pending_source_change':
-            return 'A source-changing operation is pending. Save or Discard before viewing current-head source bytes. Pending geometry does not authorize a replacement or historical source preview.'
+            return 'Save or Discard this unsaved change to view the saved source preview.'
           case 'agent_preview_media_unsupported':
             return 'This verified source is not browser-playable in the first MP4/H.264 profile. Inspect its representative thumbnail or select a supported source through Coverage.'
           case 'agent_preview_rate_limited':
@@ -733,12 +762,7 @@
 
       function syncActiveViewer({ continuePlayback = playbackRequested, force = false } = {}) {
         if (!state) return
-        const timeline = displayedTimeline()
         const clip = clipAtTime(playheadMs)
-        ui.viewerSeek.max = String(timeline.output.duration_ms)
-        ui.viewerSeek.value = String(Math.round(playheadMs))
-        ui.viewerPrevious.disabled = busy || !clip || clip.ordinal === 0
-        ui.viewerNext.disabled = busy || !clip || clip.ordinal >= timeline.tracks[0].clips.length - 1
         if (!clip) {
           pauseSourcePreview('No canonical clip is available at this Timeline position.')
           clearVideo()
@@ -757,7 +781,7 @@
           ui.sourceFallback.hidden = false
           ui.sourceFallback.textContent = sourceBlocked === 'canonical_editor_history_read_only'
             ? 'Historical timing can be inspected below. Historical source bytes are not available in this viewer.'
-            : 'Pending preview uses timing only. Original media remains unchanged.'
+            : 'Source preview paused.'
           ui.playPause.disabled = true
           return
         }
@@ -798,7 +822,7 @@
         if (ui.sourceVideo.readyState >= 1 && Math.abs(ui.sourceVideo.currentTime - sourceTime) > 0.08) {
           ui.sourceVideo.currentTime = sourceTime
         }
-        ui.sourceStatus.textContent = `Video clip ${clip.ordinal + 1} · Timeline local ${formatTime(localMs)} maps to verified source ${formatTime(clip.source_in_ms + localMs)}. Audio playback is disabled and output remains muted.`
+        ui.sourceStatus.textContent = `Clip ${clip.ordinal + 1} · ${formatTime(localMs)} / ${formatTime(clip.end_ms - clip.start_ms)} · source ${formatTime(clip.source_in_ms + localMs)}`
         ui.playPause.disabled = busy
         if (continuePlayback) {
           setPlaybackRequested(true)
@@ -888,7 +912,6 @@
         ui.playhead.style.left = `${left}px`
         ui.playheadTime.value = formatTime(playheadMs)
         ui.playheadTime.textContent = formatTime(playheadMs)
-        ui.viewerSeek.value = String(Math.round(playheadMs))
         ui.timelineViewport.setAttribute(
           'aria-label',
           `Canonical primary visual Timeline. Playhead ${formatTime(playheadMs)} of ${formatTime(duration)}. Use Left and Right arrows to scrub.`,
@@ -1089,7 +1112,7 @@
         body.type = 'button'
         body.draggable = controlsEnabled && clips.length > 1
         body.setAttribute('aria-pressed', String(clip.clip_id === selectedClipId))
-        body.setAttribute('aria-label', `${clip.media_kind} clip ${index + 1}, ${duration} milliseconds, Beat ${clip.beat_id}`)
+        body.setAttribute('aria-label', `${clip.media_kind} clip ${index + 1}, ${duration} milliseconds`)
         body.setAttribute('aria-keyshortcuts', 'Alt+ArrowLeft Alt+ArrowRight')
         const thumbnail = element('span', 'clip-thumbnail', clip.media_kind)
         thumbnail.title = state?.capabilities?.media_thumbnail === true
@@ -1097,8 +1120,8 @@
           : 'Canonical timing only; media identity stays server-side.'
         body.append(
           thumbnail,
-          element('span', 'timeline-clip-copy', `Beat ${short(clip.beat_id, 12)}`),
-          element('span', 'timeline-clip-duration', `${formatTime(duration)} · ${index + 1}`),
+          element('span', 'timeline-clip-copy', `Clip ${index + 1}`),
+          element('span', 'timeline-clip-duration', formatTime(duration)),
         )
         body.addEventListener('click', event => {
           event.stopPropagation()
@@ -1179,20 +1202,15 @@
           && pending.preview?.object === 'canonical_timeline.pending_preview'
         ui.timelineMode.dataset.pending = String(Boolean(pending))
         ui.timelineMode.textContent = hasPendingPreview
-          ? 'Pending preview · not canonical'
+          ? 'Unsaved timing preview'
           : pending
-            ? 'Pending operation · canonical geometry'
-            : `Canonical N${state.projection.timeline_head.revision}`
-        ui.jumpStart.disabled = busy
-        ui.previousClip.disabled = busy
-        ui.nextClip.disabled = busy
+            ? 'Saved timing · change pending'
+            : `Saved version ${state.projection.timeline_head.revision}`
         ui.timelineZoom.disabled = busy
-        ui.zoomOut.disabled = busy || zoomPixelsPerSecond <= Number(ui.timelineZoom.min)
-        ui.zoomIn.disabled = busy || zoomPixelsPerSecond >= Number(ui.timelineZoom.max)
         ui.gestureNote.textContent = pending
           ? hasPendingPreview
-            ? 'Geometry comes only from the server-returned pending preview. Save with exact head CAS or Discard.'
-            : 'This pending operation has no local geometry preview. Save with exact head CAS or Discard.'
+            ? 'Review unsaved timing. Save or Discard to finish.'
+            : 'Saved timing remains shown. Save or Discard to finish.'
           : canEdit
             ? 'Arrow keys scrub by 100 ms; Shift adds a 1 s step. Alt+Arrow reorders a focused clip.'
             : 'Timeline inspection is read-only for this pairing.'
@@ -1206,7 +1224,7 @@
         notice('Staging one closed edit…')
         try {
           state = await action({ type: 'stage', edit })
-          notice('Edit staged locally. Review it, then Save or Discard.')
+          notice('Change ready to review.')
         } catch (error) {
           notice(error.message, 'error')
         } finally {
@@ -1220,7 +1238,7 @@
         notice('Staging one closed structural edit…')
         try {
           state = await action({ type: 'stage_structural', structural_edit })
-          notice('Structural edit staged locally. Original media remains unchanged; review, then Save or Discard.')
+          notice('Change ready to review.')
         } catch (error) {
           notice(error.message, 'error')
         } finally {
@@ -1303,6 +1321,7 @@
 
       function clipCard(clip, index, clips, candidates, pending, canEdit, canStructuralEdit, controlsEnabled) {
         const card = element('article', 'clip')
+        card.dataset.clipId = clip.clip_id
         card.dataset.pending = String(Boolean(pending))
         const head = element('div', 'clip-head')
         const title = element('div', 'clip-title')
@@ -1310,12 +1329,14 @@
           element('strong', '', `Clip ${index + 1}`),
           element('span', 'clip-kind', clip.media_kind),
         )
-        head.append(title, element('span', 'muted', `${clip.end_ms - clip.start_ms} ms`))
-        const meta = element('p', 'clip-meta')
-        meta.textContent = `Beat ${short(clip.beat_id)} · assignment ${short(clip.assignment_id)}`
+        head.append(title, element('span', 'muted', formatTime(clip.end_ms - clip.start_ms)))
+        const meta = element('details', 'clip-meta disclosure')
+        meta.append(element('summary', '', 'Source identity'), element('p', '', `Beat ${short(clip.beat_id)} · assignment ${short(clip.assignment_id)}`))
         const controls = element('div', 'controls')
 
         if (canEdit) {
+        const precise = element('details', 'precise-controls disclosure')
+        precise.append(element('summary', '', 'Precise timing and order'))
         const move = element('fieldset', 'control-group')
         move.append(element('legend', '', 'Move in primary track'))
         const moveRow = element('div', 'control-row')
@@ -1324,7 +1345,7 @@
           button('Later', `Move clip ${index + 1} later`, () => stage({ op: 'move_clip', clip_id: clip.clip_id, to_index: index + 1 }), index === clips.length - 1),
         )
         move.append(moveRow)
-        controls.append(move)
+        precise.append(move)
 
         if (clip.media_kind === 'video') {
           const trim = element('fieldset', 'control-group')
@@ -1340,7 +1361,7 @@
             source_in_ms: Number(sourceIn.value), source_out_ms: Number(sourceOut.value),
           })))
           trim.append(row)
-          controls.append(trim)
+          precise.append(trim)
         } else {
           const duration = element('fieldset', 'control-group')
           duration.append(element('legend', '', 'Image duration'))
@@ -1352,11 +1373,13 @@
             op: 'set_clip_duration', clip_id: clip.clip_id, duration_ms: Number(input.value),
           })))
           duration.append(row)
-          controls.append(duration)
+          precise.append(duration)
         }
+        controls.append(precise)
 
-        const replace = element('fieldset', 'control-group replacement-review')
-        replace.append(element('legend', '', 'Verified visual replacement review · same Beat only'))
+        if (candidates.length > 0) {
+        const replace = element('details', 'control-group replacement-review disclosure')
+        replace.append(element('summary', '', `Replace material · ${candidates.length} eligible`))
         const comparison = element('div', 'replacement-comparison')
         const currentColumn = element('div', 'replacement-column')
         currentColumn.append(
@@ -1365,28 +1388,27 @@
         )
         const candidateColumn = element('div', 'replacement-column')
         candidateColumn.append(element('span', 'replacement-column-title', 'Eligible replacement'))
-        if (candidates.length === 0) {
-          candidateColumn.append(element('span', 'empty', 'No verified, long-enough alternative unused in this Beat.'))
-        } else {
-          const candidateCards = element('div', 'replacement-candidates')
-          candidateCards.append(...candidates.map(candidate => (
-            replacementVisualReviewCard(clip, candidate, pending, controlsEnabled)
-          )))
-          candidateColumn.append(candidateCards)
-        }
+        const candidateCards = element('div', 'replacement-candidates')
+        candidateCards.append(...candidates.map(candidate => (
+          replacementVisualReviewCard(clip, candidate, pending, controlsEnabled)
+        )))
+        candidateColumn.append(candidateCards)
         comparison.append(currentColumn, candidateColumn)
         replace.append(comparison)
         controls.append(replace)
+        } else {
+          meta.append(element('p', 'empty', 'No verified, long-enough alternative unused in this Beat.'))
+        }
         }
 
         {
-          const structure = element('fieldset', 'control-group')
+          const structure = element('fieldset', 'control-group structure-controls')
           structure.append(element(
             'legend',
             '',
             canStructuralEdit
-              ? 'Structural clip editing · staged only'
-              : 'Structural clip editing · pairing scope required',
+              ? 'Edit this clip'
+              : 'Editing requires pairing',
           ))
           const row = element('div', 'control-row')
           if (clip.media_kind === 'video') {
@@ -1417,7 +1439,7 @@
           row.append(deleteButton)
           structure.append(
             row,
-            element('p', 'source-boundary', 'Original media remains unchanged. Save creates canonical N+1 only after exact reread.'),
+            element('p', 'source-boundary', 'Original media remains unchanged. Review each change before saving a new version.'),
           )
           controls.append(structure)
         }
@@ -1467,17 +1489,17 @@
           const isStructural = pending.object === 'memolens.canonical_editor_pending_structural_edit'
           ui.pendingLabel.textContent = pendingSummary(pending)
           ui.pendingCopy.textContent = isRestore
-            ? 'Saving re-envelops the server-held historical K as N+1 with parent N. It overwrites neither revision.'
+            ? 'Restore this historical version as a new version. No saved version will be replaced.'
             : isStructural
-              ? 'This structural change is staged only. Original media remains unchanged. Save submits only the closed structural_edit intent.'
-            : 'This local preview cannot render, export, or enter Usage. Save submits only the closed edit.'
+              ? 'Review the timing below, then save a new version or discard this change.'
+            : 'This preview is not saved and cannot be rendered or exported. Save a new version or discard this change.'
         }
         ui.refresh.disabled = busy || pending !== null
         ui.discard.disabled = busy || pending === null
         ui.save.disabled = busy || pending === null || state.capabilities.save !== true
         ui.save.textContent = pending?.object === 'memolens.canonical_editor_pending_restore'
-          ? `Save K${pending.restore_from.revision} as N${pending.based_on_head.revision + 1}`
-          : `Save as N${projection.timeline_head.revision + 1}`
+          ? `Restore as version ${pending.based_on_head.revision + 1}`
+          : `Save version ${projection.timeline_head.revision + 1}`
         ui.history.hidden = !canInspectHistory
         ui.historyRevision.max = String(Math.max(1, maxHistoricalRevision))
         const selectedInput = Number(ui.historyRevision.value)
@@ -1523,6 +1545,7 @@
           canStructuralEdit,
           (canEdit || canStructuralEdit) && pending === null && !busy,
         )))
+        syncSelectedInspector()
         refreshSplitControls()
         if (busy) {
           for (const element of ui.clips.querySelectorAll('button, input, select')) {
@@ -1538,19 +1561,6 @@
         if (!state || busy) return
         const canvas = ui.timelineCanvas.getBoundingClientRect()
         setPlayhead((event.clientX - canvas.left) / pixelsPerMs())
-      }
-
-      function stepBoundary(direction) {
-        if (!state) return
-        const timeline = displayedTimeline()
-        const clips = timeline.tracks[0].clips
-        const boundaries = [0, ...clips.map(clip => clip.start_ms), timeline.output.duration_ms]
-          .filter((value, index, values) => values.indexOf(value) === index)
-          .sort((left, right) => left - right)
-        const next = direction < 0
-          ? [...boundaries].reverse().find(value => value < playheadMs)
-          : boundaries.find(value => value > playheadMs)
-        setPlayhead(next ?? (direction < 0 ? 0 : timeline.output.duration_ms), { reveal: true })
       }
 
       function setZoom(value) {
@@ -1585,26 +1595,18 @@
           else setPlayhead(playheadMs + (event.key === 'ArrowLeft' ? -step : step), { reveal: true })
         }
       })
-      ui.jumpStart.addEventListener('click', () => setPlayhead(0, { reveal: true }))
-      ui.previousClip.addEventListener('click', () => stepBoundary(-1))
-      ui.nextClip.addEventListener('click', () => stepBoundary(1))
       ui.timelineZoom.addEventListener('input', () => setZoom(ui.timelineZoom.value))
-      ui.zoomOut.addEventListener('click', () => setZoom(zoomPixelsPerSecond - 16))
-      ui.zoomIn.addEventListener('click', () => setZoom(zoomPixelsPerSecond + 16))
       ui.playPause.addEventListener('click', () => {
         if (!state || busy) return
         if (playbackRequested) {
           pauseSourcePreview('Source preview paused. Canonical state is unchanged.')
           return
         }
+        if (playheadMs >= timelineDuration() && sourceViewBlockReason() === null) {
+          setPlayhead(0, { reveal: true, syncViewer: false })
+        }
         syncActiveViewer({ continuePlayback: true })
       })
-      ui.viewerSeek.addEventListener('input', () => {
-        if (!state || busy) return
-        setPlayhead(Number(ui.viewerSeek.value), { reveal: true })
-      })
-      ui.viewerPrevious.addEventListener('click', () => stepBoundary(-1))
-      ui.viewerNext.addEventListener('click', () => stepBoundary(1))
       ui.sourceVideo.addEventListener('loadedmetadata', () => {
         if (!state || ui.sourceVideo.hidden) return
         enforceMutedPreview()

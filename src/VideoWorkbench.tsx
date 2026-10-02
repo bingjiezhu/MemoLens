@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type SyntheticEvent } from "react";
 
 import {
   activeCreatorPreferenceFields,
@@ -207,6 +207,39 @@ function useVideoWorkbenchPollingGate() {
   return { rootRef, pollingAllowed };
 }
 
+function useProjectOpenDisclosure({
+  projectIdentity,
+  isOpeningProject,
+  projectOpenError,
+  canonicalErrorIdentity,
+}: {
+  projectIdentity: string | null;
+  isOpeningProject: boolean;
+  projectOpenError: string | null;
+  canonicalErrorIdentity: string | null;
+}) {
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (projectIdentity) setOpen(true);
+  }, [projectIdentity]);
+
+  useEffect(() => {
+    if (isOpeningProject) setOpen(true);
+  }, [isOpeningProject]);
+
+  useEffect(() => {
+    if (projectOpenError || canonicalErrorIdentity) setOpen(true);
+  }, [projectOpenError, canonicalErrorIdentity]);
+
+  return {
+    open,
+    onToggle(event: SyntheticEvent<HTMLDetailsElement>) {
+      setOpen(event.currentTarget.open);
+    },
+  };
+}
+
 function VideoWorkbench({
   apiBase,
   imageLibraryDir,
@@ -244,6 +277,7 @@ function VideoWorkbench({
   const [ideaConfirmed, setIdeaConfirmed] = useState(false);
   const [materialsConfirmed, setMaterialsConfirmed] = useState(false);
   const [expandedStep, setExpandedStep] = useState<VideoWorkflowId>("idea");
+  const pendingStepFocusRef = useRef<HTMLElement | null>(null);
   const [recoveredRenderJobs, setRecoveredRenderJobs] = useState<RenderJob[]>([]);
   const [creatorMemoryEnabled, setCreatorMemoryEnabled] = useState(true);
   const [briefEdited, setBriefEdited] = useState(false);
@@ -255,6 +289,15 @@ function VideoWorkbench({
   const [projectIdInput, setProjectIdInput] = useState("");
   const [isOpeningProject, setIsOpeningProject] = useState(false);
   const [projectOpenError, setProjectOpenError] = useState<string | null>(null);
+  const openedProjectId = blueprintWorkspace?.project_id ?? state.project?.id ?? null;
+  const projectDisclosure = useProjectOpenDisclosure({
+    projectIdentity: openedProjectId === null ? null : JSON.stringify([scopeKey, openedProjectId]),
+    isOpeningProject,
+    projectOpenError,
+    canonicalErrorIdentity: canonicalWorkspaceFailure === null
+      ? null
+      : JSON.stringify([scopeKey, canonicalWorkspaceFailure.projectId, canonicalWorkspaceFailure.message]),
+  });
   const projectOpenRequestIdRef = useRef(0);
   const projectDatabaseUuidRef = useRef<string | null>(null);
   const projectOpenControllerRef = useRef<AbortController | null>(null);
@@ -658,8 +701,24 @@ function VideoWorkbench({
   }
 
   useEffect(() => {
+    const activeElement = document.activeElement;
+    const currentPanel = workbenchPollingRootRef.current?.querySelector(".video-step-panel");
+    pendingStepFocusRef.current = activeElement instanceof HTMLElement && currentPanel?.contains(activeElement)
+      ? activeElement
+      : null;
     setExpandedStep(workflow.currentId);
   }, [workflow.currentId]);
+
+  useLayoutEffect(() => {
+    const previousFocus = pendingStepFocusRef.current;
+    pendingStepFocusRef.current = null;
+    // Only recover focus lost with the old panel; polling must not steal it
+    // from another control or from a different workspace.
+    if (!previousFocus || previousFocus.isConnected || document.hidden
+      || (document.activeElement !== document.body && document.activeElement !== null)) return;
+    const panel = workbenchPollingRootRef.current?.querySelector<HTMLElement>(`#video-step-${expandedStep}-panel`);
+    if (panel && panel.closest("[hidden]") === null) panel.focus({ preventScroll: true });
+  }, [expandedStep]);
 
   useEffect(() => {
     setArtifactSaved(false);
@@ -1615,14 +1674,18 @@ function VideoWorkbench({
   }
 
   const projectOpenPanel = (
-    <section className="video-panel" aria-labelledby="video-open-project-title">
-      <div className="video-panel-head">
-        <div>
-          <p className="eyebrow">Continue a project</p>
-          <h3 id="video-open-project-title">Open existing project</h3>
-          <p className="video-muted">Enter the exact Project ID from MemoLens or your agent to continue in this library.</p>
-        </div>
-      </div>
+    <details
+      className="video-panel video-project-disclosure"
+      open={projectDisclosure.open}
+      onToggle={projectDisclosure.onToggle}
+    >
+      <summary>
+        <h3 id="video-open-project-title">Open existing project</h3>
+        <small>{blueprintWorkspace || state.project
+          ? `Current project: ${blueprintWorkspace?.title ?? state.project?.title}`
+          : "Continue from a Project ID"}</small>
+      </summary>
+      <p className="video-muted">Enter the exact Project ID from MemoLens or your agent to continue in this library.</p>
       <form onSubmit={(event) => {
         event.preventDefault();
         if (!isOpeningProject) void openExistingProject(projectIdInput);
@@ -1657,7 +1720,7 @@ function VideoWorkbench({
         </div>
         {projectOpenError ? <p className="video-inline-error" role="alert">{projectOpenError}</p> : null}
       </form>
-    </section>
+    </details>
   );
 
   if (canonicalWorkspaceFailure) {
@@ -1745,22 +1808,6 @@ function VideoWorkbench({
       aria-labelledby="video-studio-title"
       data-video-workbench-polling-root="legacy"
     >
-      <div className="video-workbench-heading">
-        <div>
-          <p className="eyebrow">Video Creative Workbench</p>
-          <h2 id="video-studio-title">Turn indexed media into a grounded first cut.</h2>
-          <p>
-            Split videos into timestamped local segments, ground a creative brief in real files,
-            revise a versioned timeline, then preview locally with FFmpeg and save a verified preview copy.
-          </p>
-        </div>
-        <div className="video-local-contract" role="note">
-          <strong>Local by default</strong>
-          <span>Probe, fallback analysis, timeline validation, and preview rendering stay on this machine.</span>
-          <span>Original images and videos are never overwritten.</span>
-        </div>
-      </div>
-
       {projectOpenPanel}
 
       {creatorPreferenceCount > 0 ? (
@@ -1834,6 +1881,7 @@ function VideoWorkbench({
           <section
             className="video-panel video-step-panel"
             id="video-step-idea-panel"
+            tabIndex={-1}
             aria-labelledby="video-idea-title"
           >
             <div className="video-panel-head">
@@ -1881,6 +1929,7 @@ function VideoWorkbench({
         <section
           className="video-panel video-step-panel"
           id="video-step-materials-panel"
+          tabIndex={-1}
           aria-labelledby="video-materials-title"
         >
           <div className="video-panel-head">
@@ -2274,6 +2323,7 @@ function VideoWorkbench({
         <section
           className="video-panel video-step-panel"
           id="video-step-brief-panel"
+          tabIndex={-1}
           aria-labelledby="video-create-title"
         >
           <div className="video-panel-head">
@@ -2384,6 +2434,7 @@ function VideoWorkbench({
         <section
           className="video-panel video-step-panel"
           id="video-step-timeline-panel"
+          tabIndex={-1}
           aria-labelledby="video-timeline-title"
         >
           <div className="video-panel-head">
@@ -2528,6 +2579,7 @@ function VideoWorkbench({
         <section
           className="video-panel video-step-panel"
           id="video-step-preview-panel"
+          tabIndex={-1}
           aria-labelledby="video-render-title"
         >
           <div className="video-panel-head">
@@ -2617,6 +2669,7 @@ function VideoWorkbench({
         <section
           className="video-panel video-step-panel"
           id="video-step-save-panel"
+          tabIndex={-1}
           aria-labelledby="video-save-title"
         >
           <div className="video-panel-head">
@@ -2672,6 +2725,25 @@ function VideoWorkbench({
         </section>
         ) : null}
       </div>
+
+      <details className="video-workbench-guide">
+        <summary>How this works · originals untouched</summary>
+        <div className="video-workbench-heading video-workbench-intro">
+          <div>
+            <p className="eyebrow">Video Creative Workbench</p>
+            <h2 id="video-studio-title">From idea to preview.</h2>
+            <p>
+              Split videos into timestamped local segments, ground a creative brief in real files,
+              revise a versioned timeline, then preview locally with FFmpeg and save a verified preview copy.
+            </p>
+          </div>
+          <div className="video-local-contract" role="note">
+            <strong>Local by default</strong>
+            <span>Probe, fallback analysis, timeline validation, and preview rendering stay on this machine.</span>
+            <span>Original images and videos are never overwritten.</span>
+          </div>
+        </div>
+      </details>
     </section>
   );
 }

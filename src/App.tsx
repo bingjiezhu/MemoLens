@@ -856,10 +856,17 @@ function App() {
     setDestination(nextDestination);
     window.history.replaceState(null, "", `#${sectionId}`);
     window.requestAnimationFrame(() => {
-      document.getElementById(sectionId)?.scrollIntoView({
+      const section = document.getElementById(sectionId);
+      section?.scrollIntoView({
         block: "start",
         behavior: preferredScrollBehavior(),
       });
+      if (section) {
+        if (!section.hasAttribute("tabindex")) section.tabIndex = -1;
+        section.focus({ preventScroll: true });
+      } else {
+        document.getElementById("workspace-content")?.focus({ preventScroll: true });
+      }
     });
   }
 
@@ -2249,19 +2256,23 @@ function App() {
               />
             ) : null}
 
-            <div className="create-codex-row">
-              <span className="status-pill">Using {activeCreatorPreferenceCount} creator preferences</span>
-              {desktopRuntime ? (
-                <button
-                  className="secondary-button compact-button"
-                  type="button"
-                  onClick={() => void handleContinueInCodex()}
-                >
-                  Continue in Codex
-                </button>
-              ) : null}
-              {codexOpenMessage ? <span role="status" aria-live="polite">{codexOpenMessage}</span> : null}
-            </div>
+            {activeCreatorPreferenceCount > 0 || desktopRuntime || codexOpenMessage ? (
+              <div className="create-codex-row">
+                {activeCreatorPreferenceCount > 0 ? (
+                  <span className="status-pill">Using {activeCreatorPreferenceCount} creator preferences</span>
+                ) : null}
+                {desktopRuntime ? (
+                  <button
+                    className="secondary-button compact-button"
+                    type="button"
+                    onClick={() => void handleContinueInCodex()}
+                  >
+                    Continue in Codex
+                  </button>
+                ) : null}
+                {codexOpenMessage ? <span role="status" aria-live="polite">{codexOpenMessage}</span> : null}
+              </div>
+            ) : null}
 
         <div hidden={createMode !== "video"}>
         <Suspense

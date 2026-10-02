@@ -281,6 +281,109 @@ test("visible project entry is wired in the initial, canonical, and integrity-er
   assert.equal((source.match(/\{projectOpenPanel\}/g) ?? []).length, 3);
 });
 
+// Run the actual disclosure hook and its component inputs with dependency-aware
+// hook scheduling. Native toggles use the real handler, including mid-request.
+function projectDisclosureHarness() {
+  const source = readFileSync(new URL("../src/VideoWorkbench.tsx", import.meta.url), "utf8");
+  assert.match(source, /open=\{projectDisclosure\.open\}/);
+  assert.match(source, /onToggle=\{projectDisclosure\.onToggle\}/);
+  const hookStart = source.indexOf("function useProjectOpenDisclosure(");
+  const hookEnd = source.indexOf("\nfunction VideoWorkbench(", hookStart);
+  const inputsStart = source.indexOf("  const openedProjectId =");
+  const inputsEnd = source.indexOf("  const projectOpenRequestIdRef =", inputsStart);
+  assert.ok(hookStart >= 0 && hookEnd > hookStart && inputsStart >= 0 && inputsEnd > inputsStart);
+  let open;
+  let initialized = false;
+  let changed = false;
+  let effectIndex = 0;
+  let pending = [];
+  let disclosure;
+  const dependencies = [];
+  const context = {
+    scopeKey: scope.scopeKey,
+    state: { project: null },
+    blueprintWorkspace: null,
+    isOpeningProject: false,
+    projectOpenError: null,
+    canonicalWorkspaceFailure: null,
+    useState(initial) {
+      if (!initialized) { open = initial; initialized = true; }
+      return [open, (next) => {
+        if (!Object.is(open, next)) { open = next; changed = true; }
+      }];
+    },
+    useEffect(effect, next) {
+      const previous = dependencies[effectIndex];
+      if (!previous || next.some((value, index) => !Object.is(value, previous[index]))) pending.push(effect);
+      dependencies[effectIndex++] = next;
+    },
+  };
+  runInNewContext(stripTypeScriptTypes(source.slice(hookStart, hookEnd)), context);
+  const renderSource = stripTypeScriptTypes(`(() => {${source.slice(inputsStart, inputsEnd)}return projectDisclosure;})()`);
+  function render(patch = {}) {
+    Object.assign(context, patch);
+    for (let pass = 0; pass < 5; pass += 1) {
+      changed = false;
+      effectIndex = 0;
+      pending = [];
+      disclosure = runInNewContext(renderSource, context);
+      for (const effect of pending) effect();
+      if (!changed) return disclosure.open;
+    }
+    assert.fail("project disclosure did not settle");
+  }
+  return {
+    render,
+    nativeToggle(value) {
+      disclosure.onToggle({ currentTarget: { open: value } });
+      return render();
+    },
+  };
+}
+
+test("project disclosure reopens on failure after a native collapse during the pending request", () => {
+  const app = projectDisclosureHarness();
+  assert.equal(app.render(), false);
+  assert.equal(app.nativeToggle(true), true);
+  assert.equal(app.render({ isOpeningProject: true }), true);
+  assert.equal(app.nativeToggle(false), false);
+  assert.equal(app.render({ isOpeningProject: false, projectOpenError: "Project read failed. Retry." }), true);
+  assert.equal(app.nativeToggle(false), false);
+  assert.equal(app.render(), false, "an unchanged error must not prevent manual collapse");
+  assert.equal(app.render({ isOpeningProject: true, projectOpenError: null }), true);
+  assert.equal(app.nativeToggle(false), false);
+  assert.equal(app.render({ isOpeningProject: false, projectOpenError: "Project read failed. Retry." }), true);
+});
+
+test("project disclosure preserves manual collapse across polling but opens a changed project or library", () => {
+  const app = projectDisclosureHarness();
+  assert.equal(app.render({ state: { project: legacy("proj_A") } }), true);
+  assert.equal(app.nativeToggle(false), false);
+  assert.equal(app.render({ state: { project: { ...legacy("proj_A"), title: "Updated title" } } }), false);
+  assert.equal(app.render({ state: { project: legacy("proj_B") } }), true);
+  assert.equal(app.nativeToggle(false), false);
+  assert.equal(app.render({ scopeKey: createVideoScopeKey("/other", "/library/b.db") }), true);
+  assert.equal(app.nativeToggle(false), false);
+  assert.equal(app.render({ blueprintWorkspace: canonical("proj_canonical") }), true);
+  assert.equal(app.nativeToggle(false), false);
+  assert.equal(app.render({ blueprintWorkspace: { ...canonical("proj_canonical"), title: "Polled title" } }), false);
+});
+
+test("project disclosure reveals a new canonical failure without reopening for unchanged failure objects", () => {
+  const app = projectDisclosureHarness();
+  assert.equal(app.render({ isOpeningProject: true }), true);
+  assert.equal(app.nativeToggle(false), false);
+  assert.equal(app.render({
+    isOpeningProject: false,
+    canonicalWorkspaceFailure: { projectId: "proj_A", message: "Canonical read failed" },
+  }), true);
+  assert.equal(app.nativeToggle(false), false);
+  assert.equal(app.render({ canonicalWorkspaceFailure: { projectId: "proj_A", message: "Canonical read failed" } }), false);
+  assert.equal(app.render({ canonicalWorkspaceFailure: { projectId: "proj_A", message: "Integrity check failed" } }), true);
+  assert.equal(app.nativeToggle(false), false);
+  assert.equal(app.render({ canonicalWorkspaceFailure: { projectId: "proj_B", message: "Integrity check failed" } }), true);
+});
+
 // Execute the actual component handlers with a delayed transport. Keeping the
 // rendered `state` snapshot old models a response arriving before React commits.
 function handlerHarness(overrides = {}) {
