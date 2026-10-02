@@ -4,7 +4,13 @@ import { ensureDesktopBackend } from "../query/desktop";
 import { fetchAtlasDraftFromBackend, fetchDraftFromBackend } from "../query/api";
 import { INITIAL_PROMPT } from "../query/mockLibrary";
 import { createDraft } from "../query/studio";
-import type { BackendHealth, DesktopBackendStatus, DraftResult, ToneVariant } from "../query/types";
+import type {
+  AtlasCanonicalImageObservation,
+  BackendHealth,
+  DesktopBackendStatus,
+  DraftResult,
+  ToneVariant,
+} from "../query/types";
 import { createDraftGenerationController } from "./controller";
 import type { DraftGenerationRunInput } from "./controller";
 import { createInitialDraftGenerationState } from "./model";
@@ -14,6 +20,7 @@ export interface UseDraftGenerationOptions {
   apiBase: string;
   prompt: string;
   contextAssetIds: readonly string[];
+  contextAssetObservations: readonly (AtlasCanonicalImageObservation | undefined)[];
   health: BackendHealth;
   selectedImageLibraryDir: string | null;
   selectedDbPath: string | null;
@@ -51,6 +58,7 @@ export function useDraftGeneration(options: UseDraftGenerationOptions) {
     const imageLibraryDir = current.selectedImageLibraryDir ?? current.health.imageLibraryDir ?? null;
     const dbPath = current.selectedDbPath ?? current.health.dbPath ?? null;
     const contextAssetIds = [...current.contextAssetIds];
+    const contextAssetObservations = [...current.contextAssetObservations];
 
     const input: DraftGenerationRunInput = {
       canGenerate: current.health.state === "connected" || current.health.state === "mock",
@@ -67,6 +75,7 @@ export function useDraftGeneration(options: UseDraftGenerationOptions) {
               imageLibraryDir,
               dbPath,
               assetIds: contextAssetIds,
+              assetObservations: contextAssetObservations,
               showDuplicates: false,
               signal: request.signal,
             })

@@ -1,0 +1,50 @@
+{
+  "name": "dsh-memolens",
+  "version": "0.10.1",
+  "description": "DeepSeek Harness bundle for the local-first MemoLens MCP and canonical paired-agent editor.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./prompt": "./prompt.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "prompt.js",
+    "client.js",
+    "cordis.patch.yml",
+    "deepseek-harness",
+    "scripts/*.py",
+    "schemas",
+    "ui",
+    "skills",
+    "assets",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-tool"
+      ]
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "license": "SEE LICENSE IN LICENSE",
+  "keywords": [
+    "deepseek-harness",
+    "memo",
+    "media",
+    "mcp",
+    "timeline",
+    "video-editor"
+  ]
+}

@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 
 from core.config import Settings
+from core.network_policy import local_model_load_kwargs
 from core.semantic_vectors import encode_semantic_text, is_semantic_hash_backend
 
 
@@ -91,8 +92,13 @@ class EmbeddingService:
         self._torch = torch
         self._device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        self._clip_processor = auto_processor.from_pretrained(self.settings.clip_model_id)
-        self._clip_model = clip_model.from_pretrained(self.settings.clip_model_id)
+        load_kwargs = local_model_load_kwargs()
+        self._clip_processor = auto_processor.from_pretrained(
+            self.settings.clip_model_id, **load_kwargs
+        )
+        self._clip_model = clip_model.from_pretrained(
+            self.settings.clip_model_id, **load_kwargs
+        )
         self._clip_model.eval()
         self._clip_model.to(self._device)
 
@@ -104,8 +110,13 @@ class EmbeddingService:
         self._torch = self._torch or torch
         self._device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        self._dino_processor = auto_image_processor.from_pretrained(self.settings.dino_model_id)
-        self._dino_model = auto_model.from_pretrained(self.settings.dino_model_id)
+        load_kwargs = local_model_load_kwargs()
+        self._dino_processor = auto_image_processor.from_pretrained(
+            self.settings.dino_model_id, **load_kwargs
+        )
+        self._dino_model = auto_model.from_pretrained(
+            self.settings.dino_model_id, **load_kwargs
+        )
         self._dino_model.eval()
         self._dino_model.to(self._device)
 

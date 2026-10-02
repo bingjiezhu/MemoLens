@@ -23,10 +23,23 @@ _KNOWN_RELATIONS = {
     "video_segments",
     "current_video_segments",
     "creative_projects",
+    "creative_briefs",
     "timelines",
     "timeline_revisions",
     "asset_review_revisions",
     "creator_profile_revisions",
+    "creative_blueprint_revisions",
+    "creative_blueprint_heads",
+    "creative_blueprint_operations",
+    "blueprint_command_receipts",
+    "agent_project_capabilities",
+    "agent_pairing_confirmation_receipts",
+    "agent_project_command_receipts",
+    "agent_project_capability_events",
+    "blueprint_decision_authority_events",
+    "blueprint_decision_authority_heads",
+    "blueprint_decision_authority_receipts",
+    "blueprint_desktop_receipt_integrity",
     "database_meta",
 }
 
@@ -35,6 +48,7 @@ _WAL_MAGIC = {0x377F0682, 0x377F0683}
 _WAL_VERSION = 3_007_000
 _SNAPSHOT_ATTEMPTS = 4
 _COPY_CHUNK_BYTES = 1024 * 1024
+_SQLITE_VALUE_LIMIT_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -102,6 +116,15 @@ class ReadOnlyDatabase:
             connection.attach_snapshot(snapshot_owner)
             snapshot_owner = None
             connection.row_factory = sqlite3.Row
+            # Bound hostile/corrupt stored values before sqlite3 materializes
+            # them into Python. Individual MemoLens JSON contracts are much
+            # smaller; this wider connection cap leaves headroom for joined
+            # rows while preventing unbounded local-DB memory pressure.
+            if hasattr(connection, "setlimit"):
+                connection.setlimit(
+                    sqlite3.SQLITE_LIMIT_LENGTH,
+                    _SQLITE_VALUE_LIMIT_BYTES,
+                )
             connection.execute("PRAGMA query_only = ON")
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")

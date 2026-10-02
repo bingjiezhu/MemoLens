@@ -1,0 +1,935 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MemoLens Unsaved Draft Lab</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17221d;
+      --muted: #6b756f;
+      --line: #d8ddd9;
+      --line-strong: #bcc6c0;
+      --paper: #f4f3ee;
+      --panel: #fffefa;
+      --panel-soft: #eaeee9;
+      --brand: #426b5a;
+      --brand-dark: #29483b;
+      --brand-pale: #dfeae4;
+      --accent: #c76c4d;
+      --danger: #a83c32;
+      --shadow: 0 18px 42px rgba(34, 52, 43, 0.12);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 18% 0%, rgba(66, 107, 90, 0.13), transparent 28rem),
+        var(--paper);
+    }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: 0.45; }
+    .shell {
+      width: min(1540px, 100%);
+      margin: 0 auto;
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+    .topbar {
+      min-height: 66px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 12px 16px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255, 254, 250, 0.94);
+      box-shadow: 0 8px 28px rgba(34, 52, 43, 0.07);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      min-width: 0;
+    }
+    .brand-mark {
+      width: 38px;
+      height: 38px;
+      border-radius: 12px;
+      display: grid;
+      place-items: center;
+      background: var(--brand);
+      color: white;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+    .brand-copy { min-width: 0; }
+    .eyebrow {
+      margin: 0 0 2px;
+      color: var(--brand);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0;
+      max-width: 62vw;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: ui-serif, Georgia, serif;
+      font-size: clamp(20px, 2.2vw, 30px);
+      font-weight: 600;
+    }
+    .toolbar, .button-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+    .button, .icon-button {
+      min-height: 36px;
+      padding: 8px 12px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      color: var(--ink);
+      background: var(--panel);
+      font-weight: 700;
+    }
+    .icon-button {
+      min-width: 38px;
+      padding-inline: 9px;
+    }
+    .button:hover:not(:disabled), .icon-button:hover:not(:disabled) {
+      border-color: var(--brand);
+      color: var(--brand-dark);
+      background: var(--brand-pale);
+    }
+    .button.primary {
+      border-color: var(--brand);
+      background: var(--brand);
+      color: white;
+    }
+    .button.danger { color: var(--danger); }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: #fff0e7;
+      color: #8c452e;
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .status-pill::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+    .workarea {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 330px;
+      gap: 14px;
+      min-height: 510px;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .stage-panel {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: auto minmax(330px, 1fr) auto;
+    }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 13px 15px;
+      border-bottom: 1px solid var(--line);
+    }
+    .panel-head h2, .inspector h2, .timeline-head h2 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 800;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .stage-wrap {
+      min-height: 330px;
+      display: grid;
+      place-items: center;
+      padding: 22px;
+      background:
+        linear-gradient(45deg, #242b27 25%, transparent 25%),
+        linear-gradient(-45deg, #242b27 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #242b27 75%),
+        linear-gradient(-45deg, transparent 75%, #242b27 75%),
+        #202622;
+      background-position: 0 0, 0 8px, 8px -8px, -8px 0;
+      background-size: 16px 16px;
+    }
+    .stage {
+      width: min(100%, 820px);
+      aspect-ratio: 16 / 9;
+      position: relative;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 7px;
+      background:
+        radial-gradient(circle at 34% 24%, rgba(189, 221, 204, 0.24), transparent 32%),
+        linear-gradient(145deg, #273a31, #111814 78%);
+      color: white;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.3);
+    }
+    .stage.format-vertical { width: min(54%, 430px); aspect-ratio: 9 / 16; }
+    .stage.format-square { width: min(72%, 600px); aspect-ratio: 1 / 1; }
+    .stage-copy {
+      max-width: 78%;
+      display: grid;
+      gap: 8px;
+      text-align: center;
+    }
+    .stage-copy strong {
+      font-family: ui-serif, Georgia, serif;
+      font-size: clamp(22px, 3vw, 42px);
+      font-weight: 500;
+    }
+    .stage-copy span { color: rgba(255,255,255,0.7); font-size: 13px; }
+    .stage-badge {
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: rgba(8, 16, 12, 0.72);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .stage-time {
+      position: absolute;
+      right: 12px;
+      bottom: 12px;
+      color: rgba(255,255,255,0.76);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+    .stage-note {
+      padding: 9px 15px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      background: var(--panel-soft);
+      font-size: 12px;
+    }
+    .inspector {
+      padding: 15px;
+      overflow: auto;
+      display: grid;
+      align-content: start;
+      gap: 14px;
+    }
+    .inspector-section {
+      display: grid;
+      gap: 9px;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .inspector-section:last-child { border-bottom: 0; }
+    .clip-title {
+      margin: 0;
+      font-family: ui-serif, Georgia, serif;
+      font-size: 21px;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+    }
+    .field-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    input, select {
+      width: 100%;
+      min-height: 36px;
+      padding: 7px 9px;
+      border: 1px solid var(--line-strong);
+      border-radius: 9px;
+      color: var(--ink);
+      background: white;
+    }
+    code {
+      padding: 2px 5px;
+      border-radius: 5px;
+      background: var(--panel-soft);
+      color: var(--brand-dark);
+      font-size: 11px;
+      overflow-wrap: anywhere;
+    }
+    .provenance {
+      display: grid;
+      gap: 6px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .provenance div { display: grid; gap: 3px; }
+    .timeline-panel { min-width: 0; }
+    .timeline-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 13px 15px;
+      border-bottom: 1px solid var(--line);
+    }
+    .timeline-head > div { display: flex; align-items: baseline; gap: 10px; }
+    .format-buttons { display: flex; gap: 5px; }
+    .format-buttons button {
+      padding: 5px 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .timeline-body {
+      display: grid;
+      gap: 9px;
+      padding: 12px 15px 15px;
+      overflow-x: auto;
+    }
+    .ruler {
+      height: 20px;
+      margin-left: 116px;
+      position: relative;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+    }
+    .ruler span { position: absolute; bottom: 4px; transform: translateX(-50%); }
+    .track {
+      display: grid;
+      grid-template-columns: 106px minmax(660px, 1fr);
+      gap: 10px;
+      align-items: stretch;
+    }
+    .track-label {
+      display: grid;
+      align-content: center;
+      gap: 2px;
+      padding: 9px;
+      border-radius: 10px;
+      background: var(--panel-soft);
+    }
+    .track-label strong { font-size: 12px; text-transform: capitalize; }
+    .track-label span { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+    .track-lane {
+      min-height: 76px;
+      position: relative;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background:
+        linear-gradient(90deg, rgba(66, 107, 90, 0.05) 1px, transparent 1px);
+      background-size: 10% 100%;
+      overflow: hidden;
+    }
+    .clip {
+      min-width: 46px;
+      height: 62px;
+      position: absolute;
+      top: 6px;
+      padding: 7px 9px;
+      border: 1px solid rgba(41, 72, 59, 0.28);
+      border-radius: 9px;
+      display: grid;
+      align-content: center;
+      gap: 3px;
+      overflow: hidden;
+      color: var(--brand-dark);
+      background: linear-gradient(135deg, #e8f1ec, #cbded4);
+      text-align: left;
+    }
+    .track[data-type="audio"] .clip { color: #624627; background: linear-gradient(135deg, #f5ead8, #ead2ab); }
+    .track[data-type="text"] .clip { color: #4f456b; background: linear-gradient(135deg, #eeeafa, #d9d0ef); }
+    .clip.selected {
+      border: 2px solid var(--brand-dark);
+      box-shadow: 0 4px 13px rgba(41, 72, 59, 0.25);
+    }
+    .clip.dragging { opacity: 0.55; }
+    .clip strong, .clip small {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .clip strong { font-size: 11px; }
+    .clip small { opacity: 0.72; font-size: 9px; }
+    .notice {
+      min-height: 22px;
+      margin: 0;
+      padding-inline: 3px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .notice.error { color: var(--danger); font-weight: 700; }
+    .loading {
+      min-height: 70vh;
+      display: grid;
+      place-items: center;
+      color: var(--brand-dark);
+      font-weight: 800;
+    }
+    @media (max-width: 920px) {
+      .workarea { grid-template-columns: 1fr; }
+      .inspector { max-height: none; }
+      .topbar { align-items: flex-start; }
+      .toolbar { justify-content: flex-end; }
+    }
+    @media (max-width: 620px) {
+      .shell { padding: 8px; }
+      .topbar { display: grid; }
+      .toolbar { justify-content: flex-start; }
+      h1 { max-width: 86vw; }
+      .track { grid-template-columns: 78px minmax(560px, 1fr); }
+      .ruler { margin-left: 88px; }
+      .field-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div id="loading" class="loading">Opening the process-scoped editor…</div>
+  <main id="app" class="shell" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">M</div>
+        <div class="brand-copy">
+          <p class="eyebrow">Codex browser surface</p>
+          <h1 id="project-title">MemoLens Unsaved Draft Lab</h1>
+        </div>
+      </div>
+      <div class="toolbar" aria-label="Editor history controls">
+        <span class="status-pill">Not saved</span>
+        <button id="undo" class="button" type="button" title="Undo (⌘Z)">Undo</button>
+        <button id="redo" class="button" type="button" title="Redo (⇧⌘Z)">Redo</button>
+        <span id="revision" class="meta">draft revision —</span>
+      </div>
+    </header>
+
+    <section class="workarea">
+      <article class="panel stage-panel">
+        <header class="panel-head">
+          <h2>Source-grounded preview</h2>
+          <span id="stage-format" class="meta">—</span>
+        </header>
+        <div class="stage-wrap">
+          <div id="stage" class="stage">
+            <span id="stage-kind" class="stage-badge">No clip</span>
+            <div class="stage-copy">
+              <strong id="stage-title">Choose a clip</strong>
+              <span id="stage-subtitle">The plugin does not expose raw media bytes in this first browser slice.</span>
+            </div>
+            <span id="stage-time" class="stage-time">—</span>
+          </div>
+        </div>
+        <div class="stage-note">
+          This is the Unsaved Draft Lab: a real but intentionally process-scoped Timeline 1.0 session. It cannot Save to the canonical project. Source playback, persistence, render, and export remain unavailable here.
+        </div>
+      </article>
+
+      <aside class="panel inspector" aria-labelledby="inspector-title">
+        <div class="inspector-section">
+          <p class="eyebrow">Selected clip</p>
+          <h2 id="inspector-title" class="clip-title">No clip selected</h2>
+          <p id="clip-summary" class="meta">Choose a clip in the timeline.</p>
+        </div>
+
+        <div class="inspector-section">
+          <h2>Edit</h2>
+          <div class="button-row">
+            <button id="move-left" class="icon-button" type="button" title="Move earlier">←</button>
+            <button id="move-right" class="icon-button" type="button" title="Move later">→</button>
+            <button id="split" class="button primary" type="button" title="Split clip (C)">Split</button>
+            <button id="delete" class="button danger" type="button" title="Delete clip">Delete</button>
+          </div>
+          <label>
+            Split offset (ms)
+            <input id="split-offset" type="number" min="1" step="10">
+          </label>
+          <div class="field-grid">
+            <label>
+              Source in (ms)
+              <input id="source-in" type="number" min="0" step="10">
+            </label>
+            <label>
+              Source out (ms)
+              <input id="source-out" type="number" min="1" step="10">
+            </label>
+          </div>
+          <button id="apply-trim" class="button" type="button">Apply ripple trim</button>
+        </div>
+
+        <div class="inspector-section">
+          <h2>Picture & sound</h2>
+          <div class="field-grid">
+            <label>
+              Fit
+              <select id="fit">
+                <option value="cover">Cover</option>
+                <option value="contain">Contain</option>
+                <option value="stretch">Stretch</option>
+              </select>
+            </label>
+            <label>
+              Volume (dB)
+              <input id="volume" type="number" min="-60" max="12" step="0.5">
+            </label>
+          </div>
+          <div class="button-row">
+            <button id="apply-fit" class="button" type="button">Apply fit</button>
+            <button id="apply-volume" class="button" type="button">Apply volume</button>
+          </div>
+        </div>
+
+        <div class="inspector-section">
+          <h2>Replace</h2>
+          <label>
+            Exact replacement candidate
+            <select id="replacement"></select>
+          </label>
+          <button id="apply-replacement" class="button" type="button">Replace selected clip</button>
+          <span id="replacement-note" class="meta"></span>
+        </div>
+
+        <div class="inspector-section">
+          <h2>Provenance</h2>
+          <div id="provenance" class="provenance"></div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="panel timeline-panel" aria-labelledby="timeline-title">
+      <header class="timeline-head">
+        <div>
+          <h2 id="timeline-title">Timeline</h2>
+          <span id="timeline-meta" class="meta">—</span>
+        </div>
+        <div class="format-buttons" role="group" aria-label="Canvas aspect ratio">
+          <button type="button" data-ratio="9:16">9:16</button>
+          <button type="button" data-ratio="16:9">16:9</button>
+          <button type="button" data-ratio="1:1">1:1</button>
+        </div>
+      </header>
+      <div id="timeline" class="timeline-body"></div>
+    </section>
+    <p id="notice" class="notice" role="status" aria-live="polite"></p>
+  </main>
+
+  <script>
+    (function () {
+      "use strict";
+
+      var pathParts = window.location.pathname.split("/").filter(Boolean);
+      var sessionId = pathParts[pathParts.length - 1] || "";
+      var state = null;
+      var selectedClipId = null;
+      var busy = false;
+      var draggedClipId = null;
+
+      function byId(id) { return document.getElementById(id); }
+      function text(value, fallback) {
+        var normalized = String(value == null ? "" : value).replace(/\s+/g, " ").trim();
+        return normalized || fallback;
+      }
+      function ms(value) {
+        var total = Math.max(0, Number(value) || 0);
+        var minutes = Math.floor(total / 60000);
+        var seconds = Math.floor((total % 60000) / 1000);
+        var tenths = Math.floor((total % 1000) / 100);
+        return minutes + ":" + String(seconds).padStart(2, "0") + "." + tenths;
+      }
+      function allClips() {
+        if (!state) return [];
+        var rows = [];
+        state.timeline.tracks.forEach(function (track, trackIndex) {
+          track.clips.forEach(function (clip, clipIndex) {
+            rows.push({ track: track, trackIndex: trackIndex, clip: clip, clipIndex: clipIndex });
+          });
+        });
+        return rows;
+      }
+      function selectedRow() {
+        var rows = allClips();
+        return rows.find(function (row) { return row.clip.id === selectedClipId; }) || rows[0] || null;
+      }
+      function setNotice(message, error) {
+        var node = byId("notice");
+        node.textContent = message || "";
+        node.classList.toggle("error", Boolean(error));
+      }
+      function setBusy(next) {
+        busy = next;
+        document.querySelectorAll("button, input, select").forEach(function (node) {
+          if (node.id !== "undo" && node.id !== "redo") node.disabled = next;
+        });
+      }
+      async function request(path, options) {
+        var response = await fetch("/api/sessions/" + encodeURIComponent(sessionId) + path, Object.assign({
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" }
+        }, options || {}));
+        var payload = await response.json().catch(function () { return {}; });
+        if (!response.ok || payload.status === "error") {
+          var detail = payload.error && payload.error.message;
+          throw new Error(detail || "Editor request failed (" + response.status + ").");
+        }
+        return payload;
+      }
+      async function bootstrap() {
+        var params = new URLSearchParams(window.location.hash.slice(1));
+        var boot = params.get("boot");
+        if (boot) {
+          state = await request("/bootstrap", {
+            method: "POST",
+            body: JSON.stringify({ token: boot })
+          });
+          window.history.replaceState(null, "", window.location.pathname);
+        } else {
+          state = await request("", { method: "GET", headers: {} });
+        }
+        selectedClipId = allClips()[0] ? allClips()[0].clip.id : null;
+        byId("loading").hidden = true;
+        byId("app").hidden = false;
+        render();
+      }
+      async function action(payload, successMessage) {
+        if (busy) return;
+        setBusy(true);
+        setNotice("Applying typed editor operation…", false);
+        try {
+          state = await request("/actions", {
+            method: "POST",
+            body: JSON.stringify(payload)
+          });
+          var row = selectedRow();
+          selectedClipId = row ? row.clip.id : (allClips()[0] ? allClips()[0].clip.id : null);
+          render();
+          setNotice(successMessage || "Draft updated. Nothing was persisted.", false);
+        } catch (error) {
+          setNotice(error instanceof Error ? error.message : String(error), true);
+        } finally {
+          setBusy(false);
+          render();
+        }
+      }
+      function apply(operations, message) {
+        return action({
+          type: "apply",
+          operations: operations,
+          created_at: new Date().toISOString()
+        }, message);
+      }
+      function appendProvenance(label, value) {
+        var wrapper = document.createElement("div");
+        var strong = document.createElement("strong");
+        var code = document.createElement("code");
+        strong.textContent = label;
+        code.textContent = text(value, "—");
+        wrapper.append(strong, code);
+        byId("provenance").appendChild(wrapper);
+      }
+      function aspectRatio(format) {
+        if (format.width === format.height) return "1:1";
+        return format.width < format.height ? "9:16" : "16:9";
+      }
+      function renderStage(row) {
+        var format = state.timeline.format;
+        var ratio = aspectRatio(format);
+        var stage = byId("stage");
+        stage.classList.toggle("format-vertical", ratio === "9:16");
+        stage.classList.toggle("format-square", ratio === "1:1");
+        byId("stage-format").textContent = format.width + "×" + format.height + " · " + format.fps + " fps";
+        if (!row) {
+          byId("stage-kind").textContent = "No clip";
+          byId("stage-title").textContent = "Choose a clip";
+          byId("stage-time").textContent = "—";
+          return;
+        }
+        var clip = row.clip;
+        byId("stage-kind").textContent = text(row.track.type, "clip");
+        byId("stage-title").textContent = text(clip.provenance && clip.provenance.reason, clip.asset_id || clip.id);
+        byId("stage-subtitle").textContent = "Bound to " + text(clip.asset_id, "text layer") + " · raw media remains private";
+        byId("stage-time").textContent = ms(clip.timeline_start_ms) + " – " + ms(clip.timeline_start_ms + clip.timeline_duration_ms);
+      }
+      function renderInspector(row) {
+        var controls = [
+          "move-left", "move-right", "split", "delete", "split-offset",
+          "source-in", "source-out", "apply-trim", "fit", "volume",
+          "apply-fit", "apply-volume", "replacement", "apply-replacement"
+        ];
+        controls.forEach(function (id) { byId(id).disabled = busy || !row; });
+        byId("provenance").replaceChildren();
+        if (!row) {
+          byId("inspector-title").textContent = "No clip selected";
+          byId("clip-summary").textContent = "Choose a clip in the timeline.";
+          return;
+        }
+        var clip = row.clip;
+        var trackClips = row.track.clips;
+        byId("inspector-title").textContent = text(clip.provenance && clip.provenance.reason, clip.asset_id || clip.id);
+        byId("clip-summary").textContent = row.track.type + " · " + ms(clip.timeline_duration_ms) + " · starts " + ms(clip.timeline_start_ms);
+        byId("move-left").disabled = busy || row.clipIndex === 0;
+        byId("move-right").disabled = busy || row.clipIndex >= trackClips.length - 1;
+        byId("delete").disabled = busy || trackClips.length <= 1;
+        byId("split").disabled = busy || clip.timeline_duration_ms < 2;
+        byId("split-offset").disabled = busy || clip.timeline_duration_ms < 2;
+        byId("split-offset").max = Math.max(1, clip.timeline_duration_ms - 1);
+        byId("split-offset").value = Math.max(1, Math.floor(clip.timeline_duration_ms / 2));
+
+        var ranged = typeof clip.source_in_ms === "number" && typeof clip.source_out_ms === "number";
+        byId("source-in").disabled = busy || !ranged;
+        byId("source-out").disabled = busy || !ranged;
+        byId("apply-trim").disabled = busy || !ranged;
+        byId("source-in").value = ranged ? clip.source_in_ms : "";
+        byId("source-out").value = ranged ? clip.source_out_ms : "";
+
+        var visual = row.track.type === "video" || row.track.type === "image";
+        var audible = row.track.type === "video" || row.track.type === "audio";
+        byId("fit").disabled = busy || !visual;
+        byId("apply-fit").disabled = busy || !visual;
+        byId("fit").value = visual ? text(clip.fit, "cover") : "cover";
+        byId("volume").disabled = busy || !audible;
+        byId("apply-volume").disabled = busy || !audible;
+        byId("volume").value = audible ? Number(clip.volume_db || 0) : "";
+
+        var replacements = state.replacement_candidates || [];
+        var compatibleReplacements = [];
+        replacements.forEach(function (candidate, index) {
+          if (candidate.kind === row.track.type) {
+            compatibleReplacements.push({ candidate: candidate, index: index });
+          }
+        });
+        var replacement = byId("replacement");
+        replacement.replaceChildren();
+        compatibleReplacements.forEach(function (entry) {
+          var option = document.createElement("option");
+          option.value = String(entry.index);
+          option.textContent = text(entry.candidate.label, entry.candidate.asset_id);
+          replacement.appendChild(option);
+        });
+        replacement.disabled = busy || compatibleReplacements.length === 0;
+        byId("apply-replacement").disabled = busy || compatibleReplacements.length === 0;
+        byId("replacement-note").textContent = compatibleReplacements.length
+          ? compatibleReplacements.length + " compatible " + row.track.type + " candidate" + (compatibleReplacements.length === 1 ? "" : "s")
+          : replacements.length
+            ? "No supplied candidate matches this " + row.track.type + " track."
+            : "Ask the Agent to search and pass exact replacement candidates when opening the editor.";
+
+        appendProvenance("Clip", clip.id);
+        appendProvenance("Asset", clip.asset_id);
+        appendProvenance("Source", clip.asset_source_id);
+        appendProvenance("Match", clip.provenance && clip.provenance.match_id);
+        if (clip.segment_id) appendProvenance("Segment", clip.segment_id);
+      }
+      function renderTimeline() {
+        var root = byId("timeline");
+        root.replaceChildren();
+        var duration = Math.max(1, state.timeline.format.duration_ms);
+        var ruler = document.createElement("div");
+        ruler.className = "ruler";
+        for (var index = 0; index <= 5; index += 1) {
+          var tick = document.createElement("span");
+          tick.style.left = (index * 20) + "%";
+          tick.textContent = ms(duration * index / 5);
+          ruler.appendChild(tick);
+        }
+        root.appendChild(ruler);
+        state.timeline.tracks.forEach(function (track) {
+          var trackNode = document.createElement("div");
+          trackNode.className = "track";
+          trackNode.dataset.type = track.type;
+          var label = document.createElement("div");
+          label.className = "track-label";
+          var labelStrong = document.createElement("strong");
+          var labelSmall = document.createElement("span");
+          labelStrong.textContent = track.type;
+          labelSmall.textContent = track.role;
+          label.append(labelStrong, labelSmall);
+          var lane = document.createElement("div");
+          lane.className = "track-lane";
+          lane.addEventListener("dragover", function (event) { event.preventDefault(); });
+          track.clips.forEach(function (clip, clipIndex) {
+            var clipNode = document.createElement("button");
+            clipNode.type = "button";
+            clipNode.className = "clip" + (clip.id === selectedClipId ? " selected" : "");
+            clipNode.style.left = (100 * clip.timeline_start_ms / duration) + "%";
+            clipNode.style.width = Math.max(3.5, 100 * clip.timeline_duration_ms / duration) + "%";
+            clipNode.draggable = true;
+            clipNode.title = text(clip.provenance && clip.provenance.reason, clip.id);
+            var strong = document.createElement("strong");
+            var small = document.createElement("small");
+            strong.textContent = text(clip.provenance && clip.provenance.reason, clip.asset_id || clip.id);
+            small.textContent = ms(clip.timeline_duration_ms);
+            clipNode.append(strong, small);
+            clipNode.addEventListener("click", function () {
+              selectedClipId = clip.id;
+              render();
+            });
+            clipNode.addEventListener("dragstart", function () {
+              draggedClipId = clip.id;
+              clipNode.classList.add("dragging");
+            });
+            clipNode.addEventListener("dragend", function () {
+              draggedClipId = null;
+              clipNode.classList.remove("dragging");
+            });
+            clipNode.addEventListener("drop", function (event) {
+              event.preventDefault();
+              if (!draggedClipId || draggedClipId === clip.id) return;
+              var draggedInTrack = track.clips.some(function (item) { return item.id === draggedClipId; });
+              if (!draggedInTrack) {
+                setNotice("Cross-track moves are not available in this first browser slice.", true);
+                return;
+              }
+              selectedClipId = draggedClipId;
+              apply([{ op: "move_clip", clip_id: draggedClipId, to_index: clipIndex }], "Clip reordered by drag. Nothing was persisted.");
+            });
+            lane.appendChild(clipNode);
+          });
+          trackNode.append(label, lane);
+          root.appendChild(trackNode);
+        });
+      }
+      function render() {
+        if (!state) return;
+        var row = selectedRow();
+        if (row) selectedClipId = row.clip.id;
+        var timeline = state.timeline;
+        byId("project-title").textContent = "Project " + text(timeline.project_id, "draft");
+        byId("revision").textContent = "draft revision " + timeline.revision;
+        byId("timeline-meta").textContent = allClips().length + " clips · " + ms(timeline.format.duration_ms) + " · process-scoped";
+        byId("undo").disabled = busy || !state.history.undo_available;
+        byId("redo").disabled = busy || !state.history.redo_available;
+        renderStage(row);
+        renderInspector(row);
+        renderTimeline();
+      }
+
+      byId("undo").addEventListener("click", function () { action({ type: "undo" }, "Undid the last draft operation."); });
+      byId("redo").addEventListener("click", function () { action({ type: "redo" }, "Redid the draft operation."); });
+      byId("move-left").addEventListener("click", function () {
+        var row = selectedRow();
+        if (row && row.clipIndex > 0) apply([{ op: "move_clip", clip_id: row.clip.id, to_index: row.clipIndex - 1 }], "Clip moved earlier.");
+      });
+      byId("move-right").addEventListener("click", function () {
+        var row = selectedRow();
+        if (row && row.clipIndex < row.track.clips.length - 1) apply([{ op: "move_clip", clip_id: row.clip.id, to_index: row.clipIndex + 1 }], "Clip moved later.");
+      });
+      byId("split").addEventListener("click", function () {
+        var row = selectedRow();
+        var offset = Math.round(Number(byId("split-offset").value));
+        if (row) apply([{ op: "split_clip", clip_id: row.clip.id, offset_ms: offset }], "Clip split at " + ms(offset) + ".");
+      });
+      byId("delete").addEventListener("click", function () {
+        var row = selectedRow();
+        if (row) apply([{ op: "delete_clip", clip_id: row.clip.id }], "Clip deleted from the unsaved draft.");
+      });
+      byId("apply-trim").addEventListener("click", function () {
+        var row = selectedRow();
+        if (!row) return;
+        apply([{
+          op: "trim_clip",
+          clip_id: row.clip.id,
+          source_in_ms: Math.round(Number(byId("source-in").value)),
+          source_out_ms: Math.round(Number(byId("source-out").value)),
+          ripple: true
+        }], "Ripple trim applied.");
+      });
+      byId("apply-fit").addEventListener("click", function () {
+        var row = selectedRow();
+        if (row) apply([{ op: "set_fit", clip_id: row.clip.id, fit: byId("fit").value }], "Fit updated.");
+      });
+      byId("apply-volume").addEventListener("click", function () {
+        var row = selectedRow();
+        if (row) apply([{ op: "set_volume", clip_id: row.clip.id, volume_db: Number(byId("volume").value) }], "Volume updated.");
+      });
+      byId("apply-replacement").addEventListener("click", function () {
+        var row = selectedRow();
+        var index = Number(byId("replacement").value);
+        var candidate = state && state.replacement_candidates[index];
+        if (!row || !candidate) return;
+        if (candidate.kind !== row.track.type) {
+          setNotice("The selected replacement does not match this " + row.track.type + " track.", true);
+          return;
+        }
+        var operation = { op: "replace_clip", clip_id: row.clip.id, ripple: true };
+        [
+          "asset_id", "asset_source_id", "asset_sha256", "segment_id",
+          "analysis_run_id", "analysis_revision", "source_in_ms",
+          "source_out_ms", "reason", "match_id"
+        ].forEach(function (key) {
+          if (Object.prototype.hasOwnProperty.call(candidate, key)) operation[key] = candidate[key];
+        });
+        apply([operation], "Clip replaced with an exact source-bound candidate.");
+      });
+      document.querySelectorAll("[data-ratio]").forEach(function (button) {
+        button.addEventListener("click", function () {
+          var ratio = button.getAttribute("data-ratio");
+          var dimensions = ratio === "9:16" ? [1080, 1920] : ratio === "1:1" ? [1080, 1080] : [1920, 1080];
+          apply([{ op: "set_format", width: dimensions[0], height: dimensions[1] }], "Canvas changed to " + ratio + ".");
+        });
+      });
+      window.addEventListener("keydown", function (event) {
+        var target = event.target;
+        var typing = target && ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName);
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
+          event.preventDefault();
+          action({ type: event.shiftKey ? "redo" : "undo" }, event.shiftKey ? "Redid the draft operation." : "Undid the last draft operation.");
+        } else if (!typing && event.key.toLowerCase() === "c") {
+          event.preventDefault();
+          byId("split").click();
+        } else if (!typing && (event.key === "Backspace" || event.key === "Delete")) {
+          event.preventDefault();
+          byId("delete").click();
+        }
+      });
+
+      bootstrap().catch(function (error) {
+        byId("loading").textContent = error instanceof Error ? error.message : String(error);
+        byId("loading").style.color = "#a83c32";
+      });
+    }());
+  </script>
+</body>
+</html>

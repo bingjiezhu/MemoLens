@@ -14,6 +14,7 @@ from core.llm_utils import (
     request_minimax_chat_completion,
     request_vertex_generate_content,
 )
+from core.network_policy import network_target_enabled
 from core.schemas import RetrievalPlan, StructuredRetrievalQuery
 
 
@@ -361,6 +362,9 @@ class OpenAICompatibleQueryPlanner:
         if self._should_use_fast_local_plan(text=text, fallback_plan=fallback_plan):
             self._store_plan_cache(cache_key, fallback_plan)
             return fallback_plan
+        if not network_target_enabled(self.settings.query_base_url):
+            self._store_plan_cache(cache_key, fallback_plan)
+            return fallback_plan
         if self.settings.query_provider != "vertex" and not self.settings.query_api_key:
             self._store_plan_cache(cache_key, fallback_plan)
             return fallback_plan
@@ -446,6 +450,8 @@ class OpenAICompatibleQueryPlanner:
             context_assets=context_assets,
             count=desired_count,
         )
+        if not network_target_enabled(self.settings.query_base_url):
+            return fallback_suggestions
         if self.settings.query_provider != "vertex" and not self.settings.query_api_key:
             return fallback_suggestions
 

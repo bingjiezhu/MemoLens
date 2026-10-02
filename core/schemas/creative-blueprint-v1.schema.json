@@ -1,0 +1,422 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://memolens.local/schemas/creative-blueprint-v1.schema.json",
+  "title": "MemoLens Creative Blueprint v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "object",
+    "schema_version",
+    "schema_sha256",
+    "project_id",
+    "revision",
+    "parent",
+    "created_by_operation_id",
+    "status",
+    "semantic_sha256",
+    "semantic",
+    "lineage",
+    "evidence_manifest",
+    "authority"
+  ],
+  "properties": {
+    "object": {"const": "memolens.creative_blueprint"},
+    "schema_version": {"const": "1"},
+    "schema_sha256": {"$ref": "#/$defs/sha256"},
+    "project_id": {"$ref": "#/$defs/identifier"},
+    "revision": {"$ref": "#/$defs/revision"},
+    "parent": {
+      "$ref": "#/$defs/nullable_revision_ref"
+    },
+    "created_by_operation_id": {"$ref": "#/$defs/identifier"},
+    "status": {"const": "proposal"},
+    "semantic_sha256": {"$ref": "#/$defs/sha256"},
+    "semantic": {"$ref": "#/$defs/semantic"},
+    "lineage": {"$ref": "#/$defs/lineage"},
+    "evidence_manifest": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {"$ref": "#/$defs/evidence_manifest_item"}
+    },
+    "authority": {"$ref": "#/$defs/authority"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+      "maxLength": 200
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "maxLength": 64
+    },
+    "nullable_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$",
+      "maxLength": 64
+    },
+    "evidence_ref": {
+      "type": "string",
+      "pattern": "^memolens://evidence/(asset|span)/[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+      "maxLength": 260
+    },
+    "nullable_evidence_ref": {
+      "type": ["string", "null"],
+      "pattern": "^memolens://evidence/(asset|span)/[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+      "maxLength": 260
+    },
+    "script_block_ids": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/identifier"}
+    },
+    "revision_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "content_sha256"],
+      "properties": {
+        "revision": {"$ref": "#/$defs/revision"},
+        "content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "nullable_revision_ref": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["revision", "content_sha256"],
+      "properties": {
+        "revision": {"$ref": "#/$defs/revision"},
+        "content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "semantic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intent",
+        "script",
+        "direction",
+        "output",
+        "constraints",
+        "material_hints",
+        "reference_refs",
+        "technique_refs",
+        "bindings",
+        "assumptions",
+        "missing_evidence",
+        "open_decisions"
+      ],
+      "properties": {
+        "intent": {"$ref": "#/$defs/intent"},
+        "script": {"$ref": "#/$defs/script"},
+        "direction": {"$ref": "#/$defs/direction"},
+        "output": {"$ref": "#/$defs/output"},
+        "constraints": {"$ref": "#/$defs/constraints"},
+        "material_hints": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"$ref": "#/$defs/material_hint"}
+        },
+        "reference_refs": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/reference"}
+        },
+        "technique_refs": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/technique"}
+        },
+        "bindings": {"$ref": "#/$defs/bindings"},
+        "assumptions": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {"$ref": "#/$defs/assumption"}
+        },
+        "missing_evidence": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {"$ref": "#/$defs/missing_evidence"}
+        },
+        "open_decisions": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {"$ref": "#/$defs/open_decision"}
+        }
+      }
+    },
+    "intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goal", "stance", "audience", "platform"],
+      "properties": {
+        "goal": {"type": ["string", "null"], "minLength": 1, "maxLength": 4000},
+        "stance": {"type": ["string", "null"], "minLength": 1, "maxLength": 4000},
+        "audience": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "platform": {"type": ["string", "null"], "minLength": 1, "maxLength": 200}
+      }
+    },
+    "script": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blocks"],
+      "properties": {
+        "blocks": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {"$ref": "#/$defs/script_block"}
+        }
+      }
+    },
+    "script_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block_id", "text"],
+      "properties": {
+        "block_id": {"$ref": "#/$defs/identifier"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 12000}
+      }
+    },
+    "direction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["theme", "narrative_arc", "emotion", "tone", "pace"],
+      "properties": {
+        "theme": {"type": ["string", "null"], "minLength": 1, "maxLength": 4000},
+        "narrative_arc": {"type": ["string", "null"], "minLength": 1, "maxLength": 4000},
+        "emotion": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "tone": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "pace": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000}
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["duration_target_ms", "aspect_ratio"],
+      "properties": {
+        "duration_target_ms": {
+          "type": ["integer", "null"],
+          "minimum": 1000,
+          "maximum": 1800000
+        },
+        "aspect_ratio": {
+          "type": ["string", "null"],
+          "enum": ["16:9", "9:16", "1:1", "4:5", null],
+          "maxLength": 4
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["must_include", "must_exclude"],
+      "properties": {
+        "must_include": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/constraint"}
+        },
+        "must_exclude": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/constraint"}
+        }
+      }
+    },
+    "constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["constraint_id", "text", "evidence_ref", "script_block_ids"],
+      "properties": {
+        "constraint_id": {"$ref": "#/$defs/identifier"},
+        "text": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "evidence_ref": {"$ref": "#/$defs/nullable_evidence_ref"},
+        "script_block_ids": {"$ref": "#/$defs/script_block_ids"}
+      },
+      "anyOf": [
+        {"properties": {"text": {"type": "string"}}},
+        {"properties": {"evidence_ref": {"type": "string"}}}
+      ]
+    },
+    "material_hint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hint_id", "evidence_ref", "script_block_ids", "reason"],
+      "properties": {
+        "hint_id": {"$ref": "#/$defs/identifier"},
+        "evidence_ref": {"$ref": "#/$defs/evidence_ref"},
+        "script_block_ids": {"$ref": "#/$defs/script_block_ids"},
+        "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000}
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference_id", "kind", "locator", "note"],
+      "properties": {
+        "reference_id": {"$ref": "#/$defs/identifier"},
+        "kind": {
+          "enum": ["project", "research_snapshot", "evidence", "external_https", "user_text"]
+        },
+        "locator": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "note": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000}
+      }
+    },
+    "technique": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["card_id", "revision", "declared_state"],
+      "properties": {
+        "card_id": {"$ref": "#/$defs/identifier"},
+        "revision": {"$ref": "#/$defs/revision"},
+        "declared_state": {"enum": ["proposed", "selected", "rejected"]}
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["creator_context", "wiki_generation"],
+      "properties": {
+        "creator_context": {"$ref": "#/$defs/nullable_creator_context"},
+        "wiki_generation": {"$ref": "#/$defs/nullable_wiki_generation"}
+      }
+    },
+    "creator_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "revision", "content_sha256"],
+      "properties": {
+        "profile_id": {"$ref": "#/$defs/identifier"},
+        "revision": {"$ref": "#/$defs/revision"},
+        "content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "nullable_creator_context": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["profile_id", "revision", "content_sha256"],
+      "properties": {
+        "profile_id": {"$ref": "#/$defs/identifier"},
+        "revision": {"$ref": "#/$defs/revision"},
+        "content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "wiki_generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "content_sha256"],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/identifier"},
+        "content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "nullable_wiki_generation": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["generation_id", "content_sha256"],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/identifier"},
+        "content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "assumption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assumption_id", "text"],
+      "properties": {
+        "assumption_id": {"$ref": "#/$defs/identifier"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 1000}
+      }
+    },
+    "missing_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gap_id", "description", "script_block_ids", "required_before"],
+      "properties": {
+        "gap_id": {"$ref": "#/$defs/identifier"},
+        "description": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "script_block_ids": {"$ref": "#/$defs/script_block_ids"},
+        "required_before": {"enum": ["coverage", "timeline", "render", "publish", "not_blocking"]}
+      }
+    },
+    "open_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision_id", "question", "scope", "required_before"],
+      "properties": {
+        "decision_id": {"$ref": "#/$defs/identifier"},
+        "question": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "scope": {"enum": ["intent", "stance", "script", "direction", "output", "material", "reference", "technique", "other"]},
+        "required_before": {"enum": ["coverage", "timeline", "render", "publish", "not_blocking"]}
+      }
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["compiler", "source_candidate_sha256", "initial_legacy_brief"],
+      "properties": {
+        "compiler": {"const": "memolens.blueprint-proposal-compiler/v1"},
+        "source_candidate_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "initial_legacy_brief": {"$ref": "#/$defs/revision_ref"}
+      }
+    },
+    "evidence_manifest_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_ref", "status", "proof_sha256"],
+      "properties": {
+        "evidence_ref": {"$ref": "#/$defs/evidence_ref"},
+        "status": {"enum": ["verified", "unresolved"]},
+        "proof_sha256": {"$ref": "#/$defs/nullable_sha256"}
+      }
+    },
+    "decision_unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semantic_sha256", "claim", "verified"],
+      "properties": {
+        "semantic_sha256": {"$ref": "#/$defs/sha256"},
+        "claim": {"const": "agent_proposal"},
+        "verified": {"const": false}
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "decision_units"],
+      "properties": {
+        "state": {"const": "unverified"},
+        "decision_units": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "intent_goal",
+            "intent_stance",
+            "script",
+            "creative_direction",
+            "output",
+            "material_constraints",
+            "references",
+            "techniques"
+          ],
+          "properties": {
+            "intent_goal": {"$ref": "#/$defs/decision_unit"},
+            "intent_stance": {"$ref": "#/$defs/decision_unit"},
+            "script": {"$ref": "#/$defs/decision_unit"},
+            "creative_direction": {"$ref": "#/$defs/decision_unit"},
+            "output": {"$ref": "#/$defs/decision_unit"},
+            "material_constraints": {"$ref": "#/$defs/decision_unit"},
+            "references": {"$ref": "#/$defs/decision_unit"},
+            "techniques": {"$ref": "#/$defs/decision_unit"}
+          }
+        }
+      }
+    }
+  }
+}

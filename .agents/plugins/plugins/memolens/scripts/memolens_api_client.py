@@ -23,8 +23,6 @@ from memolens_contracts import PLUGIN_VERSION, MemoLensError
 DEFAULT_BASE_URL = "http://127.0.0.1:5519"
 DEFAULT_TIMEOUT = 2.0
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
-LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
-
 AddressResolver = Callable[..., list[tuple[Any, ...]]]
 
 
@@ -45,16 +43,23 @@ def clamp_timeout(value: float) -> float:
 def validate_base_url(
     raw_url: str, *, resolver: AddressResolver = socket.getaddrinfo
 ) -> str:
-    """Validate a URL and prove every resolved address is loopback."""
+    """Validate a literal-loopback URL without consulting DNS."""
 
     parsed = urlsplit(raw_url.strip())
     if parsed.scheme not in {"http", "https"}:
         raise MemoLensError(
             "MemoLens base URL must use http or https.", code="unsafe_base_url"
         )
-    if parsed.hostname is None or parsed.hostname.casefold() not in LOOPBACK_HOSTS:
+    try:
+        host = ipaddress.ip_address(parsed.hostname or "")
+    except ValueError as exc:
         raise MemoLensError(
-            "MemoLens base URL must target 127.0.0.1, ::1, or localhost.",
+            "MemoLens base URL must target a literal loopback IP address.",
+            code="unsafe_base_url",
+        ) from exc
+    if not host.is_loopback:
+        raise MemoLensError(
+            "MemoLens base URL must target a literal loopback IP address.",
             code="unsafe_base_url",
         )
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
@@ -66,21 +71,10 @@ def validate_base_url(
         raise MemoLensError(
             "MemoLens base URL cannot contain a path.", code="unsafe_base_url"
         )
-    try:
-        resolved = {
-            ipaddress.ip_address(item[4][0])
-            for item in resolver(parsed.hostname, parsed.port or 5519)
-        }
-    except (OSError, ValueError) as exc:
-        raise MemoLensError(
-            "MemoLens loopback host could not be resolved safely.",
-            code="unsafe_base_url",
-        ) from exc
-    if not resolved or not all(address.is_loopback for address in resolved):
-        raise MemoLensError(
-            "MemoLens host resolved outside the loopback interface.",
-            code="unsafe_base_url",
-        )
+    # Keep the keyword for API compatibility with older callers and tests.  A
+    # literal IP boundary must never invoke it: doing so would turn an offline
+    # local handshake into a DNS-capable action.
+    del resolver
     return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
 
 

@@ -1,18 +1,27 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from contextlib import closing
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import math
+from pathlib import Path
 import re
 import sqlite3
 import time
-from typing import Iterable
+from typing import Iterable, Mapping, Protocol
 
 import numpy as np
 
+from .canonical_image_observation import (
+    build_current_canonical_image_observation,
+)
 from .db import ImageIndexRepository
+from .image_analysis_contract import IMAGE_ANALYSIS_STAGES
+from .image_analysis_persistence import ImageAnalysisPersistenceError
 from .image_quality import metadata_quality_score
 
 
@@ -140,6 +149,22 @@ CREATE TABLE IF NOT EXISTS atlas_baskets (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS atlas_projection_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    status TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    layout_version TEXT NOT NULL,
+    source_image_count INTEGER NOT NULL,
+    source_updated_at TEXT,
+    asset_count INTEGER NOT NULL,
+    cluster_count INTEGER NOT NULL,
+    edge_count INTEGER NOT NULL,
+    memory_count INTEGER NOT NULL,
+    stack_count INTEGER NOT NULL,
+    role_count INTEGER NOT NULL,
+    materialized_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_atlas_assets_cluster
     ON atlas_assets(cluster_id);
 
@@ -190,6 +215,45 @@ NEAR_DUPLICATE_THRESHOLD = 0.88
 EDGE_SIMILARITY_FLOOR = 0.62
 DEFAULT_VISIBLE_LIMIT = 900
 MAX_VISIBLE_LIMIT = 1800
+ATLAS_PROJECTION_ERROR_CODE = "atlas_projection_not_ready"
+ATLAS_ASSET_OBSERVATION_CONFLICT_CODE = "atlas_asset_observation_conflict"
+ATLAS_GENERATE_MAX_CONTEXT_ASSETS = 24
+ATLAS_GENERATE_MAX_SELECTED_MEMORIES = 24
+ATLAS_ASSET_OBSERVATIONS_MAX_CANONICAL_BYTES = 256 * 1024
+ATLAS_VERIFIED_SOURCE_ADAPTER = "canonical-image-current/v1"
+ATLAS_SOURCE_FINGERPRINT_PREFIX = "verified-source-sha256:"
+ATLAS_PARITY_GAP_LIMIT = 100
+# ML-008-A0.1 changes only the authority admitted into Atlas.  These algorithmic
+# limitations remain explicit ML-008-B work and must not be hidden by a green
+# canonical-image cutover status.
+ATLAS_A0_RESIDUALS = (
+    "atlas_dense_similarity_o_n_squared",
+    "atlas_mixed_vector_spaces_not_resolved",
+    "atlas_visual_semantics_not_validated",
+)
+ATLAS_PROJECTION_TABLES = frozenset(
+    {
+        "atlas_assets",
+        "atlas_baskets",
+        "atlas_clusters",
+        "atlas_edges",
+        "atlas_feedback",
+        "atlas_memories",
+        "atlas_projection_state",
+        "atlas_roles",
+        "atlas_runs",
+        "atlas_stacks",
+        "image_index",
+    }
+)
+ATLAS_PROJECTION_COUNT_TABLES = (
+    ("asset_count", "atlas_assets"),
+    ("cluster_count", "atlas_clusters"),
+    ("edge_count", "atlas_edges"),
+    ("memory_count", "atlas_memories"),
+    ("stack_count", "atlas_stacks"),
+    ("role_count", "atlas_roles"),
+)
 
 HUMAN_TERMS = {
     "adult",
@@ -361,74 +425,209 @@ class AtlasFilters:
     asset_ids: list[str] | None = None
 
 
+class VerifiedImageAnalysisRepository(Protocol):
+    """Narrow consumer boundary implemented by ``MediaRepository``."""
+
+    db_path: Path
+
+    def bind_image_database_identity(self) -> tuple[int, int]: ...
+
+    def get_current_image_analysis_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        asset_id: str,
+    ) -> dict[str, object] | None: ...
+
+
+@dataclass(frozen=True)
+class AtlasVerifiedSourceSnapshot:
+    """One path-free, deterministic view of Atlas-admissible image evidence."""
+
+    rows: tuple[sqlite3.Row, ...]
+    evidence_by_asset: Mapping[str, dict[str, object]]
+    parity_gaps: tuple[dict[str, object], ...]
+    database_uuid: str | None
+    observed_image_count: int
+    fingerprint: str
+    source_available: bool
+
+    @property
+    def verified_image_count(self) -> int:
+        return len(self.rows)
+
+
+class AtlasProjectionNotReadyError(RuntimeError):
+    """Stable read-boundary failure for an absent or stale Atlas projection."""
+
+    code = ATLAS_PROJECTION_ERROR_CODE
+    status_code = 409
+
+    def __init__(self, health: dict[str, object]):
+        self.health = health
+        reason = str(health.get("projection_reason") or "not_materialized")
+        state = str(health.get("projection_status") or "not_ready")
+        super().__init__(
+            "The local Photo Atlas projection is not ready "
+            f"({state}: {reason}). Run an authenticated Atlas rebuild."
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "object": "error",
+            "status": "not_ready",
+            "code": self.code,
+            "type": self.code,
+            "message": str(self),
+            "projection_status": self.health.get("projection_status", "not_ready"),
+            "reason": self.health.get("projection_reason", "not_materialized"),
+            "index_health": self.health,
+        }
+
+
+class AtlasAssetObservationConflictError(RuntimeError):
+    """Stable fail-closed error for an explicit Basket observation CAS."""
+
+    code = ATLAS_ASSET_OBSERVATION_CONFLICT_CODE
+    status_code = 409
+
+    def __init__(self, reason_code: str):
+        self.reason_code = reason_code
+        super().__init__(
+            "The selected Atlas asset observation no longer matches the "
+            "authoritative current image analysis. Refresh the selection and retry."
+        )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "object": "error",
+            "status": "conflict",
+            "code": self.code,
+            "type": self.code,
+            "message": str(self),
+            "reason_code": self.reason_code,
+        }
+
+
+def _canonical_observation_bytes(value: object) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise AtlasAssetObservationConflictError(
+            "asset_observations_not_canonical_json"
+        ) from exc
+
+
+def validate_atlas_asset_observation_request(
+    asset_ids: list[str] | None,
+    asset_observations: list[object] | None,
+) -> tuple[list[str], list[dict[str, object]]] | None:
+    """Validate a bounded, ordered explicit-Basket CAS envelope.
+
+    The authoritative observation comparison remains inside the service's
+    read-only SQLite snapshot.  This function is deliberately safe to reuse at
+    the HTTP edge and at direct Core call sites.
+    """
+
+    if asset_ids is None:
+        if asset_observations not in (None, []):
+            raise AtlasAssetObservationConflictError(
+                "asset_observations_without_asset_ids"
+            )
+        return None
+    if not asset_ids:
+        raise AtlasAssetObservationConflictError("asset_ids_empty")
+    if len(asset_ids) > ATLAS_GENERATE_MAX_CONTEXT_ASSETS:
+        raise AtlasAssetObservationConflictError("asset_ids_limit_exceeded")
+    if any(
+        not isinstance(asset_id, str)
+        or not asset_id
+        or asset_id.strip() != asset_id
+        for asset_id in asset_ids
+    ):
+        raise AtlasAssetObservationConflictError("asset_ids_invalid")
+    if len(set(asset_ids)) != len(asset_ids):
+        raise AtlasAssetObservationConflictError("asset_ids_duplicate")
+    if not isinstance(asset_observations, list):
+        raise AtlasAssetObservationConflictError("asset_observations_missing")
+    if len(asset_observations) != len(asset_ids):
+        raise AtlasAssetObservationConflictError(
+            "asset_observations_order_or_count_mismatch"
+        )
+
+    normalized: list[dict[str, object]] = []
+    observation_asset_ids: list[str] = []
+    for index, observation in enumerate(asset_observations):
+        if not isinstance(observation, dict):
+            raise AtlasAssetObservationConflictError(
+                "asset_observation_invalid"
+            )
+        observation_asset_id = observation.get("asset_id")
+        if observation_asset_id != asset_ids[index]:
+            raise AtlasAssetObservationConflictError(
+                "asset_observations_order_or_count_mismatch"
+            )
+        observation_asset_ids.append(str(observation_asset_id))
+        normalized.append(deepcopy(observation))
+    if len(set(observation_asset_ids)) != len(observation_asset_ids):
+        raise AtlasAssetObservationConflictError(
+            "asset_observation_ids_duplicate"
+        )
+    if (
+        len(_canonical_observation_bytes(normalized))
+        > ATLAS_ASSET_OBSERVATIONS_MAX_CANONICAL_BYTES
+    ):
+        raise AtlasAssetObservationConflictError(
+            "asset_observations_canonical_bytes_exceeded"
+        )
+    return list(asset_ids), normalized
+
+
 class PhotoAtlasService:
-    def __init__(self, repository: ImageIndexRepository):
+    def __init__(
+        self,
+        repository: ImageIndexRepository,
+        media_repository: VerifiedImageAnalysisRepository | None = None,
+    ):
         self.repository = repository
+        self.media_repository = media_repository
 
     def ensure_schema(self) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.executescript(ATLAS_SCHEMA_SQL)
 
     def status(self) -> dict[str, object]:
-        self.ensure_schema()
-        with self._connect() as connection:
-            image_count = self._image_count(connection)
-            asset_count = int(
-                connection.execute("SELECT COUNT(*) AS count FROM atlas_assets").fetchone()[
-                    "count"
-                ]
+        try:
+            with closing(self._connect(read_only=True)) as connection:
+                return self._status_in_transaction(connection)
+        except sqlite3.Error:
+            return self._not_ready_status(
+                image_count=0,
+                reason="database_unavailable",
             )
-            cluster_count = int(
-                connection.execute("SELECT COUNT(*) AS count FROM atlas_clusters").fetchone()[
-                    "count"
-                ]
-            )
-            edge_count = int(
-                connection.execute("SELECT COUNT(*) AS count FROM atlas_edges").fetchone()[
-                    "count"
-                ]
-            )
-            run = connection.execute(
-                """
-                SELECT id, status, layout_version, image_count, cluster_count, edge_count,
-                       started_at, completed_at, message
-                FROM atlas_runs
-                ORDER BY started_at DESC
-                LIMIT 1
-                """
-            ).fetchone()
-            newest_image_update = connection.execute(
-                "SELECT MAX(updated_at) AS updated_at FROM image_index"
-            ).fetchone()["updated_at"]
-
-        completed_at = run["completed_at"] if run else None
-        needs_rebuild = (
-            run is None
-            or run["status"] != "completed"
-            or image_count != asset_count
-            or (newest_image_update is not None and completed_at is not None and newest_image_update > completed_at)
-        )
-        if image_count == 0:
-            needs_rebuild = False
-
-        return {
-            "object": "atlas.status",
-            "status": run["status"] if run else "empty",
-            "layout_version": run["layout_version"] if run else DEFAULT_LAYOUT_VERSION,
-            "image_count": image_count,
-            "asset_count": asset_count,
-            "cluster_count": cluster_count,
-            "edge_count": edge_count,
-            "needs_rebuild": needs_rebuild,
-            "last_run": dict(run) if run else None,
-        }
 
     def rebuild(self) -> dict[str, object]:
         self.ensure_schema()
-        started_at = utc_now_iso()
-        run_id = f"atlas_{int(time.time())}"
+        with closing(self._connect(read_only=True)) as source_connection:
+            source_snapshot = self._verified_source_snapshot(source_connection)
+        if not source_snapshot.source_available:
+            raise AtlasProjectionNotReadyError(
+                self._not_ready_status(
+                    image_count=0,
+                    reason="verified_image_source_unavailable",
+                    source_snapshot=source_snapshot,
+                )
+            )
 
-        with self._connect() as connection:
+        started_at = utc_now_iso()
+        run_id = f"atlas_{time.time_ns()}"
+
+        with closing(self._connect()) as connection, connection:
             connection.execute(
                 """
                 INSERT INTO atlas_runs (
@@ -441,10 +640,28 @@ class PhotoAtlasService:
             )
 
         try:
-            rows = self._fetch_image_rows()
+            rows = list(source_snapshot.rows)
             assets, clusters, edges = self._build_atlas(rows)
+            memories = self._build_memories(assets)
+            stacks = self._build_stacks(assets, edges)
+            roles = self._build_roles(assets)
             completed_at = utc_now_iso()
-            with self._connect() as connection:
+            with closing(self._connect()) as connection, connection:
+                # Hold one writer snapshot while revalidating the exact source
+                # fingerprint and publishing the derived Atlas generation.
+                connection.execute("BEGIN IMMEDIATE")
+                current_source = self._verified_source_snapshot(connection)
+                if (
+                    not current_source.source_available
+                    or current_source.fingerprint != source_snapshot.fingerprint
+                ):
+                    raise AtlasProjectionNotReadyError(
+                        self._not_ready_status(
+                            image_count=current_source.verified_image_count,
+                            reason="verified_source_changed_during_rebuild",
+                            source_snapshot=current_source,
+                        )
+                    )
                 connection.execute("DELETE FROM atlas_assets")
                 connection.execute("DELETE FROM atlas_clusters")
                 connection.execute("DELETE FROM atlas_edges")
@@ -454,9 +671,9 @@ class PhotoAtlasService:
                 self._insert_assets(connection, assets, completed_at)
                 self._insert_clusters(connection, clusters, completed_at)
                 self._insert_edges(connection, edges, completed_at)
-                self._insert_memories(connection, self._build_memories(assets), completed_at)
-                self._insert_stacks(connection, self._build_stacks(assets, edges), completed_at)
-                self._insert_roles(connection, self._build_roles(assets), completed_at)
+                self._insert_memories(connection, memories, completed_at)
+                self._insert_stacks(connection, stacks, completed_at)
+                self._insert_roles(connection, roles, completed_at)
                 connection.execute(
                     """
                     UPDATE atlas_runs
@@ -477,6 +694,43 @@ class PhotoAtlasService:
                         run_id,
                     ),
                 )
+                connection.execute(
+                    """
+                    INSERT INTO atlas_projection_state (
+                        singleton, status, run_id, layout_version,
+                        source_image_count, source_updated_at, asset_count,
+                        cluster_count, edge_count, memory_count, stack_count,
+                        role_count, materialized_at
+                    )
+                    VALUES (1, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(singleton) DO UPDATE SET
+                        status = excluded.status,
+                        run_id = excluded.run_id,
+                        layout_version = excluded.layout_version,
+                        source_image_count = excluded.source_image_count,
+                        source_updated_at = excluded.source_updated_at,
+                        asset_count = excluded.asset_count,
+                        cluster_count = excluded.cluster_count,
+                        edge_count = excluded.edge_count,
+                        memory_count = excluded.memory_count,
+                        stack_count = excluded.stack_count,
+                        role_count = excluded.role_count,
+                        materialized_at = excluded.materialized_at
+                    """,
+                    (
+                        run_id,
+                        DEFAULT_LAYOUT_VERSION,
+                        source_snapshot.observed_image_count,
+                        self._stored_source_fingerprint(source_snapshot.fingerprint),
+                        len(assets),
+                        len(clusters),
+                        len(edges),
+                        len(memories),
+                        len(stacks),
+                        len(roles),
+                        completed_at,
+                    ),
+                )
             return {
                 "object": "atlas.rebuild",
                 "status": "completed",
@@ -484,11 +738,20 @@ class PhotoAtlasService:
                 "image_count": len(assets),
                 "cluster_count": len(clusters),
                 "edge_count": len(edges),
+                "source_image_count": source_snapshot.observed_image_count,
+                "verified_image_count": source_snapshot.verified_image_count,
+                "source_snapshot_sha256": source_snapshot.fingerprint,
+                "parity_status": (
+                    "complete" if not source_snapshot.parity_gaps else "gaps"
+                ),
+                "parity_gap_count": len(source_snapshot.parity_gaps),
+                "parity_gaps": list(source_snapshot.parity_gaps[:ATLAS_PARITY_GAP_LIMIT]),
+                "residuals": list(ATLAS_A0_RESIDUALS),
                 "started_at": started_at,
                 "completed_at": completed_at,
             }
         except Exception as exc:
-            with self._connect() as connection:
+            with closing(self._connect()) as connection, connection:
                 connection.execute(
                     """
                     UPDATE atlas_runs
@@ -504,32 +767,47 @@ class PhotoAtlasService:
     def overview(self, filters: AtlasFilters | None = None) -> dict[str, object]:
         filters = filters or AtlasFilters()
         filters.mode = normalize_mode(filters.mode)
-        index_health = self.status()
-        self._ensure_current_cache()
+        with closing(self._connect(read_only=True)) as connection:
+            index_health, source_snapshot = self._require_projection_ready_in_transaction(
+                connection
+            )
+            return self._overview_in_transaction(
+                connection,
+                filters=filters,
+                index_health=index_health,
+                source_snapshot=source_snapshot,
+            )
 
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT image_id, filename, relative_path, taken_at, place_name,
-                       country, description, tags_json, combined_text, embedding_backend,
-                       x, y, cluster_id, event_id, duplicate_group_id,
-                       neighbor_ids_json, quality_score, technical_quality_score,
-                       people_risk, lat, lon, layout_version, updated_at
-                FROM atlas_assets
-                ORDER BY quality_score DESC, taken_at DESC, filename ASC
-                """
-            ).fetchall()
-            hidden_ids = self._hidden_asset_ids(connection)
-            hidden_ids.update(self._archived_asset_ids(connection))
-            forced_people_ids = self._feedback_asset_ids(connection, "never_show_people")
-            cluster_labels = self._cluster_label_map(connection)
-
+    def _overview_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        filters: AtlasFilters,
+        index_health: dict[str, object],
+        source_snapshot: AtlasVerifiedSourceSnapshot,
+    ) -> dict[str, object]:
+        rows = connection.execute(
+            """
+            SELECT image_id, filename, relative_path, taken_at, place_name,
+                   country, description, tags_json, combined_text, embedding_backend,
+                   x, y, cluster_id, event_id, duplicate_group_id,
+                   neighbor_ids_json, quality_score, technical_quality_score,
+                   people_risk, lat, lon, layout_version, updated_at
+            FROM atlas_assets
+            ORDER BY quality_score DESC, taken_at DESC, filename ASC
+            """
+        ).fetchall()
+        hidden_ids = self._hidden_asset_ids(connection)
+        hidden_ids.update(self._archived_asset_ids(connection))
+        forced_people_ids = self._feedback_asset_ids(connection, "never_show_people")
+        cluster_labels = self._cluster_label_map(connection)
         assets = [
             self._asset_row_to_dict(
                 row,
                 mode=filters.mode,
                 forced_people_ids=forced_people_ids,
                 cluster_labels=cluster_labels,
+                verified_evidence=source_snapshot.evidence_by_asset,
             )
             for row in rows
             if row["image_id"] not in hidden_ids
@@ -538,11 +816,11 @@ class PhotoAtlasService:
         clusters = self._build_response_clusters(filtered_assets, filters.mode)
         limited_assets = filtered_assets[: filters.limit]
         edge_assets = {asset["id"] for asset in limited_assets}
-        edges = self._response_edges(edge_assets)
+        edges = self._response_edges(edge_assets, connection=connection)
 
         return {
             "object": "atlas.overview",
-            "status": "stale" if index_health["needs_rebuild"] else "completed",
+            "status": "completed",
             "mode": filters.mode,
             "layout_version": DEFAULT_LAYOUT_VERSION,
             "asset_count": len(assets),
@@ -564,7 +842,7 @@ class PhotoAtlasService:
         weight: float = 1.0,
         note: str | None = None,
     ) -> dict[str, object]:
-        self.ensure_schema()
+        self._require_projection_ready()
         normalized_kind = target_kind.strip().lower()
         normalized_action = action.strip().lower()
         if normalized_kind not in {"asset", "cluster"}:
@@ -581,7 +859,17 @@ class PhotoAtlasService:
         }:
             raise ValueError("Unsupported feedback action.")
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
+            target_exists = connection.execute(
+                (
+                    "SELECT 1 FROM atlas_assets WHERE image_id = ?"
+                    if normalized_kind == "asset"
+                    else "SELECT 1 FROM atlas_clusters WHERE id = ?"
+                ),
+                (target_id.strip(),),
+            ).fetchone()
+            if target_exists is None:
+                raise ValueError("Atlas feedback target does not exist.")
             connection.execute(
                 """
                 INSERT INTO atlas_feedback (
@@ -615,71 +903,124 @@ class PhotoAtlasService:
         mode: str = DEFAULT_MODE,
         cluster_id: str | None = None,
         asset_ids: list[str] | None = None,
+        asset_observations: list[object] | None = None,
+        selected_memory_ids: list[str] | None = None,
         no_people: bool = False,
         min_quality: float | None = None,
         show_duplicates: bool = False,
     ) -> dict[str, object]:
-        effective_no_people = no_people or query_requests_no_people(text)
-        context_assets: list[dict[str, object]] = []
-        context_terms: list[str] = []
-        if asset_ids:
-            self._ensure_derived_layers()
-            with self._connect() as connection:
-                context_assets = self._assets_by_ids(connection, asset_ids[:24])
-            context_terms = context_terms_from_assets(context_assets)
-        effective_text = append_context_terms(text, context_terms)
-        filters = AtlasFilters(
-            mode=mode,
-            query=effective_text,
-            no_people=effective_no_people,
-            min_quality=min_quality,
-            show_duplicates=show_duplicates,
-            limit=MAX_VISIBLE_LIMIT,
-            cluster_id=cluster_id,
-            asset_ids=None,
+        explicit_basket = validate_atlas_asset_observation_request(
+            asset_ids,
+            asset_observations,
         )
-        overview = self.overview(filters)
-        candidates = list(overview["assets"])
-        if context_assets:
-            existing_ids = {str(asset["id"]) for asset in candidates}
-            candidates.extend(
-                asset
-                for asset in context_assets
-                if str(asset["id"]) not in existing_ids
-                and (not effective_no_people or float(asset.get("people_risk") or 0.0) < 0.45)
+        effective_no_people = no_people or query_requests_no_people(text)
+        with closing(self._connect(read_only=True)) as connection:
+            # sqlite3 does not pin a snapshot for a sequence of plain SELECTs.
+            # An explicit read transaction makes observation CAS, Atlas
+            # readiness, context resolution, ranking, and output one snapshot.
+            connection.execute("BEGIN")
+            source_snapshot = self._verified_source_snapshot(connection)
+
+            context_asset_ids: list[str] = []
+            if explicit_basket is not None:
+                context_asset_ids, client_observations = explicit_basket
+                self._assert_asset_observations_current(
+                    source_snapshot,
+                    context_asset_ids,
+                    client_observations,
+                )
+
+            index_health = self._status_in_transaction(
+                connection,
+                source_snapshot=source_snapshot,
             )
-        if not candidates:
+            if index_health.get("projection_status") != "ready":
+                raise AtlasProjectionNotReadyError(index_health)
+
+            if explicit_basket is None and selected_memory_ids:
+                # Memory guidance is selected by the server from this same
+                # snapshot, so it carries current semantics rather than a
+                # client CAS.  Keep that derived context deterministically
+                # bounded to the same 24-asset generation ceiling.
+                context_asset_ids = self._asset_ids_for_memories_in_transaction(
+                    connection,
+                    selected_memory_ids,
+                )[:ATLAS_GENERATE_MAX_CONTEXT_ASSETS]
+            context_assets = self._assets_by_ids(
+                connection,
+                context_asset_ids,
+                source_snapshot.evidence_by_asset,
+            )
+            if explicit_basket is not None and [
+                str(asset["id"]) for asset in context_assets
+            ] != context_asset_ids:
+                raise AtlasAssetObservationConflictError(
+                    "atlas_context_asset_resolution_mismatch"
+                )
+
+            effective_text = append_context_terms(
+                text,
+                context_terms_from_assets(context_assets),
+            )
+            filters = AtlasFilters(
+                mode=normalize_mode(mode),
+                query=effective_text,
+                no_people=effective_no_people,
+                min_quality=min_quality,
+                show_duplicates=show_duplicates,
+                limit=MAX_VISIBLE_LIMIT,
+                cluster_id=cluster_id,
+                asset_ids=None,
+            )
+            overview = self._overview_in_transaction(
+                connection,
+                filters=filters,
+                index_health=index_health,
+                source_snapshot=source_snapshot,
+            )
+            candidates = list(overview["assets"])
+            if context_assets:
+                existing_ids = {str(asset["id"]) for asset in candidates}
+                candidates.extend(
+                    asset
+                    for asset in context_assets
+                    if str(asset["id"]) not in existing_ids
+                    and (
+                        not effective_no_people
+                        or float(asset.get("people_risk") or 0.0) < 0.45
+                    )
+                )
+            selected = self._curate_assets(
+                candidates,
+                text=effective_text,
+                top_k=top_k,
+                context_assets=context_assets,
+                connection=connection,
+            )
+            data = [
+                self._asset_to_retrieval_image(asset)
+                for asset in selected[:top_k]
+            ]
             return {
                 "object": "atlas.generate",
                 "id": f"atlas_gen_{int(time.time())}",
                 "status": "completed",
                 "query_text": text,
-                "candidate_count": 0,
-                "data": [],
+                "candidate_count": len(candidates),
+                "data": data,
                 "atlas": overview,
             }
 
-        selected = self._curate_assets(
-            candidates,
-            text=effective_text,
-            top_k=top_k,
-            context_assets=context_assets,
-        )
-
-        return {
-            "object": "atlas.generate",
-            "id": f"atlas_gen_{int(time.time())}",
-            "status": "completed",
-            "query_text": text,
-            "candidate_count": len(candidates),
-            "data": [self._asset_to_retrieval_image(asset) for asset in selected[:top_k]],
-            "atlas": overview,
-        }
-
     def assets_by_ids(self, asset_ids: list[str]) -> list[dict[str, object]]:
-        self._ensure_derived_layers()
-        with self._connect() as connection:
-            return self._assets_by_ids(connection, asset_ids)
+        with closing(self._connect(read_only=True)) as connection:
+            _health, source_snapshot = self._require_projection_ready_in_transaction(
+                connection
+            )
+            return self._assets_by_ids(
+                connection,
+                asset_ids,
+                source_snapshot.evidence_by_asset,
+            )
 
     def query_preview(
         self,
@@ -708,8 +1049,8 @@ class PhotoAtlasService:
                 asset_ids=memory_asset_ids or None,
             )
         )
-        self._ensure_derived_layers()
-        with self._connect() as connection:
+        self._require_projection_ready()
+        with closing(self._connect(read_only=True)) as connection:
             memories = self._memory_cards(connection, overview["assets"], normalized_lens)
             similarity = self._similarity_lookup(connection)
 
@@ -764,15 +1105,23 @@ class PhotoAtlasService:
                 limit=limit,
             )
         )
-        self._ensure_derived_layers()
 
-        with self._connect() as connection:
+        with closing(self._connect(read_only=True)) as connection:
+            _health, source_snapshot = self._require_projection_ready_in_transaction(
+                connection
+            )
             memories = self._memory_cards(connection, overview["assets"], normalized_lens)
             cleanup = self._cleanup_summary(connection, overview["assets"])
-            all_assets = self._all_cached_assets(connection)
+            all_assets = self._all_cached_assets(
+                connection,
+                source_snapshot.evidence_by_asset,
+            )
             all_cleanup = self._cleanup_summary(connection, all_assets)
             inspiration_memories = self._memory_cards(connection, all_assets, "explore")
-            basket = self._latest_basket(connection)
+            basket = self._latest_basket(
+                connection,
+                source_snapshot.evidence_by_asset,
+            )
 
         featured_memory = memories[0] if memories else None
         return {
@@ -804,9 +1153,10 @@ class PhotoAtlasService:
         }
 
     def memory(self, memory_id: str) -> dict[str, object]:
-        self._ensure_current_cache()
-        self._ensure_derived_layers()
-        with self._connect() as connection:
+        with closing(self._connect(read_only=True)) as connection:
+            _health, source_snapshot = self._require_projection_ready_in_transaction(
+                connection
+            )
             row = connection.execute(
                 """
                 SELECT id, kind, label, asset_ids_json, representative_ids_json,
@@ -820,7 +1170,11 @@ class PhotoAtlasService:
             if row is None:
                 raise ValueError("Atlas memory does not exist.")
             asset_ids = parse_json_list(row["asset_ids_json"])
-            assets = self._assets_by_ids(connection, asset_ids)
+            assets = self._assets_by_ids(
+                connection,
+                asset_ids,
+                source_snapshot.evidence_by_asset,
+            )
             role_rows = connection.execute(
                 """
                 SELECT image_id, role, confidence, reason
@@ -830,7 +1184,11 @@ class PhotoAtlasService:
                 """,
                 (memory_id,),
             ).fetchall()
-            stacks = self._stacks_for_asset_ids(connection, asset_ids)
+            stacks = self._stacks_for_asset_ids(
+                connection,
+                asset_ids,
+                source_snapshot.evidence_by_asset,
+            )
 
         roles: dict[str, list[dict[str, object]]] = defaultdict(list)
         for role_row in role_rows:
@@ -854,10 +1212,14 @@ class PhotoAtlasService:
         }
 
     def cleanup(self) -> dict[str, object]:
-        self._ensure_current_cache()
-        self._ensure_derived_layers()
-        with self._connect() as connection:
-            assets = self._all_cached_assets(connection)
+        with closing(self._connect(read_only=True)) as connection:
+            _health, source_snapshot = self._require_projection_ready_in_transaction(
+                connection
+            )
+            assets = self._all_cached_assets(
+                connection,
+                source_snapshot.evidence_by_asset,
+            )
             return {
                 "object": "atlas.cleanup",
                 "status": "completed",
@@ -865,27 +1227,74 @@ class PhotoAtlasService:
             }
 
     def asset_ids_for_memories(self, memory_ids: list[str]) -> list[str]:
-        self._ensure_current_cache()
-        normalized_ids = [memory_id.strip() for memory_id in memory_ids if memory_id.strip()]
+        with closing(self._connect(read_only=True)) as connection:
+            self._require_projection_ready_in_transaction(connection)
+            return self._asset_ids_for_memories_in_transaction(
+                connection,
+                memory_ids,
+            )
+
+    @staticmethod
+    def _asset_ids_for_memories_in_transaction(
+        connection: sqlite3.Connection,
+        memory_ids: list[str],
+    ) -> list[str]:
+        normalized_ids = [
+            memory_id.strip()
+            for memory_id in memory_ids
+            if isinstance(memory_id, str) and memory_id.strip()
+        ]
         if not normalized_ids:
             return []
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT asset_ids_json
-                FROM atlas_memories
-                WHERE id IN ({})
-                """.format(",".join("?" for _ in normalized_ids)),
-                normalized_ids,
-            ).fetchall()
+        if len(normalized_ids) > ATLAS_GENERATE_MAX_SELECTED_MEMORIES:
+            raise ValueError("At most 24 Atlas memories may guide one generation.")
+        if len(set(normalized_ids)) != len(normalized_ids):
+            raise ValueError("Selected Atlas memory IDs must be unique.")
+        rows = connection.execute(
+            """
+            SELECT id, asset_ids_json
+            FROM atlas_memories
+            WHERE id IN ({})
+            """.format(",".join("?" for _ in normalized_ids)),
+            normalized_ids,
+        ).fetchall()
+        rows_by_id = {str(row["id"]): row for row in rows}
         asset_ids: list[str] = []
         seen: set[str] = set()
-        for row in rows:
+        for memory_id in normalized_ids:
+            row = rows_by_id.get(memory_id)
+            if row is None:
+                continue
             for asset_id in parse_json_list(row["asset_ids_json"]):
                 if asset_id not in seen:
                     asset_ids.append(asset_id)
                     seen.add(asset_id)
         return asset_ids
+
+    @staticmethod
+    def _assert_asset_observations_current(
+        source_snapshot: AtlasVerifiedSourceSnapshot,
+        asset_ids: list[str],
+        client_observations: list[dict[str, object]],
+    ) -> None:
+        for asset_id, client_observation in zip(
+            asset_ids,
+            client_observations,
+            strict=True,
+        ):
+            evidence = source_snapshot.evidence_by_asset.get(asset_id)
+            authoritative = (
+                evidence.get("canonical_image_observation")
+                if isinstance(evidence, dict)
+                else None
+            )
+            if not isinstance(authoritative, dict) or (
+                _canonical_observation_bytes(client_observation)
+                != _canonical_observation_bytes(authoritative)
+            ):
+                raise AtlasAssetObservationConflictError(
+                    "asset_observation_not_authoritative_current"
+                )
 
     def save_basket(
         self,
@@ -893,12 +1302,17 @@ class PhotoAtlasService:
         asset_ids: list[str],
         name: str | None = None,
     ) -> dict[str, object]:
-        self._ensure_current_cache()
         normalized_ids = [asset_id.strip() for asset_id in asset_ids if asset_id.strip()]
-        unique_ids = list(dict.fromkeys(normalized_ids))[:60]
+        if len(normalized_ids) > 60:
+            raise ValueError("An Atlas basket may contain at most 60 assets.")
+        unique_ids = list(dict.fromkeys(normalized_ids))
         now = utc_now_iso()
         basket_id = f"basket_{int(time.time() * 1000)}"
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            _health, source_snapshot = self._require_projection_ready_in_transaction(
+                connection
+            )
             if unique_ids:
                 existing = {
                     row["image_id"]
@@ -912,8 +1326,8 @@ class PhotoAtlasService:
                 resolved_ids = [asset_id for asset_id in unique_ids if asset_id in existing]
             else:
                 resolved_ids = []
-            if unique_ids and not resolved_ids:
-                raise ValueError("No basket assets exist in the Atlas cache.")
+            if len(resolved_ids) != len(unique_ids):
+                raise ValueError("One or more basket assets do not exist in the Atlas cache.")
             connection.execute(
                 """
                 INSERT INTO atlas_baskets (
@@ -929,7 +1343,10 @@ class PhotoAtlasService:
                     now,
                 ),
             )
-            basket = self._latest_basket(connection)
+            basket = self._latest_basket(
+                connection,
+                source_snapshot.evidence_by_asset,
+            )
         return {
             "object": "atlas.basket",
             "status": "saved",
@@ -937,9 +1354,14 @@ class PhotoAtlasService:
         }
 
     def load_basket(self) -> dict[str, object]:
-        self._ensure_current_cache()
-        with self._connect() as connection:
-            basket = self._latest_basket(connection)
+        with closing(self._connect(read_only=True)) as connection:
+            _health, source_snapshot = self._require_projection_ready_in_transaction(
+                connection
+            )
+            basket = self._latest_basket(
+                connection,
+                source_snapshot.evidence_by_asset,
+            )
         return {
             "object": "atlas.basket",
             "status": "completed",
@@ -953,12 +1375,11 @@ class PhotoAtlasService:
         action: str,
         keep_asset_id: str | None = None,
     ) -> dict[str, object]:
-        self._ensure_current_cache()
-        self._ensure_derived_layers()
+        self._require_projection_ready()
         normalized_action = action.strip().lower()
         if normalized_action not in {"keep_best", "hide_similar", "unstack"}:
             raise ValueError("Unsupported stack action.")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 """
                 SELECT id, asset_ids_json, best_image_id
@@ -971,6 +1392,8 @@ class PhotoAtlasService:
                 raise ValueError("Atlas stack does not exist.")
             asset_ids = parse_json_list(row["asset_ids_json"])
             keep_id = keep_asset_id or row["best_image_id"] or asset_ids[0]
+            if keep_id not in asset_ids:
+                raise ValueError("The kept asset does not belong to the Atlas stack.")
             now = utc_now_iso()
             connection.execute(
                 """
@@ -1002,53 +1425,605 @@ class PhotoAtlasService:
             "keep_asset_id": keep_id,
         }
 
+    @staticmethod
+    def _stored_source_fingerprint(fingerprint: str) -> str:
+        return f"{ATLAS_SOURCE_FINGERPRINT_PREFIX}{fingerprint}"
+
+    @staticmethod
+    def _source_gap(
+        *,
+        asset_id: str | None,
+        reason_code: str,
+        identity_kind: str,
+    ) -> dict[str, object]:
+        # Deliberately path-free: parity evidence may describe identity and
+        # contract failure, never a private library path or credential.
+        return {
+            "asset_id": asset_id,
+            "identity_kind": identity_kind,
+            "reason_code": reason_code,
+        }
+
+    @staticmethod
+    def _source_snapshot_fingerprint(
+        *,
+        database_uuid: str | None,
+        evidence_by_asset: Mapping[str, dict[str, object]],
+        parity_gaps: list[dict[str, object]],
+        source_available: bool,
+    ) -> str:
+        document = {
+            "adapter": ATLAS_VERIFIED_SOURCE_ADAPTER,
+            "database_uuid": database_uuid,
+            "source_available": source_available,
+            "verified": [
+                evidence_by_asset[asset_id]
+                for asset_id in sorted(evidence_by_asset)
+            ],
+            "parity_gaps": parity_gaps,
+        }
+        encoded = json.dumps(
+            document,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _failed_source_snapshot(
+        self,
+        *,
+        raw_rows: list[sqlite3.Row],
+        reason_code: str,
+        database_uuid: str | None = None,
+    ) -> AtlasVerifiedSourceSnapshot:
+        gaps = [
+            self._source_gap(
+                asset_id=str(row["id"]),
+                reason_code=reason_code,
+                identity_kind="unverified_image_index_row",
+            )
+            for row in raw_rows
+        ]
+        if not gaps:
+            gaps.append(
+                self._source_gap(
+                    asset_id=None,
+                    reason_code=reason_code,
+                    identity_kind="verified_source_adapter",
+                )
+            )
+        fingerprint = self._source_snapshot_fingerprint(
+            database_uuid=database_uuid,
+            evidence_by_asset={},
+            parity_gaps=gaps,
+            source_available=False,
+        )
+        return AtlasVerifiedSourceSnapshot(
+            rows=(),
+            evidence_by_asset={},
+            parity_gaps=tuple(gaps),
+            database_uuid=database_uuid,
+            observed_image_count=len(raw_rows),
+            fingerprint=fingerprint,
+            source_available=False,
+        )
+
+    @staticmethod
+    def _canonical_current_image_observation(
+        *,
+        asset_id: str,
+        analysis_binding: Mapping[str, object],
+        result: Mapping[str, object],
+        projection: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Present the shared verified-current observation v1 dialect."""
+
+        return build_current_canonical_image_observation(
+            asset_id=asset_id,
+            analysis_binding=analysis_binding,
+            result=result,
+            projection=projection,
+        )
+
+    @staticmethod
+    def _active_generation_image_rows(
+        connection: sqlite3.Connection,
+    ) -> list[sqlite3.Row]:
+        """Return only clean active-generation rows before Atlas ranking.
+
+        This query is candidate scoping, not a replacement verifier.  The
+        canonical repository still verifies every returned row, receipt,
+        result and source binding below.  Keeping the cut here prevents an
+        unmanaged or stale high-score ``image_index`` row from entering any
+        later Atlas ordering or limit window.
+        """
+
+        return connection.execute(
+            """
+            SELECT i.id, i.filename, i.relative_path, i.file_size, i.width,
+                   i.height, i.taken_at, i.lat, i.lon, i.place_name, i.country,
+                   i.description, i.tags_json, i.combined_text,
+                   i.embedding_backend, i.embedding, i.aesthetic_score,
+                   i.technical_quality_score, i.updated_at
+              FROM database_meta meta
+              JOIN image_projection_generations generation
+                ON generation.database_uuid=meta.database_uuid
+               AND generation.projection_contract='legacy-image-index-shadow/v1'
+               AND generation.status='complete'
+               AND generation.is_active=1
+              JOIN image_projection_manifests manifest
+                ON manifest.generation_id=generation.id
+               AND manifest.database_uuid=generation.database_uuid
+               AND manifest.canonical_high_water_position=
+                   generation.canonical_high_water_position
+               AND manifest.compiler_id=generation.compiler_id
+               AND manifest.projector_version=generation.projector_version
+               AND manifest.eligible_count=manifest.projected_count
+               AND manifest.missing_count=0
+               AND manifest.unexpected_count=0
+               AND manifest.mismatched_count=0
+               AND manifest.blocked_count=0
+              JOIN image_projection_read_manifests read_manifest
+                ON read_manifest.generation_id=generation.id
+               AND read_manifest.database_uuid=generation.database_uuid
+               AND read_manifest.canonical_high_water_position=
+                   generation.canonical_high_water_position
+               AND read_manifest.compiler_id=generation.compiler_id
+               AND read_manifest.projector_version=generation.projector_version
+               AND read_manifest.eligible_count=read_manifest.projected_count
+               AND read_manifest.missing_count=0
+               AND read_manifest.unexpected_count=0
+               AND read_manifest.mismatched_count=0
+               AND read_manifest.blocked_count=0
+               AND read_manifest.manifest_json=manifest.manifest_json
+               AND read_manifest.manifest_sha256=manifest.manifest_sha256
+              JOIN image_projection_rows projected
+                ON projected.generation_id=generation.id
+              JOIN image_index i ON i.id=projected.asset_id
+              JOIN assets asset
+                ON asset.id=projected.asset_id
+               AND asset.kind='image'
+               AND asset.sha256=i.sha256
+              JOIN image_analysis_heads head
+                ON head.asset_id=projected.asset_id
+               AND head.analysis_run_id=projected.analysis_run_id
+               AND head.revision=projected.revision
+               AND head.content_sha256=projected.content_sha256
+              JOIN image_analysis_results result
+                ON result.asset_id=head.asset_id
+               AND result.analysis_run_id=head.analysis_run_id
+               AND result.revision=head.revision
+               AND result.content_sha256=head.content_sha256
+               AND result.source_id=projected.source_id
+               AND result.source_binding_sha256=projected.source_binding_sha256
+              JOIN asset_sources source
+                ON source.id=projected.source_id
+               AND source.asset_id=asset.id
+               AND source.availability='available'
+              JOIN library_roots root
+                ON root.id=source.library_root_id
+               AND root.status='active'
+             WHERE meta.singleton=1
+             ORDER BY i.taken_at IS NULL, i.taken_at DESC, i.filename ASC,
+                      i.id ASC
+            """
+        ).fetchall()
+
+    def _verified_source_snapshot(
+        self,
+        connection: sqlite3.Connection,
+    ) -> AtlasVerifiedSourceSnapshot:
+        tables = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "image_index" in tables:
+            raw_rows = connection.execute(
+                "SELECT id FROM image_index ORDER BY id"
+            ).fetchall()
+        else:
+            raw_rows = []
+
+        media_repository = self.media_repository
+        if media_repository is None:
+            return self._failed_source_snapshot(
+                raw_rows=raw_rows,
+                reason_code="canonical_image_source_adapter_unavailable",
+            )
+        try:
+            atlas_db_path = Path(self.repository.db_path).expanduser().resolve()
+            media_db_path = Path(media_repository.db_path).expanduser().resolve()
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return self._failed_source_snapshot(
+                raw_rows=raw_rows,
+                reason_code="image_database_scope_unavailable",
+            )
+        if atlas_db_path != media_db_path:
+            return self._failed_source_snapshot(
+                raw_rows=raw_rows,
+                reason_code="image_database_scope_changed",
+            )
+
+        canonical_tables = {
+            "asset_sources",
+            "assets",
+            "database_meta",
+            "image_analysis_artifacts",
+            "image_analysis_heads",
+            "image_analysis_results",
+            "image_projection_changes",
+            "image_projection_generations",
+            "image_projection_manifests",
+            "image_projection_read_manifests",
+            "image_projection_receipts",
+            "image_projection_rows",
+        }
+        if not canonical_tables.issubset(tables):
+            return self._failed_source_snapshot(
+                raw_rows=raw_rows,
+                reason_code="unmanaged_legacy_image_index_row",
+            )
+        meta = connection.execute(
+            "SELECT database_uuid,schema_version FROM database_meta WHERE singleton=1"
+        ).fetchone()
+        try:
+            schema_version = int(meta["schema_version"]) if meta is not None else 0
+        except (TypeError, ValueError):
+            schema_version = 0
+        if meta is None or schema_version < 14:
+            return self._failed_source_snapshot(
+                raw_rows=raw_rows,
+                reason_code="unmanaged_legacy_image_index_row",
+            )
+        database_uuid = str(meta["database_uuid"])
+        try:
+            media_repository.bind_image_database_identity()
+        except (ImageAnalysisPersistenceError, OSError) as exc:
+            reason_code = getattr(exc, "code", "image_database_identity_invalid")
+            return self._failed_source_snapshot(
+                raw_rows=raw_rows,
+                reason_code=str(reason_code),
+                database_uuid=database_uuid,
+            )
+
+        try:
+            candidate_rows = self._active_generation_image_rows(connection)
+        except sqlite3.Error:
+            return self._failed_source_snapshot(
+                raw_rows=raw_rows,
+                reason_code="image_analysis_projection_corrupt",
+                database_uuid=database_uuid,
+            )
+
+        canonical_ids = [
+            str(row["id"])
+            for row in connection.execute(
+                "SELECT id FROM assets WHERE kind='image' ORDER BY id"
+            ).fetchall()
+        ]
+        raw_by_id = {str(row["id"]): row for row in raw_rows}
+        candidate_by_id = {str(row["id"]): row for row in candidate_rows}
+        evidence_by_asset: dict[str, dict[str, object]] = {}
+        gaps: list[dict[str, object]] = []
+        for asset_id in canonical_ids:
+            try:
+                current = media_repository.get_current_image_analysis_in_transaction(
+                    connection,
+                    asset_id,
+                )
+            except ImageAnalysisPersistenceError as exc:
+                gaps.append(
+                    self._source_gap(
+                        asset_id=asset_id,
+                        reason_code=exc.code,
+                        identity_kind="canonical_asset",
+                    )
+                )
+                continue
+            if current is None:
+                gaps.append(
+                    self._source_gap(
+                        asset_id=asset_id,
+                        reason_code="current_image_analysis_unavailable",
+                        identity_kind="canonical_asset",
+                    )
+                )
+                continue
+            projection = current.get("projection")
+            source = current.get("source")
+            binding = current.get("analysis_binding")
+            projection_map = projection if isinstance(projection, dict) else {}
+            source_map = source if isinstance(source, dict) else {}
+            result = current.get("result")
+            if (
+                projection_map.get("status") != "current"
+                or source_map.get("availability") != "available"
+                or not isinstance(binding, dict)
+                or not isinstance(result, dict)
+                or asset_id not in candidate_by_id
+            ):
+                reason_code = projection_map.get("reason_code")
+                if not isinstance(reason_code, str) or not reason_code:
+                    reason_code = f"image_projection_{projection_map.get('status') or 'unavailable'}"
+                gaps.append(
+                    self._source_gap(
+                        asset_id=asset_id,
+                        reason_code=reason_code,
+                        identity_kind="canonical_asset",
+                    )
+                )
+                continue
+            try:
+                observation = self._canonical_current_image_observation(
+                    asset_id=asset_id,
+                    analysis_binding=binding,
+                    result=result,
+                    projection=projection_map,
+                )
+            except (AssertionError, KeyError, TypeError, ValueError):
+                gaps.append(
+                    self._source_gap(
+                        asset_id=asset_id,
+                        reason_code="canonical_image_observation_invalid",
+                        identity_kind="canonical_asset",
+                    )
+                )
+                continue
+            evidence_by_asset[asset_id] = {
+                "asset_id": asset_id,
+                "canonical_image_observation": observation,
+            }
+
+        canonical_id_set = set(canonical_ids)
+        for row in raw_rows:
+            asset_id = str(row["id"])
+            if asset_id not in canonical_id_set:
+                gaps.append(
+                    self._source_gap(
+                        asset_id=asset_id,
+                        reason_code="orphan_or_unmanaged_image_index_row",
+                        identity_kind="unverified_image_index_row",
+                    )
+                )
+        gaps.sort(
+            key=lambda gap: (
+                str(gap.get("asset_id") or ""),
+                str(gap.get("reason_code") or ""),
+            )
+        )
+
+        try:
+            media_repository.bind_image_database_identity()
+        except (ImageAnalysisPersistenceError, OSError) as exc:
+            reason_code = getattr(exc, "code", "image_database_identity_invalid")
+            return self._failed_source_snapshot(
+                raw_rows=raw_rows,
+                reason_code=str(reason_code),
+                database_uuid=database_uuid,
+            )
+
+        verified_rows = tuple(
+            row for row in candidate_rows if str(row["id"]) in evidence_by_asset
+        )
+        fingerprint = self._source_snapshot_fingerprint(
+            database_uuid=database_uuid,
+            evidence_by_asset=evidence_by_asset,
+            parity_gaps=gaps,
+            source_available=True,
+        )
+        return AtlasVerifiedSourceSnapshot(
+            rows=verified_rows,
+            evidence_by_asset=evidence_by_asset,
+            parity_gaps=tuple(gaps),
+            database_uuid=database_uuid,
+            observed_image_count=len(set(raw_by_id) | set(canonical_ids)),
+            fingerprint=fingerprint,
+            source_available=True,
+        )
+
+    def _status_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source_snapshot: AtlasVerifiedSourceSnapshot | None = None,
+    ) -> dict[str, object]:
+        tables = {
+            str(row["name"])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        snapshot = source_snapshot or self._verified_source_snapshot(connection)
+        missing_tables = sorted(ATLAS_PROJECTION_TABLES - tables)
+        if missing_tables:
+            return self._not_ready_status(
+                image_count=snapshot.verified_image_count,
+                reason="schema_missing",
+                missing_tables=missing_tables,
+                source_snapshot=snapshot,
+            )
+        counts = {
+            key: int(
+                connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()[
+                    "count"
+                ]
+            )
+            for key, table in ATLAS_PROJECTION_COUNT_TABLES
+        }
+        atlas_asset_ids = {
+            str(row["image_id"])
+            for row in connection.execute(
+                "SELECT image_id FROM atlas_assets"
+            ).fetchall()
+        }
+        run = connection.execute(
+            """
+            SELECT id, status, layout_version, image_count, cluster_count,
+                   edge_count, started_at, completed_at, message
+            FROM atlas_runs
+            ORDER BY started_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        projection = connection.execute(
+            """
+            SELECT status, run_id, layout_version, source_image_count,
+                   source_updated_at, asset_count, cluster_count,
+                   edge_count, memory_count, stack_count, role_count,
+                   materialized_at
+            FROM atlas_projection_state
+            WHERE singleton = 1
+            """
+        ).fetchone()
+
+        projection_status = "ready"
+        projection_reason: str | None = None
+        if not snapshot.source_available:
+            projection_status = "not_ready"
+            projection_reason = "verified_image_source_unavailable"
+        elif projection is None or projection["status"] != "completed":
+            projection_status = "not_ready"
+            projection_reason = "not_materialized"
+        elif projection["layout_version"] != DEFAULT_LAYOUT_VERSION:
+            projection_status = "not_ready"
+            projection_reason = "layout_version_mismatch"
+        elif any(
+            int(projection[key]) != counts[key]
+            for key, _table in ATLAS_PROJECTION_COUNT_TABLES
+        ):
+            projection_status = "not_ready"
+            projection_reason = "projection_incomplete"
+        elif atlas_asset_ids != set(snapshot.evidence_by_asset):
+            projection_status = "not_ready"
+            projection_reason = "projection_identity_mismatch"
+        elif (
+            int(projection["source_image_count"])
+            != snapshot.observed_image_count
+            or projection["source_updated_at"]
+            != self._stored_source_fingerprint(snapshot.fingerprint)
+        ):
+            projection_status = "stale"
+            projection_reason = "verified_source_changed"
+
+        state_status = "completed" if projection_status == "ready" else projection_status
+        return {
+            "object": "atlas.status",
+            "status": state_status,
+            "layout_version": (
+                projection["layout_version"]
+                if projection is not None
+                else run["layout_version"]
+                if run is not None
+                else DEFAULT_LAYOUT_VERSION
+            ),
+            "image_count": snapshot.verified_image_count,
+            "source_image_count": snapshot.observed_image_count,
+            "verified_image_count": snapshot.verified_image_count,
+            "asset_count": counts["asset_count"],
+            "cluster_count": counts["cluster_count"],
+            "edge_count": counts["edge_count"],
+            "memory_count": counts["memory_count"],
+            "stack_count": counts["stack_count"],
+            "role_count": counts["role_count"],
+            "projection_status": projection_status,
+            "projection_reason": projection_reason,
+            "projection_materialized_at": (
+                projection["materialized_at"] if projection is not None else None
+            ),
+            "verified_source_adapter": ATLAS_VERIFIED_SOURCE_ADAPTER,
+            "source_snapshot_sha256": snapshot.fingerprint,
+            "parity_status": "complete" if not snapshot.parity_gaps else "gaps",
+            "parity_gap_count": len(snapshot.parity_gaps),
+            "parity_gaps": list(snapshot.parity_gaps[:ATLAS_PARITY_GAP_LIMIT]),
+            "residuals": list(ATLAS_A0_RESIDUALS),
+            "error_code": (
+                None if projection_status == "ready" else ATLAS_PROJECTION_ERROR_CODE
+            ),
+            "needs_rebuild": projection_status != "ready",
+            "last_run": dict(run) if run else None,
+        }
+
+    def _require_projection_ready_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+    ) -> tuple[dict[str, object], AtlasVerifiedSourceSnapshot]:
+        snapshot = self._verified_source_snapshot(connection)
+        health = self._status_in_transaction(
+            connection,
+            source_snapshot=snapshot,
+        )
+        if health.get("projection_status") != "ready":
+            raise AtlasProjectionNotReadyError(health)
+        return health, snapshot
+
+    def _require_projection_ready(self) -> dict[str, object]:
+        with closing(self._connect(read_only=True)) as connection:
+            health, _snapshot = self._require_projection_ready_in_transaction(connection)
+        return health
+
+    @staticmethod
+    def _not_ready_status(
+        *,
+        image_count: int,
+        reason: str,
+        missing_tables: list[str] | None = None,
+        source_snapshot: AtlasVerifiedSourceSnapshot | None = None,
+    ) -> dict[str, object]:
+        parity_gaps = source_snapshot.parity_gaps if source_snapshot is not None else ()
+        payload: dict[str, object] = {
+            "object": "atlas.status",
+            "status": "not_ready",
+            "layout_version": DEFAULT_LAYOUT_VERSION,
+            "image_count": image_count,
+            "source_image_count": (
+                source_snapshot.observed_image_count
+                if source_snapshot is not None
+                else image_count
+            ),
+            "verified_image_count": image_count,
+            "asset_count": 0,
+            "cluster_count": 0,
+            "edge_count": 0,
+            "memory_count": 0,
+            "stack_count": 0,
+            "role_count": 0,
+            "projection_status": "not_ready",
+            "projection_reason": reason,
+            "projection_materialized_at": None,
+            "verified_source_adapter": ATLAS_VERIFIED_SOURCE_ADAPTER,
+            "source_snapshot_sha256": (
+                source_snapshot.fingerprint if source_snapshot is not None else None
+            ),
+            "parity_status": "complete" if not parity_gaps else "gaps",
+            "parity_gap_count": len(parity_gaps),
+            "parity_gaps": list(parity_gaps[:ATLAS_PARITY_GAP_LIMIT]),
+            "residuals": list(ATLAS_A0_RESIDUALS),
+            "error_code": ATLAS_PROJECTION_ERROR_CODE,
+            "needs_rebuild": True,
+            "last_run": None,
+        }
+        if missing_tables:
+            payload["missing_tables"] = missing_tables
+        return payload
+
     def _ensure_current_cache(self) -> None:
-        self.ensure_schema()
+        """Compatibility alias that validates, but never materializes, Atlas data."""
+
+        self._require_projection_ready()
 
     def _ensure_derived_layers(self) -> None:
-        self.ensure_schema()
-        with self._connect() as connection:
-            asset_count = int(
-                connection.execute("SELECT COUNT(*) AS count FROM atlas_assets").fetchone()[
-                    "count"
-                ]
-            )
-            memory_count = int(
-                connection.execute("SELECT COUNT(*) AS count FROM atlas_memories").fetchone()[
-                    "count"
-                ]
-            )
-            stack_count = int(
-                connection.execute("SELECT COUNT(*) AS count FROM atlas_stacks").fetchone()[
-                    "count"
-                ]
-            )
-            role_count = int(
-                connection.execute("SELECT COUNT(*) AS count FROM atlas_roles").fetchone()[
-                    "count"
-                ]
-            )
-            if asset_count == 0 or (memory_count > 0 and stack_count > 0 and role_count > 0):
-                return
-            assets = self._all_cached_assets(connection)
-            edges = [
-                dict(row)
-                for row in connection.execute(
-                    """
-                    SELECT id, source_image_id, target_image_id, kind, weight
-                    FROM atlas_edges
-                    """
-                ).fetchall()
-            ]
-            updated_at = utc_now_iso()
-            connection.execute("DELETE FROM atlas_memories")
-            connection.execute("DELETE FROM atlas_stacks")
-            connection.execute("DELETE FROM atlas_roles")
-            self._insert_memories(connection, self._build_memories(assets), updated_at)
-            self._insert_stacks(connection, self._build_stacks(assets, edges), updated_at)
-            self._insert_roles(connection, self._build_roles(assets), updated_at)
+        """Compatibility alias that never rebuilds derived layers on a read path."""
 
-    def _all_cached_assets(self, connection: sqlite3.Connection) -> list[dict[str, object]]:
+        self._require_projection_ready()
+
+    def _all_cached_assets(
+        self,
+        connection: sqlite3.Connection,
+        verified_evidence: Mapping[str, dict[str, object]],
+    ) -> list[dict[str, object]]:
         rows = connection.execute(
             """
             SELECT image_id, filename, relative_path, taken_at, place_name,
@@ -1070,6 +2045,7 @@ class PhotoAtlasService:
                 mode="semantic",
                 forced_people_ids=forced_people_ids,
                 cluster_labels=cluster_labels,
+                verified_evidence=verified_evidence,
             )
             for row in rows
             if row["image_id"] not in hidden_ids
@@ -1079,6 +2055,7 @@ class PhotoAtlasService:
         self,
         connection: sqlite3.Connection,
         asset_ids: list[str],
+        verified_evidence: Mapping[str, dict[str, object]],
     ) -> list[dict[str, object]]:
         if not asset_ids:
             return []
@@ -1104,6 +2081,7 @@ class PhotoAtlasService:
                     mode="semantic",
                     forced_people_ids=forced_people_ids,
                     cluster_labels=cluster_labels,
+                    verified_evidence=verified_evidence,
                 ),
                 "review": review_states.get(
                     str(row["image_id"]),
@@ -1303,23 +2281,28 @@ class PhotoAtlasService:
                     roles.append(role_record(asset, memory["id"], "cleanup_candidate", 0.68, "Review for quality or similarity."))
         return roles
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.repository.db_path)
+    def _connect(self, *, read_only: bool = False) -> sqlite3.Connection:
+        if read_only:
+            database_uri = f"{self.repository.db_path.resolve().as_uri()}?mode=ro"
+            connection = sqlite3.connect(database_uri, uri=True)
+            connection.execute("PRAGMA query_only = ON")
+        else:
+            connection = sqlite3.connect(self.repository.db_path)
         connection.row_factory = sqlite3.Row
         return connection
 
     def _fetch_image_rows(self) -> list[sqlite3.Row]:
-        with self._connect() as connection:
-            return connection.execute(
-                """
-                SELECT id, filename, relative_path, file_size, width, height,
-                       taken_at, lat, lon, place_name, country, description,
-                       tags_json, combined_text, embedding_backend, embedding,
-                       aesthetic_score, technical_quality_score, updated_at
-                FROM image_index
-                ORDER BY taken_at IS NULL, taken_at DESC, filename ASC
-                """
-            ).fetchall()
+        with closing(self._connect(read_only=True)) as connection:
+            snapshot = self._verified_source_snapshot(connection)
+        if not snapshot.source_available:
+            raise AtlasProjectionNotReadyError(
+                self._not_ready_status(
+                    image_count=0,
+                    reason="verified_image_source_unavailable",
+                    source_snapshot=snapshot,
+                )
+            )
+        return list(snapshot.rows)
 
     def _build_atlas(
         self,
@@ -1834,6 +2817,7 @@ class PhotoAtlasService:
         self,
         connection: sqlite3.Connection,
         asset_ids: list[str],
+        verified_evidence: Mapping[str, dict[str, object]],
     ) -> list[dict[str, object]]:
         if not asset_ids:
             return []
@@ -1858,10 +2842,18 @@ class PhotoAtlasService:
                 if stack_asset_id not in seen:
                     stack_asset_ids.append(stack_asset_id)
                     seen.add(stack_asset_id)
-        assets = self._assets_by_ids(connection, stack_asset_ids)
+        assets = self._assets_by_ids(
+            connection,
+            stack_asset_ids,
+            verified_evidence,
+        )
         return self._stack_rows_to_cards(matching_rows, assets)
 
-    def _latest_basket(self, connection: sqlite3.Connection) -> dict[str, object]:
+    def _latest_basket(
+        self,
+        connection: sqlite3.Connection,
+        verified_evidence: Mapping[str, dict[str, object]],
+    ) -> dict[str, object]:
         row = connection.execute(
             """
             SELECT id, name, asset_ids_json, created_at, updated_at
@@ -1886,7 +2878,11 @@ class PhotoAtlasService:
             "id": row["id"],
             "name": row["name"],
             "asset_ids": asset_ids,
-            "assets": self._assets_by_ids(connection, asset_ids),
+            "assets": self._assets_by_ids(
+                connection,
+                asset_ids,
+                verified_evidence,
+            ),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
@@ -1902,7 +2898,12 @@ class PhotoAtlasService:
         mode: str,
         forced_people_ids: set[str],
         cluster_labels: dict[str, str],
+        verified_evidence: Mapping[str, dict[str, object]],
     ) -> dict[str, object]:
+        image_id = str(row["image_id"])
+        evidence = verified_evidence.get(image_id)
+        if not isinstance(evidence, dict):
+            raise RuntimeError("atlas_verified_image_evidence_missing")
         tags = parse_tags(row["tags_json"])
         base_x = float(row["x"])
         base_y = float(row["y"])
@@ -1910,9 +2911,21 @@ class PhotoAtlasService:
             float(row["people_risk"]),
             1.0 if row["image_id"] in forced_people_ids else 0.0,
         )
+        canonical_image_observation = deepcopy(
+            evidence["canonical_image_observation"]
+        )
+        if not isinstance(canonical_image_observation, dict):
+            raise RuntimeError("atlas_verified_image_evidence_missing")
+        analysis_binding = dict(canonical_image_observation["analysis_binding"])
+        projection = dict(canonical_image_observation["projection"])
         asset = {
             "object": "atlas.asset",
-            "id": row["image_id"],
+            "id": image_id,
+            "asset_id": image_id,
+            "analysis_status": "current",
+            "analysis_binding": analysis_binding,
+            "projection": projection,
+            "canonical_image_observation": canonical_image_observation,
             "filename": row["filename"],
             "relative_path": row["relative_path"],
             "title": english_text(title_from_filename(row["filename"]), "Photo"),
@@ -2070,11 +3083,18 @@ class PhotoAtlasService:
         clusters.sort(key=lambda item: (int(item["count"]), str(item["label"])), reverse=True)
         return clusters
 
-    def _response_edges(self, asset_ids: set[str]) -> list[dict[str, object]]:
+    def _response_edges(
+        self,
+        asset_ids: set[str],
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> list[dict[str, object]]:
         if not asset_ids:
             return []
-        with self._connect() as connection:
-            rows = connection.execute(
+        owned_connection = connection is None
+        active_connection = connection or self._connect(read_only=True)
+        try:
+            rows = active_connection.execute(
                 """
                 SELECT source_image_id, target_image_id, kind, weight
                 FROM atlas_edges
@@ -2085,6 +3105,9 @@ class PhotoAtlasService:
                 """.format(placeholders=",".join("?" for _ in asset_ids)),
                 [*asset_ids, *asset_ids],
             ).fetchall()
+        finally:
+            if owned_connection:
+                active_connection.close()
         edges = []
         for row in rows:
             if row["source_image_id"] in asset_ids and row["target_image_id"] in asset_ids:
@@ -2138,10 +3161,16 @@ class PhotoAtlasService:
         text: str,
         top_k: int,
         context_assets: list[dict[str, object]] | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> list[dict[str, object]]:
         if not candidates:
             return []
-        with self._connect() as connection:
+        if connection is None:
+            with closing(self._connect(read_only=True)) as owned_connection:
+                self._require_projection_ready_in_transaction(owned_connection)
+                feedback_boosts = self._feedback_boosts(owned_connection)
+                similarity = self._similarity_lookup(owned_connection)
+        else:
             feedback_boosts = self._feedback_boosts(connection)
             similarity = self._similarity_lookup(connection)
 
@@ -2326,9 +3355,15 @@ class PhotoAtlasService:
 
     @staticmethod
     def _asset_to_retrieval_image(asset: dict[str, object]) -> dict[str, object]:
+        observation = PhotoAtlasService._closed_current_observation(asset)
         image = {
             "object": "retrieved_image",
             "id": asset["id"],
+            "asset_id": observation["asset_id"],
+            "analysis_status": "current",
+            "analysis_binding": observation["analysis_binding"],
+            "projection": observation["projection"],
+            "canonical_image_observation": observation,
             "filename": asset["filename"],
             "relative_path": asset["relative_path"],
             "taken_at": asset["taken_at"],
@@ -2342,6 +3377,74 @@ class PhotoAtlasService:
         if isinstance(asset.get("review"), dict):
             image["review"] = dict(asset["review"])
         return image
+
+    @staticmethod
+    def _closed_current_observation(
+        asset: dict[str, object],
+    ) -> dict[str, object]:
+        """Preserve, but do not independently re-verify, Atlas-admitted proof.
+
+        ``_verified_source_snapshot`` remains the sole authority that admits an
+        image into Atlas.  This guard only prevents an already-admitted exact
+        observation from being dropped or contradicted by a downstream Atlas
+        presentation adapter.
+        """
+
+        observation = asset.get("canonical_image_observation")
+        if not isinstance(observation, dict) or set(observation) != {
+            "object",
+            "schema_version",
+            "status",
+            "authority",
+            "provenance_status",
+            "asset_id",
+            "analysis_binding",
+            "source_binding_sha256",
+            "projection",
+            "stages",
+            "reason_code",
+        }:
+            raise RuntimeError("atlas_current_image_observation_missing")
+        binding = observation.get("analysis_binding")
+        projection = observation.get("projection")
+        if (
+            observation.get("object") != "memolens.canonical_image_observation"
+            or observation.get("schema_version") != "1"
+            or observation.get("status") != "current"
+            or observation.get("authority") != "canonical_image_analysis"
+            or observation.get("provenance_status") != "verified_current"
+            or observation.get("asset_id") != asset.get("id")
+            or observation.get("asset_id") != asset.get("asset_id")
+            or asset.get("analysis_status") != "current"
+            or not isinstance(binding, dict)
+            or set(binding)
+            != {"analysis_run_id", "revision", "content_sha256"}
+            or binding != asset.get("analysis_binding")
+            or not isinstance(observation.get("source_binding_sha256"), str)
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(observation["source_binding_sha256"]),
+            )
+            is None
+            or not isinstance(projection, dict)
+            or set(projection)
+            != {
+                "status",
+                "generation_id",
+                "processing_generation_id",
+                "receipt_sha256",
+                "row_sha256",
+                "reason_code",
+            }
+            or projection.get("status") != "current"
+            or projection.get("reason_code") is not None
+            or projection != asset.get("projection")
+            or not isinstance(observation.get("stages"), dict)
+            or set(observation["stages"]) != set(IMAGE_ANALYSIS_STAGES)
+            or observation.get("reason_code") is not None
+        ):
+            raise RuntimeError("atlas_current_image_observation_conflict")
+        return deepcopy(observation)
 
     @staticmethod
     def _image_count(connection: sqlite3.Connection) -> int:

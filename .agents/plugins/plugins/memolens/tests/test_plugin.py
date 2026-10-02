@@ -27,6 +27,7 @@ from memolens_core import (  # noqa: E402
     MemoLensError,
     MemoLensGateway,
     _state_dir_candidates,
+    resolve_local_paths,
     validate_base_url,
 )
 from memolens_contracts import PLUGIN_VERSION  # noqa: E402
@@ -232,8 +233,55 @@ class PluginTests(unittest.TestCase):
         self.server.request_paths = []
         self.server.asset_count = 2
         self.server.last_search = None
+        analysis_binding = {
+            "analysis_run_id": f"arun_{'1' * 32}",
+            "revision": 1,
+            "content_sha256": "2" * 64,
+        }
+        projection = {
+            "status": "current",
+            "generation_id": "image_projection_generation_active",
+            "processing_generation_id": "image_projection_generation_processing",
+            "receipt_sha256": "3" * 64,
+            "row_sha256": "4" * 64,
+            "reason_code": None,
+        }
+        stage_provenance = {
+            "producer_id": "memolens.image-worker",
+            "producer_version": "1",
+            "model_id": None,
+            "model_version": None,
+            "rule_id": "test-rule",
+            "rule_version": "1",
+        }
+        stages = {
+            name: {
+                "status": "disabled",
+                "provenance": dict(stage_provenance),
+                "output": None,
+                "reason_code": "test_disabled",
+            }
+            for name in ("metadata", "geocode", "vision", "embedding", "quality")
+        }
         self.server.asset = {
             "id": "img_1",
+            "asset_id": "img_1",
+            "analysis_status": "current",
+            "analysis_binding": analysis_binding,
+            "projection": projection,
+            "canonical_image_observation": {
+                "object": "memolens.canonical_image_observation",
+                "schema_version": "1",
+                "status": "current",
+                "authority": "canonical_image_analysis",
+                "provenance_status": "verified_current",
+                "asset_id": "img_1",
+                "analysis_binding": analysis_binding,
+                "source_binding_sha256": "5" * 64,
+                "projection": projection,
+                "stages": stages,
+                "reason_code": None,
+            },
             "filename": "sunset.jpg",
             "relative_path": "trip/sunset.jpg",
             "description": "Orange sunset above the Pacific coast",
@@ -280,13 +328,13 @@ class PluginTests(unittest.TestCase):
         self.assertNotIn("library_dir", status)
         self.assertNotIn(str(self.root), json.dumps(status))
 
-        search = gateway.search("ocean sunset", limit=5)
-        self.assertEqual(search["source"], "sqlite_read_only")
-        safe_match = next(item for item in search["results"] if item["id"] == "img_1")
+        with self.assertRaises(MemoLensError) as search_error:
+            gateway.search("ocean sunset", limit=5)
         self.assertEqual(
-            safe_match["absolute_path"],
-            str((self.library / "trip" / "sunset.jpg").resolve()),
+            search_error.exception.code,
+            "canonical_image_authority_unavailable",
         )
+        self.assertNotIn(str(self.root), str(search_error.exception))
         self.assertEqual(self.server.request_paths, [])
         self.assertEqual(_sqlite_source_state(self.db), source_before)
         with self.assertRaisesRegex(MemoLensError, TRUST_LOCAL_API_ENV) as memories:
@@ -316,17 +364,20 @@ class PluginTests(unittest.TestCase):
         self.assertNotIn("path", status["database"])
         self.assertNotIn(str(self.root), json.dumps(status))
         self.assertEqual(status["database"]["index_stats"]["asset_count"], 2)
+        self.assertFalse(status["capabilities"]["search"])
         self.assertEqual(gateway.library_dir, self.library.resolve())
         self.assertEqual(gateway.db_path, self.db.resolve())
         self.assertEqual(self.server.request_paths[:2], ["/healthz", "/v1/settings"])
 
-        search = gateway.search("ocean sunset", limit=5)
-        self.assertEqual(search["results"][0]["path_status"], "ok")
+        requests_before_search = list(self.server.request_paths)
+        with self.assertRaises(MemoLensError) as search_error:
+            gateway.search("ocean sunset", limit=5)
         self.assertEqual(
-            search["results"][0]["absolute_path"],
-            str((self.library / "trip" / "sunset.jpg").resolve()),
+            search_error.exception.code,
+            "canonical_image_authority_unavailable",
         )
-        self.assertFalse(self.server.last_search["include_copy"])
+        self.assertEqual(self.server.request_paths, requests_before_search)
+        self.assertIsNone(self.server.last_search)
         self.assertEqual(gateway.memories()["memory_count"], 1)
         cleanup = gateway.cleanup()
         self.assertTrue(cleanup["read_only"])
@@ -426,7 +477,7 @@ class PluginTests(unittest.TestCase):
         )
         self.assertEqual(minimum_timeout.timeout, 0.1)
 
-    def test_sqlite_fallback_is_read_only_and_rejects_traversal(self) -> None:
+    def test_legacy_sqlite_search_fails_closed_without_resolving_paths(self) -> None:
         gateway = self.gateway(
             base_url="http://127.0.0.1:1",
             db_path=self.db,
@@ -434,12 +485,14 @@ class PluginTests(unittest.TestCase):
             timeout=0.1,
         )
         self.assertEqual(gateway.status()["status"], "ok")
-        result = gateway.search("ocean sunset", limit=10)
-        self.assertEqual(result["source"], "sqlite_read_only")
-        self.assertEqual(result["scanned_count"], 2)
-        statuses = {item["filename"]: item["path_status"] for item in result["results"]}
-        self.assertEqual(statuses["sunset.jpg"], "ok")
-        self.assertEqual(statuses["unsafe.jpg"], "rejected_outside_library")
+        with self.assertRaises(MemoLensError) as search_error:
+            gateway.search("ocean sunset", limit=10)
+        self.assertEqual(
+            search_error.exception.code,
+            "canonical_image_authority_unavailable",
+        )
+        self.assertNotIn(str(self.library), str(search_error.exception))
+        self.assertNotIn("../unsafe.jpg", str(search_error.exception))
         with closing(sqlite3.connect(self.db)) as connection:
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM image_index").fetchone()[0], 2
@@ -507,10 +560,12 @@ class PluginTests(unittest.TestCase):
             self.assertGreater(wal_path.stat().st_size, 32)
             self.assertGreaterEqual(shm_path.stat().st_size, 32_768)
             source_before = _sqlite_source_state(self.db)
-            result = self.gateway(
-                db_path=self.db, library_dir=self.library
-            ).search("live wal")
-            self.assertEqual(result["results"][0]["id"], "wal_match")
+            gateway = self.gateway(db_path=self.db, library_dir=self.library)
+            with closing(gateway._sqlite_connection()) as connection:
+                visible = connection.execute(
+                    "SELECT id FROM image_index WHERE combined_text='live wal'"
+                ).fetchall()
+            self.assertEqual([row["id"] for row in visible], ["wal_match"])
             self.assertEqual(_sqlite_source_state(self.db), source_before)
         finally:
             writer.close()
@@ -541,7 +596,7 @@ class PluginTests(unittest.TestCase):
                 Path(f"{database}-wal").write_bytes(original_wal)
             writer.close()
 
-    def test_sqlite_fallback_streams_past_ten_thousand_with_bounded_results(self) -> None:
+    def test_legacy_search_fails_before_scanning_ten_thousand_rows(self) -> None:
         with closing(sqlite3.connect(self.db)) as connection:
             connection.executemany(
                 "INSERT INTO image_index VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -588,22 +643,33 @@ class PluginTests(unittest.TestCase):
             library_dir=self.library,
             timeout=0.1,
         )
-        result = gateway.search("rare zebra", limit=3)
-        self.assertEqual(result["scanned_count"], 10_004)
-        self.assertLessEqual(len(result["results"]), 3)
-        self.assertEqual(result["results"][0]["id"], "late_match")
+        with self.assertRaises(MemoLensError) as search_error:
+            gateway.search("rare zebra", limit=3)
+        self.assertEqual(
+            search_error.exception.code,
+            "canonical_image_authority_unavailable",
+        )
+        self.assertNotIn("late_match", str(search_error.exception))
 
     def test_loopback_resolution_and_proxy_bypass_are_enforced(self) -> None:
         with self.assertRaises(MemoLensError):
             validate_base_url("https://example.com")
 
-        mixed_addresses = [
-            (2, 1, 6, "", ("127.0.0.1", 5519)),
-            (2, 1, 6, "", ("203.0.113.9", 5519)),
-        ]
-        with mock.patch("memolens_core.socket.getaddrinfo", return_value=mixed_addresses):
+        with mock.patch(
+            "memolens_core.socket.getaddrinfo",
+            side_effect=AssertionError("DNS was reached for a local API URL"),
+        ) as resolver:
+            self.assertEqual(
+                validate_base_url("http://127.42.3.9:5519"),
+                "http://127.42.3.9:5519",
+            )
+            self.assertEqual(
+                validate_base_url("http://[::1]:5519"),
+                "http://[::1]:5519",
+            )
             with self.assertRaises(MemoLensError):
                 validate_base_url("http://localhost:5519")
+        resolver.assert_not_called()
 
         with mock.patch.dict(
             os.environ,
@@ -639,6 +705,85 @@ class PluginTests(unittest.TestCase):
             os.chdir(previous_cwd)
         self.assertNotIn((hostile_cwd / ".memolens-state").resolve(), candidates)
 
+    def test_discovery_uses_native_desktop_binding_before_stale_backend_projection(self) -> None:
+        state = self.root / "native-state"
+        state.mkdir()
+        (state / "desktop-settings.json").write_text(json.dumps({
+            "schemaVersion": 2,
+            "librarySelectionAuthority": {
+                "schemaVersion": 1, "canonicalRoot": str(self.library),
+                "dbPath": str(self.db), "device": "1", "inode": "2",
+            },
+        }))
+        (state / "backend-settings.json").write_text(json.dumps({
+            "db_path": str(self.root / "stale.db"), "image_library_dir": "/stale",
+        }))
+        with mock.patch("memolens_core._state_dir_candidates", return_value=[state]), mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_local_paths(), (self.db.resolve(), self.library.resolve()))
+            explicit = self.root / "explicit.db"
+            self.assertEqual(resolve_local_paths(db_path=explicit)[0], explicit.resolve())
+
+    def test_discovery_accepts_only_an_unambiguous_hashed_database(self) -> None:
+        state = self.root / "hashed-state"
+        storage = state / "storage"
+        storage.mkdir(parents=True)
+        hashed = storage / f"photo-index-{'a' * 24}.db"
+        shutil.copyfile(self.db, hashed)
+        with mock.patch("memolens_core._state_dir_candidates", return_value=[state]), mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_local_paths(), (hashed.resolve(), None))
+            second = storage / f"photo-index-{'b' * 24}.db"
+            shutil.copyfile(self.db, second)
+            self.assertEqual(resolve_local_paths(), (None, None))
+
+    def test_ambiguous_preferred_state_never_selects_an_older_state(self) -> None:
+        preferred = self.root / "preferred-state"
+        fallback = self.root / "fallback-state"
+        storage = preferred / "storage"
+        storage.mkdir(parents=True)
+        (fallback / "storage").mkdir(parents=True)
+        for digest in ("a", "b"):
+            shutil.copyfile(self.db, storage / f"photo-index-{digest * 24}.db")
+        shutil.copyfile(self.db, fallback / "storage" / "photo_index.db")
+        with mock.patch("memolens_core._state_dir_candidates", return_value=[preferred, fallback]), mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_local_paths(), (None, None))
+            (fallback / "backend-settings.json").write_text(json.dumps({
+                "db_path": str(self.db), "image_library_dir": str(self.library),
+            }))
+            self.assertEqual(resolve_local_paths(), (None, None))
+            self.assertEqual(resolve_local_paths(db_path=self.db, library_dir=self.library),
+                             (self.db.resolve(), self.library.resolve()))
+            with mock.patch.dict(os.environ, {"MEMOLENS_DB_PATH": str(self.db), "MEMOLENS_LIBRARY_DIR": str(self.library)}):
+                self.assertEqual(resolve_local_paths(), (self.db.resolve(), self.library.resolve()))
+
+    def test_missing_native_database_never_falls_back_to_stale_backend_or_state(self) -> None:
+        state = self.root / "selected-state"
+        fallback = self.root / "old-state"
+        state.mkdir()
+        fallback.mkdir()
+        chosen_library = self.root / "chosen-library"
+        chosen_library.mkdir()
+        selected_db = state / "unavailable.db"
+        (state / "desktop-settings.json").write_text(json.dumps({
+            "schemaVersion": 2,
+            "librarySelectionAuthority": {
+                "schemaVersion": 1, "canonicalRoot": str(chosen_library),
+                "dbPath": str(selected_db), "device": "1", "inode": "2",
+            },
+        }))
+        for directory in (state, fallback):
+            (directory / "backend-settings.json").write_text(json.dumps({
+                "db_path": str(self.db), "image_library_dir": str(self.library),
+            }))
+        with mock.patch("memolens_core._state_dir_candidates", return_value=[state, fallback]), mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_local_paths(), (selected_db.resolve(), chosen_library.resolve()))
+            self.assertEqual(MemoLensGateway().status()["status"], "unavailable")
+            # An unavailable/non-file target also remains the selected target.
+            selected_db.mkdir()
+            self.assertEqual(resolve_local_paths(), (selected_db.resolve(), chosen_library.resolve()))
+            self.assertEqual(MemoLensGateway().status()["status"], "unavailable")
+            with mock.patch.dict(os.environ, {"MEMOLENS_DB_PATH": str(self.db), "MEMOLENS_LIBRARY_DIR": str(self.library)}):
+                self.assertEqual(resolve_local_paths(), (self.db.resolve(), self.library.resolve()))
+
     def test_marketplace_resolves_from_repository_root(self) -> None:
         manifest_path = MARKETPLACE_ROOT / ".agents" / "plugins" / "marketplace.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -670,14 +815,41 @@ class PluginTests(unittest.TestCase):
         )
         prompts = plugin_manifest["interface"]["defaultPrompt"]
         self.assertIsInstance(prompts, list)
+        # Codex currently renders at most three default prompts without a
+        # manifest warning. Keep the primary resume/navigation/editor journey
+        # visible; the Unsaved Draft Lab remains discoverable through the Skill.
         self.assertEqual(len(prompts), 3)
         self.assertTrue(all(isinstance(prompt, str) for prompt in prompts))
         self.assertTrue(all(1 <= len(prompt) <= 128 for prompt in prompts))
+        self.assertTrue(any("media Wiki" in prompt for prompt in prompts))
+        self.assertTrue(any("Resume" in prompt for prompt in prompts))
+        self.assertTrue(any("Canonical Editor" in prompt for prompt in prompts))
+        skill_prompt = (
+            resolved_plugin
+            / "skills"
+            / "use-memolens"
+            / "agents"
+            / "openai.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("canonical Browser Timeline editor", skill_prompt)
+        self.assertIn("Unsaved Draft Lab separate", skill_prompt)
+        self.assertNotIn("shape an unsaved timeline draft", skill_prompt)
+        self.assertIn(
+            "Native-approved source preview with muted output",
+            plugin_manifest["interface"]["capabilities"],
+        )
+        self.assertIn(
+            "timeline.preview_media",
+            plugin_manifest["interface"]["longDescription"],
+        )
         self.assertEqual(entry["policy"]["authentication"], "ON_USE")
+        readme = (resolved_plugin / "README.md").read_text(encoding="utf-8")
         self.assertIn(
             release_version,
-            (resolved_plugin / "README.md").read_text(encoding="utf-8"),
+            readme,
         )
+        self.assertIn("--action timeline.preview_media", readme)
+        self.assertNotIn("media playback is not claimed", readme)
 
     def test_cli_and_configured_mcp_start_from_non_repo_cwd_with_clean_stdout(self) -> None:
         cli_env = os.environ.copy()
@@ -760,7 +932,7 @@ class PluginTests(unittest.TestCase):
         responses = [json.loads(line) for line in stdout_lines]
         self.assertEqual(len(responses), 3)
         self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-06-18")
-        self.assertEqual(len(responses[1]["result"]["tools"]), 15)
+        self.assertEqual(len(responses[1]["result"]["tools"]), 31)
         self.assertEqual(
             responses[2]["result"]["structuredContent"]["source"],
             "sqlite_read_only",

@@ -1,7 +1,31 @@
 # Changelog
 
 All notable changes to MemoLens are documented here. The project follows
-[Semantic Versioning](https://semver.org/).
+[Semantic Versioning](https://semver.org/); source-preview entries are not release tags.
+
+## 2026-10-02 source development preview
+
+### Added
+
+- Codex and DeepSeek Harness adapters sharing a canonical Browser editor: trim, duration, reorder, verified replacement, video split, occurrence removal, Save/Discard and append-only history restore.
+- Library bootstrap with receipt-bound resumable mixed-media scanning, canonical image observations, Blueprint/Coverage/Timeline state and silent 1080p export with exact usage records.
+- An explicit **Open existing project** entry so agent-created projects do not depend on a previous renderer session.
+- A reproducible synthetic scan-to-export service test and a real-process bootstrap/restart/discovery regression.
+- Actual npm plugin-package verification, including required schemas, CLI startup and a standalone license.
+
+### Fixed
+
+- Bootstrap success no longer quits immediately and interrupts the new scan; verified Library/DB settings are published for ordinary restart.
+- Fresh bootstrap initializes the managed image schema before canonical migration, preventing restart rejection.
+- Restored the public branch's managed database discovery, isolated verification paths, provider-aware copy and licensing metadata.
+- Preserved the earlier scan/analysis scheduling, byte-budget recovery, revision-bound preview URLs and delayed-media-error fixes.
+- Closed high-severity npm advisories through compatible dependency updates; expanded CI to include package and production-oracle checks.
+
+### Scope
+
+- This is a source development preview, not a signed installer or a completed professional editor. Canonical export remains silent; audio mixing, subtitles, transitions and portable editable project packages are not included.
+- Historical desktop demonstration assets and their soundtrack do not represent current canonical output. Current usage and validation are in [the user guide](docs/user-guide.md) and [release record](docs/releases/2026-10-02-readiness.md).
+- Existing public license and Git history are preserved. This update does not publish private libraries, credentials or private conversation history.
 
 ## [Unreleased]
 

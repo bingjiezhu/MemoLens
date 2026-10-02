@@ -1,0 +1,15 @@
+{
+  "object": "memolens.sqlite_runtime_policy",
+  "schema_version": "1",
+  "policy_id": "sqlite-wal-reset-2026-08-22-v1",
+  "sqlite_major": 3,
+  "backport_minimums": [
+    [3, 44, 6],
+    [3, 50, 7],
+    [3, 51, 3]
+  ],
+  "mainline_minimum": [3, 53, 0],
+  "withdrawn_branches": [
+    [3, 52]
+  ]
+}

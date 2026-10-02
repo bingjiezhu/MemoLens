@@ -5,6 +5,7 @@ from typing import Any
 import numpy as np
 
 from .config import Settings
+from .network_policy import local_model_load_kwargs
 from .semantic_hints import expand_text_with_hints
 from .semantic_vectors import encode_semantic_text, is_semantic_hash_backend
 
@@ -115,9 +116,14 @@ class TextEmbeddingService:
         torch, auto_model, auto_tokenizer = self._import_dependencies()
         self._torch = torch
         self._device = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
+        load_kwargs = local_model_load_kwargs()
         try:
-            self._tokenizer = auto_tokenizer.from_pretrained(self.model_id, trust_remote_code=True)
-            self._model = auto_model.from_pretrained(self.model_id, trust_remote_code=True)
+            self._tokenizer = auto_tokenizer.from_pretrained(
+                self.model_id, trust_remote_code=True, **load_kwargs
+            )
+            self._model = auto_model.from_pretrained(
+                self.model_id, trust_remote_code=True, **load_kwargs
+            )
         except Exception as exc:
             if "einops" in str(exc).lower():
                 raise RuntimeError(

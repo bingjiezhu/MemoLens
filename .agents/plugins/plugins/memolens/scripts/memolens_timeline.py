@@ -219,7 +219,6 @@ def _normalize_draft_item(
         "asset_source_id": asset_source_id,
         "asset_sha256": asset_sha256,
         "timeline_start_ms": timeline_start_ms,
-        "fit": raw.get("fit", "cover" if kind in {"video", "image"} else None),
         "reason": str(raw.get("reason") or "Selected for the draft.").strip()[:500],
         "match_id": str(
             raw.get("match_id") or raw.get("segment_id") or asset_id
@@ -229,10 +228,12 @@ def _normalize_draft_item(
         raise TimelineInputError(
             f"{field} reason and match_id must be non-empty.", field=field
         )
-    if kind in {"video", "image"} and item["fit"] not in ALLOWED_FITS:
-        raise TimelineInputError(
-            f"{field}.fit is not supported.", field=f"{field}.fit"
-        )
+    if kind in {"video", "image"}:
+        item["fit"] = raw.get("fit", "cover")
+        if item["fit"] not in ALLOWED_FITS:
+            raise TimelineInputError(
+                f"{field}.fit is not supported.", field=f"{field}.fit"
+            )
     if kind in {"video", "audio"}:
         source_in = _require_int(
             raw.get("source_in_ms"), f"{field}.source_in_ms", minimum=0
@@ -1300,6 +1301,63 @@ def _clip_index(timeline: dict[str, Any]) -> dict[str, tuple[dict[str, Any], str
     }
 
 
+def _clip_track(
+    timeline: dict[str, Any], clip_id: str
+) -> tuple[dict[str, Any], int] | None:
+    for track in timeline["tracks"]:
+        for index, clip in enumerate(track["clips"]):
+            if clip["id"] == clip_id:
+                return track, index
+    return None
+
+
+def _reflow_track(track: dict[str, Any], *, start_ms: int | None = None) -> None:
+    clips = track["clips"]
+    if not clips:
+        return
+    cursor = (
+        min(int(clip["timeline_start_ms"]) for clip in clips)
+        if start_ms is None
+        else start_ms
+    )
+    for clip in clips:
+        clip["timeline_start_ms"] = cursor
+        cursor += int(clip["timeline_duration_ms"])
+
+
+def _shift_track_tail(
+    track: dict[str, Any],
+    *,
+    start_index: int,
+    delta_ms: int,
+    field: str,
+) -> None:
+    """Ripple one edit delta through later clips without collapsing their gaps."""
+
+    if delta_ms == 0:
+        return
+    shifted_starts = [
+        int(clip["timeline_start_ms"]) + delta_ms
+        for clip in track["clips"][start_index:]
+    ]
+    if any(start < 0 for start in shifted_starts):
+        raise TimelineInputError(
+            f"{field} would move a later clip before the timeline origin.",
+            field=field,
+        )
+    for clip, shifted_start in zip(track["clips"][start_index:], shifted_starts):
+        clip["timeline_start_ms"] = shifted_start
+
+
+def _recompute_timeline_duration(timeline: dict[str, Any]) -> None:
+    ends = [
+        int(clip["timeline_start_ms"]) + int(clip["timeline_duration_ms"])
+        for track in timeline["tracks"]
+        for clip in track["clips"]
+    ]
+    timeline["format"]["duration_ms"] = max(ends, default=1)
+
+
 def _filter_provenance_maps(timeline: dict[str, Any]) -> None:
     assets = {
         clip["asset_id"]
@@ -1414,23 +1472,55 @@ def revise_timeline_draft(
             )
         clip, track_type = indexed
         if op == "move_clip":
-            if set(raw) != {"op", "clip_id", "timeline_start_ms"}:
+            move_fields = set(raw)
+            if move_fields == {"op", "clip_id", "timeline_start_ms"}:
+                clip["timeline_start_ms"] = _require_int(
+                    raw["timeline_start_ms"],
+                    f"{field}.timeline_start_ms",
+                    minimum=0,
+                )
+            elif move_fields == {"op", "clip_id", "to_index"}:
+                owner = _clip_track(revised, clip_id)
+                assert owner is not None
+                track, current_index = owner
+                target_index = _require_int(
+                    raw["to_index"],
+                    f"{field}.to_index",
+                    minimum=0,
+                    maximum=len(track["clips"]) - 1,
+                )
+                moved = track["clips"].pop(current_index)
+                track["clips"].insert(target_index, moved)
+                _reflow_track(track)
+                _recompute_timeline_duration(revised)
+            else:
                 raise TimelineInputError(
                     f"{field} has invalid move_clip fields.", field=field
                 )
-            clip["timeline_start_ms"] = _require_int(
-                raw["timeline_start_ms"], f"{field}.timeline_start_ms", minimum=0
-            )
         elif op == "trim_clip":
-            if track_type not in {"video", "audio"} or set(raw) != {
+            allowed_trim_fields = {
                 "op",
                 "clip_id",
                 "source_in_ms",
                 "source_out_ms",
-            }:
+                "ripple",
+            }
+            required_trim_fields = {
+                "op",
+                "clip_id",
+                "source_in_ms",
+                "source_out_ms",
+            }
+            if (
+                track_type not in {"video", "audio"}
+                or set(raw) - allowed_trim_fields
+                or not required_trim_fields.issubset(raw)
+                or not isinstance(raw.get("ripple", False), bool)
+            ):
                 raise TimelineInputError(
                     f"{field} has invalid trim_clip fields.", field=field
                 )
+            original_duration = int(clip["timeline_duration_ms"])
             source_in = _require_int(
                 raw["source_in_ms"], f"{field}.source_in_ms", minimum=0
             )
@@ -1445,6 +1535,85 @@ def revise_timeline_draft(
             clip["source_in_ms"] = source_in
             clip["source_out_ms"] = source_out
             clip["timeline_duration_ms"] = source_out - source_in
+            if raw.get("ripple", False):
+                owner = _clip_track(revised, clip_id)
+                assert owner is not None
+                track, current_index = owner
+                _shift_track_tail(
+                    track,
+                    start_index=current_index + 1,
+                    delta_ms=clip["timeline_duration_ms"] - original_duration,
+                    field=field,
+                )
+                _recompute_timeline_duration(revised)
+        elif op == "split_clip":
+            if set(raw) != {"op", "clip_id", "offset_ms"}:
+                raise TimelineInputError(
+                    f"{field} has invalid split_clip fields.", field=field
+                )
+            offset_ms = _require_int(
+                raw["offset_ms"],
+                f"{field}.offset_ms",
+                minimum=1,
+                maximum=int(clip["timeline_duration_ms"]) - 1,
+            )
+            owner = _clip_track(revised, clip_id)
+            assert owner is not None
+            track, current_index = owner
+            right = deepcopy(clip)
+            right["id"] = _stable_id(
+                "clip",
+                {
+                    "source_clip_id": clip_id,
+                    "parent_revision": revised["revision"],
+                    "offset_ms": offset_ms,
+                },
+            )
+            original_duration = int(clip["timeline_duration_ms"])
+            clip["timeline_duration_ms"] = offset_ms
+            right["timeline_start_ms"] = int(clip["timeline_start_ms"]) + offset_ms
+            right["timeline_duration_ms"] = original_duration - offset_ms
+            if track_type in {"video", "audio"}:
+                source_split = int(clip["source_in_ms"]) + offset_ms
+                original_source_out = int(clip["source_out_ms"])
+                clip["source_out_ms"] = source_split
+                right["source_in_ms"] = source_split
+                right["source_out_ms"] = original_source_out
+            if track_type == "audio":
+                original_fade_in = int(clip.get("fade_in_ms", 0))
+                original_fade_out = int(clip.get("fade_out_ms", 0))
+                clip["fade_in_ms"] = min(
+                    original_fade_in,
+                    int(clip["timeline_duration_ms"]) // 2,
+                )
+                clip["fade_out_ms"] = 0
+                right["fade_in_ms"] = 0
+                right["fade_out_ms"] = min(
+                    original_fade_out,
+                    int(right["timeline_duration_ms"]) // 2,
+                )
+            track["clips"].insert(current_index + 1, right)
+        elif op == "delete_clip":
+            if set(raw) != {"op", "clip_id"}:
+                raise TimelineInputError(
+                    f"{field} has invalid delete_clip fields.", field=field
+                )
+            owner = _clip_track(revised, clip_id)
+            assert owner is not None
+            track, current_index = owner
+            if len(track["clips"]) <= 1:
+                raise TimelineInputError(
+                    f"{field} cannot remove the last clip from a track.", field=field
+                )
+            deleted_duration = int(track["clips"][current_index]["timeline_duration_ms"])
+            track["clips"].pop(current_index)
+            _shift_track_tail(
+                track,
+                start_index=current_index,
+                delta_ms=-deleted_duration,
+                field=field,
+            )
+            _recompute_timeline_duration(revised)
         elif op == "set_volume":
             if track_type not in {"video", "audio"} or set(raw) != {
                 "op",
@@ -1481,12 +1650,18 @@ def revise_timeline_draft(
                 "source_out_ms",
                 "reason",
                 "match_id",
+                "ripple",
             }
             required = {"asset_id", "asset_source_id", "asset_sha256"}
-            if set(raw) - allowed or not required.issubset(raw):
+            if (
+                set(raw) - allowed
+                or not required.issubset(raw)
+                or not isinstance(raw.get("ripple", False), bool)
+            ):
                 raise TimelineInputError(
                     f"{field} has invalid replace_clip fields.", field=field
                 )
+            original_duration = int(clip["timeline_duration_ms"])
             asset_id = _require_id(raw["asset_id"], f"{field}.asset_id")
             source_id = _require_id(
                 raw["asset_source_id"], f"{field}.asset_source_id"
@@ -1568,6 +1743,9 @@ def revise_timeline_draft(
                         "timeline_duration_ms": source_out - source_in,
                     }
                 )
+                fade_limit = clip["timeline_duration_ms"] // 2
+                clip["fade_in_ms"] = min(int(clip.get("fade_in_ms", 0)), fade_limit)
+                clip["fade_out_ms"] = min(int(clip.get("fade_out_ms", 0)), fade_limit)
             clip["provenance"] = {
                 "reason": str(
                     raw.get("reason") or "Replaced in a typed revision."
@@ -1576,6 +1754,17 @@ def revise_timeline_draft(
                     raw.get("match_id") or raw.get("segment_id") or asset_id
                 ).strip(),
             }
+            if raw.get("ripple", False):
+                owner = _clip_track(revised, clip_id)
+                assert owner is not None
+                track, current_index = owner
+                _shift_track_tail(
+                    track,
+                    start_index=current_index + 1,
+                    delta_ms=clip["timeline_duration_ms"] - original_duration,
+                    field=field,
+                )
+                _recompute_timeline_duration(revised)
         else:
             raise TimelineInputError(
                 f"{field}.op is not supported.", field=f"{field}.op"

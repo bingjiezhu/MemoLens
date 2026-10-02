@@ -13,6 +13,7 @@ from core.llm_utils import (
     request_minimax_chat_completion,
     request_vertex_generate_content,
 )
+from core.network_policy import network_target_enabled
 from core.schemas import VisionMetadata
 from .files import PreparedImage
 
@@ -56,6 +57,8 @@ class OpenAICompatibleVisionClient:
         prepared_image: PreparedImage,
         model: str,
     ) -> VisionMetadata:
+        if not network_target_enabled(self.settings.vision_base_url):
+            return self._fallback_metadata(prepared_image.source_name)
         if self.settings.vision_provider != "vertex" and not self.settings.vision_api_key:
             return self._fallback_metadata(prepared_image.source_name)
         try:

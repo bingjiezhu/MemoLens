@@ -1,6 +1,7 @@
 import { IMessageSDK } from "@photon-ai/imessage-kit";
 
 import type { LogLevel } from "./config.js";
+import { requireExternalPlatformAllowed } from "./networkPolicy.js";
 import type { BotReply, IncomingMessage, MessagePlatformAdapter } from "./types.js";
 
 type PhotonMessageLike = {
@@ -25,6 +26,7 @@ export class IMessageAdapter implements MessagePlatformAdapter {
     onMessage: (message: IncomingMessage) => Promise<void>;
     onError: (error: Error) => void;
   }): Promise<void> {
+    requireExternalPlatformAllowed("imessage");
     await this.sdk.startWatching({
       onMessage: async (message: PhotonMessageLike) => {
         if (message.isFromMe) {
@@ -40,6 +42,7 @@ export class IMessageAdapter implements MessagePlatformAdapter {
   }
 
   async sendReply(chatId: string, reply: BotReply): Promise<void> {
+    requireExternalPlatformAllowed("imessage");
     if (reply.imagePaths.length > 0) {
       await this.sdk.send(chatId, {
         text: reply.text,

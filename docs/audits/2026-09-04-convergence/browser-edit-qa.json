@@ -1,0 +1,320 @@
+{
+  "object": "memolens.browser_edit_qa",
+  "schema_version": "1",
+  "historical_snapshot_not_live_session": true,
+  "recorded_at_utc": "2026-09-05 01:43:07 UTC",
+  "status": "controlled_local_browser_interaction_verified",
+  "claim_boundary": {
+    "interaction_driver": "root_agent_using_Codex_in_app_Browser",
+    "snapshot_verifier": "editor_ui_fix_agent_using_owned_fixture_control_channel",
+    "backend": "production_Core_create_app_and_paired_EditorServerManager",
+    "media": "two_ffmpeg_generated_H264_AAC_color_videos_only",
+    "fixture_mode": "automated_qa_native_approval_fixture_not_real_user_approval",
+    "real_user_native_approval_claimed": false,
+    "model_e2e_claimed": false,
+    "provider_calls_requested": false,
+    "user_library_access_requested": false,
+    "boot_or_pairing_credentials_included": false
+  },
+  "fixture": {
+    "root": "<private-qa-fixture-not-published>",
+    "project_id": "proj_6d6ea1f85c374fe0b1a6a9e9bc22174d",
+    "approved_actions": [
+      "timeline.apply_edit",
+      "timeline.apply_structural_edit",
+      "timeline.restore_revision",
+      "timeline.preview_media"
+    ],
+    "max_operations": 8,
+    "pairing_ttl_seconds": 1800,
+    "retained_for_short_term_viewing": true
+  },
+  "browser_sequence_reported_by_driver": [
+    "Move clip 1 later: Stage without Save",
+    "Discard pending movement, leaving N1 unchanged",
+    "Split clip 1 at Timeline 1000 ms, then Save as N2",
+    "Inspect historical K1 while the current head remains N2",
+    "Stage restore K1, then Save K1 as N3"
+  ],
+  "verified_snapshots": [
+    {
+      "phase": "after_move_stage_before_save",
+      "head": {
+        "revision": 1,
+        "timeline_id": "timeline_bcf2df07608d6391b73e8ad5",
+        "timeline_content_sha256": "03a590277a1a8eed8134ee1c39e6463e97429ee8957fa5c0d9b71cd6347bd838"
+      },
+      "clip_count": 2,
+      "clips": [
+        {
+          "clip_id": "clip_0779dff2d1bb56b0718e7dad",
+          "end_ms": 3826,
+          "media_kind": "video",
+          "ordinal": 0,
+          "source_in_ms": 1000,
+          "source_out_ms": 4826,
+          "start_ms": 0
+        },
+        {
+          "clip_id": "clip_527a25940f3bd8a301aae339",
+          "end_ms": 8000,
+          "media_kind": "video",
+          "ordinal": 1,
+          "source_in_ms": 1000,
+          "source_out_ms": 5174,
+          "start_ms": 3826
+        }
+      ],
+      "canonical_ledgers_unchanged_from_baseline": true,
+      "canonical_ledgers_sha256": "a9b34a88453679f4909c29a29f83aa1fd2817f83cfccd143285126e20bf7f1d9",
+      "ledger_counts": {
+        "canonical_timeline_heads": 1,
+        "canonical_timeline_operations": 1,
+        "canonical_timeline_revisions": 1,
+        "canonical_timeline_receipts": 1,
+        "agent_project_command_receipts": 0,
+        "usage_rows": 0,
+        "export_rows": 0
+      }
+    },
+    {
+      "phase": "after_split_saved_as_N2",
+      "head": {
+        "revision": 2,
+        "timeline_id": "timeline_bcf2df07608d6391b73e8ad5",
+        "timeline_content_sha256": "86a586b659e480236ea0c9d0443c849e0095c023d38ec478b571db81c1d2d3db"
+      },
+      "clip_count": 3,
+      "clips": [
+        {
+          "clip_id": "clip_f959827f54607dc16b9eab83",
+          "ordinal": 0,
+          "media_kind": "video",
+          "start_ms": 0,
+          "end_ms": 1000,
+          "source_in_ms": 1000,
+          "source_out_ms": 2000
+        },
+        {
+          "clip_id": "clip_4d3d59414845df42168fa29f",
+          "ordinal": 1,
+          "media_kind": "video",
+          "start_ms": 1000,
+          "end_ms": 3826,
+          "source_in_ms": 2000,
+          "source_out_ms": 4826
+        },
+        {
+          "clip_id": "clip_527a25940f3bd8a301aae339",
+          "end_ms": 8000,
+          "media_kind": "video",
+          "ordinal": 2,
+          "source_in_ms": 1000,
+          "source_out_ms": 5174,
+          "start_ms": 3826
+        }
+      ],
+      "canonical_ledgers_unchanged_from_baseline": false,
+      "canonical_ledgers_sha256": "a37443a50c8416eddf4346380e25329e213cecd2bbaff414208b243b412be4ed",
+      "ledger_counts": {
+        "canonical_timeline_heads": 1,
+        "canonical_timeline_operations": 2,
+        "canonical_timeline_revisions": 2,
+        "canonical_timeline_receipts": 1,
+        "agent_project_command_receipts": 1,
+        "usage_rows": 0,
+        "export_rows": 0
+      }
+    },
+    {
+      "phase": "after_K1_restore_saved_as_N3",
+      "head": {
+        "revision": 3,
+        "timeline_content_sha256": "e7d8650c30e187f3b98ecdc74b6e35def9840f75dbe73a585f81b7f45752557e",
+        "timeline_id": "timeline_bcf2df07608d6391b73e8ad5"
+      },
+      "clip_count": 2,
+      "clips": [
+        {
+          "clip_id": "clip_0779dff2d1bb56b0718e7dad",
+          "end_ms": 3826,
+          "media_kind": "video",
+          "ordinal": 0,
+          "source_in_ms": 1000,
+          "source_out_ms": 4826,
+          "start_ms": 0
+        },
+        {
+          "clip_id": "clip_527a25940f3bd8a301aae339",
+          "end_ms": 8000,
+          "media_kind": "video",
+          "ordinal": 1,
+          "source_in_ms": 1000,
+          "source_out_ms": 5174,
+          "start_ms": 3826
+        }
+      ],
+      "canonical_ledgers_unchanged_from_baseline": false,
+      "canonical_ledgers_sha256": "afa6608be6618e64c8ee3c713a0c0eb175e95f4b6b698e8c81b7a502bb82e4cc",
+      "ledger_counts": {
+        "canonical_timeline_heads": 1,
+        "canonical_timeline_operations": 3,
+        "canonical_timeline_revisions": 3,
+        "canonical_timeline_receipts": 1,
+        "agent_project_command_receipts": 2,
+        "usage_rows": 0,
+        "export_rows": 0
+      },
+      "editor_session": {
+        "alive": true,
+        "edit_qa_fixture": true,
+        "playable_clip_count": 2,
+        "preview_only": false,
+        "status": "active"
+      }
+    }
+  ],
+  "independent_read_only_sql": {
+    "timeline_operations": [
+      {
+        "sequence": 1,
+        "command_type": "timeline.materialize_first_cut",
+        "result_revision": 1
+      },
+      {
+        "sequence": 2,
+        "command_type": "timeline.apply_structural_edit",
+        "result_revision": 2
+      },
+      {
+        "sequence": 3,
+        "command_type": "timeline.restore_revision",
+        "result_revision": 3
+      }
+    ],
+    "agent_command_receipts": [
+      {
+        "command_type": "timeline.apply_structural_edit",
+        "response_status": 201,
+        "resource_type": "canonical_timeline"
+      },
+      {
+        "command_type": "timeline.restore_revision",
+        "response_status": 201,
+        "resource_type": "canonical_timeline"
+      }
+    ],
+    "receipt_note": "canonical_timeline_receipts retains the initial lowering receipt; the two paired structural and restore command receipts are in agent_project_command_receipts."
+  },
+  "source_file_integrity": [
+    {
+      "filename": "opening-h264.mp4",
+      "sha256": "7123d27f8c4f4e1a0e5d8a6d882ec752d51991607da73cd93c380f342494b104",
+      "file_size": 107965,
+      "current_file_sha256_matches_registered_asset": true
+    },
+    {
+      "filename": "ending-h264.mp4",
+      "sha256": "417daa0f0882afb8e682fbaebe966cafc0697c9d99cc012366ea23d79954c359",
+      "file_size": 108035,
+      "current_file_sha256_matches_registered_asset": true
+    }
+  ],
+  "final_ledger_snapshot": {
+    "baseline": {
+      "canonical_sha256": "a9b34a88453679f4909c29a29f83aa1fd2817f83cfccd143285126e20bf7f1d9",
+      "groups": {
+        "capability_write": {
+          "canonical_sha256": "7138ce0849b37a292e30da7c48205010cccaceebf223d9d2c106b87357b7a60c",
+          "row_count": 3,
+          "tables": {
+            "agent_pairing_confirmation_receipts": 1,
+            "agent_project_capabilities": 1,
+            "agent_project_capability_events": 1,
+            "agent_project_command_receipts": 0
+          }
+        },
+        "export": {
+          "canonical_sha256": "58937744b09f2d7bbb52a590ea174b5fc2f56cf116d53001954a742d25c8e724",
+          "row_count": 0,
+          "tables": {
+            "canonical_export_jobs": 0,
+            "canonical_export_operations": 0,
+            "canonical_export_receipts": 0,
+            "canonical_export_revisions": 0,
+            "export_grants": 0
+          }
+        },
+        "timeline": {
+          "canonical_sha256": "85ca24ccb5637fe832da06d68c26438eb9669097dc48ec02bf4abc7346ce332e",
+          "row_count": 4,
+          "tables": {
+            "canonical_timeline_heads": 1,
+            "canonical_timeline_operations": 1,
+            "canonical_timeline_receipts": 1,
+            "canonical_timeline_revisions": 1
+          }
+        },
+        "usage": {
+          "canonical_sha256": "35f6ae2fb1e4de6058e9ba5b4994a0bec47c72332b059648fa8fabf8c4f8b6bc",
+          "row_count": 0,
+          "tables": {
+            "canonical_usage_occurrences": 0
+          }
+        }
+      }
+    },
+    "current": {
+      "canonical_sha256": "afa6608be6618e64c8ee3c713a0c0eb175e95f4b6b698e8c81b7a502bb82e4cc",
+      "groups": {
+        "capability_write": {
+          "canonical_sha256": "d83bd15e63558c61117a1ec0bfbc04bc321ff16dd214acb107321a77f0dd254e",
+          "row_count": 7,
+          "tables": {
+            "agent_pairing_confirmation_receipts": 1,
+            "agent_project_capabilities": 1,
+            "agent_project_capability_events": 3,
+            "agent_project_command_receipts": 2
+          }
+        },
+        "export": {
+          "canonical_sha256": "58937744b09f2d7bbb52a590ea174b5fc2f56cf116d53001954a742d25c8e724",
+          "row_count": 0,
+          "tables": {
+            "canonical_export_jobs": 0,
+            "canonical_export_operations": 0,
+            "canonical_export_receipts": 0,
+            "canonical_export_revisions": 0,
+            "export_grants": 0
+          }
+        },
+        "timeline": {
+          "canonical_sha256": "c69fd912f1c58772190911593cdd0e587117cf8cb0f6ee58a78b0f95774a6f03",
+          "row_count": 8,
+          "tables": {
+            "canonical_timeline_heads": 1,
+            "canonical_timeline_operations": 3,
+            "canonical_timeline_receipts": 1,
+            "canonical_timeline_revisions": 3
+          }
+        },
+        "usage": {
+          "canonical_sha256": "35f6ae2fb1e4de6058e9ba5b4994a0bec47c72332b059648fa8fabf8c4f8b6bc",
+          "row_count": 0,
+          "tables": {
+            "canonical_usage_occurrences": 0
+          }
+        }
+      }
+    },
+    "unchanged": false
+  },
+  "conclusions": {
+    "staged_move_did_not_write_canonical_ledgers": true,
+    "split_created_N2_with_three_clips_and_contiguous_source_ranges": true,
+    "restoring_K1_appended_N3_with_original_two_clip_content": true,
+    "original_source_bytes_match_registered_assets": true,
+    "usage_and_export_ledgers_remained_empty": true,
+    "synthetic_fixture_process_left_running": true
+  }
+}

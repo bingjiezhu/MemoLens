@@ -57,7 +57,7 @@ vlm:
     ollama_qwen35_27b:
       label: Qwen 3.5 27B (Local / Ollama)
       provider: ollama
-      base_url: http://localhost:11434/v1
+      base_url: http://127.0.0.1:11434/v1
       model: qwen3.5:27b
       execution: local
       capabilities: [text]
@@ -69,7 +69,7 @@ vlm:
     ollama_gemma4_e2b:
       label: Gemma 4 E2B (Local / Ollama)
       provider: ollama
-      base_url: http://localhost:11434/v1
+      base_url: http://127.0.0.1:11434/v1
       model: gemma4:e2b
       execution: local
       family: gemma4
@@ -82,7 +82,7 @@ vlm:
     ollama_gemma4_e4b:
       label: Gemma 4 E4B (Local / Ollama)
       provider: ollama
-      base_url: http://localhost:11434/v1
+      base_url: http://127.0.0.1:11434/v1
       model: gemma4:e4b
       execution: local
       family: gemma4
@@ -95,7 +95,7 @@ vlm:
     ollama_gemma4_26b:
       label: Gemma 4 26B A4B (Local / Ollama)
       provider: ollama
-      base_url: http://localhost:11434/v1
+      base_url: http://127.0.0.1:11434/v1
       model: gemma4:26b
       execution: local
       family: gemma4
@@ -108,7 +108,7 @@ vlm:
     ollama_gemma4_31b:
       label: Gemma 4 31B (Local / Ollama)
       provider: ollama
-      base_url: http://localhost:11434/v1
+      base_url: http://127.0.0.1:11434/v1
       model: gemma4:31b
       execution: local
       family: gemma4

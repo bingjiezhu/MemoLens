@@ -9,13 +9,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlencode
 
 from memolens_atlas_presenter import present_cleanup, present_memories
+from memolens_creative_blueprint import (
+    BLUEPRINT_SCHEMA_AVAILABLE,
+    blueprint_contract_summary,
+)
 from memolens_api_client import (
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT,
@@ -28,14 +33,16 @@ from memolens_contracts import (
     MemoLensError,
     bounded_int as _bounded_int,
     capabilities as _capabilities,
-    compact_asset as _compact_asset,
     decode_cursor as _decode_cursor,
     json_ready,
     media_kinds as _media_kinds,
     safety_summary as _safety_summary,
     timeline_safety_summary as _timeline_safety_summary,
 )
+from memolens_project_store import validate_project_identifier
+from memolens_persisted_blueprint import persisted_blueprint_contract_summary
 from memolens_read_store import ReadOnlyMemoLensStore
+from memolens_wiki import LiveMediaWiki, parse_evidence_id, parse_page_id
 
 from memolens_timeline import (
     TimelineInputError,
@@ -45,6 +52,17 @@ from memolens_timeline import (
 )
 
 TRUST_LOCAL_API_ENV = "MEMOLENS_PLUGIN_TRUST_LOCAL_API"
+MAX_WIKI_QUERY_LENGTH = 4096
+
+
+def _strict_bounded_int(
+    value: Any, *, minimum: int, maximum: int, field: str
+) -> int:
+    """Reject JSON floats, strings, and booleans before applying integer bounds."""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MemoLensError(f"{field} must be an integer.", code="invalid_argument")
+    return _bounded_int(value, minimum=minimum, maximum=maximum, field=field)
 
 
 def _clean_path(value: str | os.PathLike[str] | None) -> Path | None:
@@ -83,12 +101,53 @@ def _state_dir_candidates() -> list[Path]:
 
 def _persisted_settings() -> dict[str, Any]:
     for state_dir in _state_dir_candidates():
+        # Discovery is read-only and conveys no runtime/edit authority. Prefer
+        # the native selection projection over a stale backend preference file.
+        try:
+            desktop = json.loads((state_dir / "desktop-settings.json").read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            desktop = None
+        if isinstance(desktop, dict):
+            binding = desktop.get("librarySelectionAuthority")
+            if (
+                desktop.get("schemaVersion") == 2
+                and isinstance(binding, dict)
+                and binding.get("schemaVersion") == 1
+                and isinstance(binding.get("dbPath"), str)
+                and isinstance(binding.get("canonicalRoot"), str)
+            ):
+                candidate = _clean_path(binding["dbPath"])
+                if candidate is not None:
+                    # A confirmed selection is still the selection when its DB
+                    # is missing or unreadable. The read store reports that
+                    # failure; discovery must not silently switch Libraries.
+                    return {
+                        "db_path": str(candidate),
+                        "image_library_dir": binding["canonicalRoot"],
+                    }
         settings_path = state_dir / "backend-settings.json"
         try:
             payload = json.loads(settings_path.read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if isinstance(payload.get("db_path"), str) and payload["db_path"].strip():
+            return payload
+        storage = state_dir / "storage"
+        hashed = [path for path in storage.glob("photo-index-*.db")
+                  if re.fullmatch(r"photo-index-[0-9a-f]{24}\.db", path.name)
+                  and path.is_file()]
+        if len(hashed) > 1:
+            # A higher-priority state with multiple Libraries is ambiguous.
+            # Stop here instead of adopting an unrelated lower-priority state.
+            return {}
+        if len(hashed) == 1:
+            return {**payload, "db_path": str(hashed[0].resolve())}
+        candidate = storage / "photo_index.db"
+        if candidate.is_file():
+            return {**payload, "db_path": str(candidate.resolve())}
+        if payload:
             return payload
     return {}
 
@@ -109,31 +168,6 @@ def resolve_local_paths(
     if library is None and isinstance(settings.get("image_library_dir"), str):
         library = _clean_path(settings["image_library_dir"])
 
-    if db is None:
-        for state_dir in _state_dir_candidates():
-            desktop_path = state_dir / "desktop-settings.json"
-            try:
-                desktop = json.loads(desktop_path.read_text(encoding="utf-8"))
-            except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
-                desktop = None
-            if isinstance(desktop, dict):
-                db = _clean_path(desktop.get("defaultDbPath"))
-                if db is not None and db.is_file():
-                    break
-                db = None
-
-    if db is None:
-        for state_dir in _state_dir_candidates():
-            storage = state_dir / "storage"
-            hashed = sorted(storage.glob("photo-index-*.db"))
-            hashed = [path for path in hashed if path.is_file()]
-            if len(hashed) == 1:
-                db = hashed[0].resolve()
-                break
-            candidate = storage / "photo_index.db"
-            if candidate.is_file():
-                db = candidate.resolve()
-                break
     return db, library
 
 
@@ -171,29 +205,34 @@ class MemoLensGateway:
             db_path=db_path, library_dir=library_dir
         )
         self.timeout = clamp_timeout(timeout)
-        self._api = (
-            LocalApiClient(
-                configured_base_url,
+        self._configured_base_url = configured_base_url
+        self._api: LocalApiClient | None = None
+        self.base_url = DEFAULT_BASE_URL
+        self._store = ReadOnlyMemoLensStore(self.db_path, self.library_dir)
+        self._wiki = LiveMediaWiki()
+
+    def _ensure_api(self) -> LocalApiClient:
+        """Construct the opt-in HTTP client only for an operation that needs it."""
+
+        self._require_local_api_trust()
+        if self._api is None:
+            self._api = LocalApiClient(
+                self._configured_base_url,
                 timeout=self.timeout,
                 resolver=socket.getaddrinfo,
             )
-            if self.trust_local_api
-            else None
-        )
-        self.base_url = self._api.base_url if self._api else DEFAULT_BASE_URL
-        self._store = ReadOnlyMemoLensStore(self.db_path, self.library_dir)
+            self.base_url = self._api.base_url
+        return self._api
 
     @property
     def _opener(self):  # noqa: ANN201
         """Compatibility hook for transport-focused diagnostics and tests."""
 
-        return self._api.opener if self._api else None
+        return self._ensure_api().opener if self.trust_local_api else None
 
     @_opener.setter
     def _opener(self, opener: Any) -> None:
-        self._require_local_api_trust()
-        assert self._api is not None
-        self._api.opener = opener
+        self._ensure_api().opener = opener
 
     def _require_local_api_trust(self) -> None:
         if not self.trust_local_api:
@@ -232,11 +271,10 @@ class MemoLensGateway:
         body: dict[str, Any] | None = None,
         verify_identity: bool = True,
     ) -> dict[str, Any]:
-        self._require_local_api_trust()
-        assert self._api is not None
+        api = self._ensure_api()
         if verify_identity:
             self.health()
-        return self._api.request_json(
+        return api.request_json(
             path,
             method=method,
             body=body,
@@ -244,11 +282,10 @@ class MemoLensGateway:
         )
 
     def health(self) -> dict[str, Any]:
-        self._require_local_api_trust()
-        assert self._api is not None
-        payload = self._api.health()
-        self.db_path = self._api.db_path
-        self.library_dir = self._api.library_dir
+        api = self._ensure_api()
+        payload = api.health()
+        self.db_path = api.db_path
+        self.library_dir = api.library_dir
         self._store.configure(db_path=self.db_path, library_dir=self.library_dir)
         return payload
 
@@ -268,8 +305,13 @@ class MemoLensGateway:
                         "error": str(database_error),
                         "error_code": database_error.code,
                     },
+                    "creative_blueprint_contract": blueprint_contract_summary(),
+                    "persisted_blueprint_contract": persisted_blueprint_contract_summary(),
                     "capabilities": _capabilities(
-                        None, legacy_search=False, local_api_reads=False
+                        None,
+                        legacy_search=False,
+                        local_api_reads=False,
+                        blueprint_schema_available=BLUEPRINT_SCHEMA_AVAILABLE,
                     ),
                     "warnings": [
                         "Local API access is disabled and no readable SQLite index was found."
@@ -283,10 +325,13 @@ class MemoLensGateway:
                 "mode": "safe_default_read_only",
                 "local_api": self._local_api_summary(available=None),
                 "database": database,
+                "creative_blueprint_contract": blueprint_contract_summary(),
+                "persisted_blueprint_contract": persisted_blueprint_contract_summary(),
                 "capabilities": _capabilities(
                     database,
                     legacy_search=bool(database.get("legacy_search_available")),
                     local_api_reads=False,
+                    blueprint_schema_available=BLUEPRINT_SCHEMA_AVAILABLE,
                 ),
                 "warnings": [
                     "Local API access is disabled by default; confirmed Creator Memory, Media Inbox, search, and timeline reads use SQLite read-only access."
@@ -316,8 +361,13 @@ class MemoLensGateway:
                         "error": str(database_error),
                         "error_code": database_error.code,
                     },
+                    "creative_blueprint_contract": blueprint_contract_summary(),
+                    "persisted_blueprint_contract": persisted_blueprint_contract_summary(),
                     "capabilities": _capabilities(
-                        None, legacy_search=False, local_api_reads=False
+                        None,
+                        legacy_search=False,
+                        local_api_reads=False,
+                        blueprint_schema_available=BLUEPRINT_SCHEMA_AVAILABLE,
                     ),
                     "safety": _safety_summary(),
                 }
@@ -333,10 +383,13 @@ class MemoLensGateway:
                     error_code=service_error.code,
                 ),
                 "database": database,
+                "creative_blueprint_contract": blueprint_contract_summary(),
+                "persisted_blueprint_contract": persisted_blueprint_contract_summary(),
                 "capabilities": _capabilities(
                     database,
                     legacy_search=bool(database.get("legacy_search_available")),
                     local_api_reads=False,
+                    blueprint_schema_available=BLUEPRINT_SCHEMA_AVAILABLE,
                 ),
                 "warnings": [
                     "The MemoLens service is offline; confirmed Creator Memory, Media Inbox, and deterministic media reads remain available through SQLite when indexed."
@@ -370,14 +423,17 @@ class MemoLensGateway:
                 identity_verified=True,
             ),
             "database": database,
+            "creative_blueprint_contract": blueprint_contract_summary(),
+            "persisted_blueprint_contract": persisted_blueprint_contract_summary(),
             "profiles": {
                 "vision": effective.get("vision_profile_name"),
                 "query": effective.get("query_profile_name"),
             },
             "capabilities": _capabilities(
                 database,
-                legacy_search=True,
+                legacy_search=bool(database.get("legacy_search_available")),
                 local_api_reads=True,
+                blueprint_schema_available=BLUEPRINT_SCHEMA_AVAILABLE,
             ),
             "write_boundary": (
                 "The unauthenticated local-API opt-in grants read features only. "
@@ -391,76 +447,22 @@ class MemoLensGateway:
         if not normalized_query:
             raise MemoLensError("Search query cannot be empty.", code="invalid_argument")
         normalized_limit = _bounded_int(limit, minimum=1, maximum=36, field="limit")
-        if not self.trust_local_api:
-            result = self._sqlite_search(normalized_query, normalized_limit)
-            result.update(
-                {
-                    "source": "sqlite_read_only",
-                    "mode": "safe_default_read_only",
-                    "local_api": self._local_api_summary(available=None),
-                    "warnings": [
-                        "Local API access is disabled by default; deterministic lexical SQLite ranking was used."
-                    ],
-                }
-            )
-            return result
-        try:
-            payload = self._request_json(
-                "/v1/retrieval/query",
-                method="POST",
-                body={
-                    "text": normalized_query,
-                    "top_k": normalized_limit,
-                    "include_copy": False,
-                },
-            )
-        except MemoLensError as service_error:
-            result = self._sqlite_search(normalized_query, normalized_limit)
-            result.update(
-                {
-                    "mode": "opt_in_local_api",
-                    "local_api": self._local_api_summary(
-                        checked=True,
-                        available=False,
-                        error=str(service_error),
-                        error_code=service_error.code,
-                    ),
-                    "warnings": [
-                        "The MemoLens service was unavailable; deterministic lexical SQLite ranking was used.",
-                        str(service_error),
-                    ],
-                }
-            )
-            return result
-        if payload.get("object") != "retrieval.query":
-            raise MemoLensError(
-                "MemoLens retrieval returned an unexpected object type.",
-                code="invalid_response",
-            )
-        raw_results = payload.get("data")
-        if not isinstance(raw_results, list):
-            raise MemoLensError(
-                "MemoLens retrieval did not return a result list.",
-                code="invalid_response",
-            )
-        results = [
-            _compact_asset(item, self.library_dir)
-            for item in raw_results[:normalized_limit]
-            if isinstance(item, dict)
-        ]
-        return {
-            "object": "memolens.search",
-            "status": "completed",
-            "source": "local_api",
-            "mode": "opt_in_local_api",
-            "local_api": self._local_api_summary(
-                checked=True, available=True, identity_verified=True
-            ),
-            "query": normalized_query,
-            "result_count": len(results),
-            "results": results,
-            "safety": _safety_summary(),
-        }
+        # Image summaries have one public authority lane. User opt-in to the
+        # unauthenticated loopback reader must not promote legacy API results
+        # over exact-current canonical SQLite evidence.
+        result = self._sqlite_search(normalized_query, normalized_limit)
+        result.update(
+            {
+                "source": "sqlite_read_only",
+                "mode": "canonical_image_read_only",
+                "local_api": self._local_api_summary(available=None),
+                "local_api_used": False,
+                "warnings": [
+                    "Photo summaries require exact current canonical image authority; the optional loopback retrieval endpoint was not used."
+                ],
+            }
+        )
+        return result
 
     def memories(self, *, query: str | None = None, limit: int = 8) -> dict[str, Any]:
         normalized_limit = _bounded_int(limit, minimum=1, maximum=24, field="limit")
@@ -508,75 +510,25 @@ class MemoLensGateway:
         )
         return result
 
-    def mixed_search(self, query: str, *, limit: int = 12) -> dict[str, Any]:
-        """Search photos and current video segments with one deterministic ranking."""
+    def mixed_search(
+        self,
+        query: str,
+        *,
+        limit: int = 12,
+        filters: Mapping[str, object] | None = None,
+    ) -> dict[str, Any]:
+        """Search raw media through one cold-audited private SQLite snapshot."""
 
         normalized_query = str(query or "").strip()
         if not normalized_query:
             raise MemoLensError("Search query cannot be empty.", code="invalid_argument")
         normalized_limit = _bounded_int(limit, minimum=1, maximum=36, field="limit")
 
-        branches: list[tuple[str, dict[str, Any]]] = []
-        branch_errors: list[dict[str, str]] = []
-        for kind, searcher in (
-            ("image", self._sqlite_mixed_image_search),
-            ("video_segment", self.video_search),
-        ):
-            try:
-                branches.append(
-                    (kind, searcher(normalized_query, limit=normalized_limit))
-                )
-            except MemoLensError as exc:
-                branch_errors.append(
-                    {"result_type": kind, "code": exc.code, "message": str(exc)}
-                )
-
-        if not branches:
-            raise MemoLensError(
-                "Neither the photo index nor the current video-segment index could be searched.",
-                code="search_unavailable",
-            )
-
-        fused: list[tuple[float, int, str, dict[str, Any]]] = []
-        kind_order = {"image": 0, "video_segment": 1}
-        for kind, payload in branches:
-            raw_results = payload.get("results")
-            if not isinstance(raw_results, list):
-                continue
-            for rank, raw in enumerate(raw_results, start=1):
-                if not isinstance(raw, dict):
-                    continue
-                # Reciprocal-rank fusion avoids comparing unrelated backend score scales.
-                fused_score = 1.0 / (60.0 + rank)
-                item = dict(raw)
-                item["result_type"] = kind
-                item["media_kind"] = "image" if kind == "image" else "video"
-                item["rank_score"] = round(fused_score, 8)
-                stable_id = str(
-                    item.get("segment_id")
-                    or item.get("asset_id")
-                    or item.get("id")
-                    or ""
-                )
-                fused.append(
-                    (fused_score, kind_order[kind], stable_id, item)
-                )
-
-        fused.sort(key=lambda value: (-value[0], value[1], value[2]))
-        results = [item for _score, _kind, _id, item in fused[:normalized_limit]]
-        return {
-            "object": "memolens.mixed_search",
-            "schema_version": "1",
-            "status": "completed",
-            "source": "read_only_federated",
-            "ranking": "reciprocal_rank_fusion",
-            "query": normalized_query,
-            "result_count": len(results),
-            "results": results,
-            "searched_result_types": [kind for kind, _payload in branches],
-            "branch_errors": branch_errors,
-            "safety": _safety_summary(),
-        }
+        return self._store.mixed_material_search(
+            normalized_query,
+            normalized_limit,
+            filters=filters,
+        )
 
     def media_list(
         self,
@@ -598,6 +550,174 @@ class MemoLensGateway:
         if not normalized_id or len(normalized_id) > 200:
             raise MemoLensError("asset_id is invalid.", code="invalid_argument")
         return self._sqlite_media_get(normalized_id)
+
+    def wiki_status(self) -> dict[str, Any]:
+        """Describe the honest coverage and limits of the live Wiki read model."""
+
+        try:
+            database = self._sqlite_status()
+        except MemoLensError as exc:
+            database = {
+                "media_schema_available": False,
+                "wiki_read_error_code": exc.code,
+            }
+        return self._wiki.status(database)
+
+    def wiki_list(
+        self,
+        *,
+        kinds: list[str] | None = None,
+        limit: int = 24,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        normalized_kinds = _media_kinds(kinds)
+        normalized_limit = _bounded_int(limit, minimum=1, maximum=100, field="limit")
+        decoded_cursor = _decode_cursor(cursor)
+        try:
+            media = self._sqlite_wiki_media_list(
+                kinds=normalized_kinds,
+                limit=normalized_limit,
+                cursor=decoded_cursor,
+            )
+        except MemoLensError as exc:
+            return self._wiki.unavailable_page_list(
+                kinds=normalized_kinds,
+                reason_code=(
+                    "mixed_media_schema_unavailable"
+                    if exc.code == "capability_unavailable"
+                    else "media_index_read_unavailable"
+                ),
+            )
+        return self._wiki.list_pages(media)
+
+    def wiki_search(self, query: str, *, limit: int = 12) -> dict[str, Any]:
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            raise MemoLensError("Search query cannot be empty.", code="invalid_argument")
+        if len(normalized_query) > MAX_WIKI_QUERY_LENGTH:
+            raise MemoLensError(
+                f"Search query must not exceed {MAX_WIKI_QUERY_LENGTH} characters.",
+                code="invalid_argument",
+            )
+        normalized_limit = _bounded_int(limit, minimum=1, maximum=36, field="limit")
+        return self._wiki.search(
+            self._reference_only_mixed_search(
+                normalized_query,
+                limit=normalized_limit,
+            )
+        )
+
+    def _reference_only_mixed_search(
+        self,
+        query: str,
+        *,
+        limit: int,
+    ) -> dict[str, Any]:
+        """Compatibility projection only for the non-executable live Wiki.
+
+        ``memolens_mixed_search`` never uses this path.  The Wiki does not
+        claim derivative absence and its results remain reference-only until a
+        later executable-material admission revalidates canonical authority.
+        """
+
+        branches: list[tuple[str, dict[str, Any]]] = []
+        branch_errors: list[dict[str, str]] = []
+        for kind, searcher in (
+            ("image", self._sqlite_mixed_image_search),
+            ("video_segment", self.video_search),
+        ):
+            try:
+                branches.append((kind, searcher(query, limit=limit)))
+            except MemoLensError as exc:
+                branch_errors.append(
+                    {"result_type": kind, "code": exc.code, "message": str(exc)}
+                )
+        if not branches:
+            raise MemoLensError(
+                "Neither the photo index nor the current video-segment index could be searched.",
+                code="search_unavailable",
+            )
+        kind_order = {"image": 0, "video_segment": 1}
+        fused: list[tuple[float, int, str, dict[str, Any]]] = []
+        for kind, payload in branches:
+            raw_results = payload.get("results")
+            if not isinstance(raw_results, list):
+                continue
+            for rank, raw in enumerate(raw_results, start=1):
+                if not isinstance(raw, dict):
+                    continue
+                score = 1.0 / (60.0 + rank)
+                item = dict(raw)
+                item["result_type"] = kind
+                item["media_kind"] = "image" if kind == "image" else "video"
+                item["rank_score"] = round(score, 8)
+                stable_id = str(
+                    item.get("segment_id")
+                    or item.get("asset_id")
+                    or item.get("id")
+                    or ""
+                )
+                fused.append((score, kind_order[kind], stable_id, item))
+        fused.sort(key=lambda value: (-value[0], value[1], value[2]))
+        results = [item for _score, _kind, _id, item in fused[:limit]]
+        return {
+            "object": "memolens.mixed_search",
+            "schema_version": "1",
+            "status": "completed",
+            "source": "read_only_reference_compat",
+            "ranking": "reciprocal_rank_fusion",
+            "query": query,
+            "result_count": len(results),
+            "results": results,
+            "searched_result_types": [kind for kind, _payload in branches],
+            "branch_errors": branch_errors,
+            "reference_only": True,
+            "derivative_absence_claimed": False,
+            "safety": _safety_summary(),
+        }
+
+    def wiki_open(self, page_id: str) -> dict[str, Any]:
+        reference = parse_page_id(page_id)
+        if reference.kind == "library":
+            return self._wiki.library_page(self.wiki_status())
+        if reference.kind == "asset":
+            try:
+                detail = self._sqlite_wiki_asset_get(reference.identifier)
+            except MemoLensError as exc:
+                if exc.code == "media_not_found":
+                    raise MemoLensError(
+                        "MemoLens Wiki page was not found.",
+                        code="wiki_page_not_found",
+                    ) from exc
+                raise
+            return self._wiki.asset_page(detail)
+        detail = self._store.segment_get(reference.identifier)
+        if detail is None:
+            raise MemoLensError(
+                "MemoLens Wiki page was not found.", code="wiki_page_not_found"
+            )
+        return self._wiki.span_page(detail)
+
+    def wiki_evidence(self, evidence_id: str) -> dict[str, Any]:
+        reference = parse_evidence_id(evidence_id)
+        if reference.kind == "asset":
+            try:
+                detail = self._sqlite_wiki_asset_get(reference.identifier)
+            except MemoLensError as exc:
+                if exc.code == "media_not_found":
+                    raise MemoLensError(
+                        "MemoLens Wiki evidence was not found.",
+                        code="wiki_evidence_not_found",
+                    ) from exc
+                raise
+            return self._wiki.asset_evidence(detail)
+        detail = self._store.segment_get(reference.identifier)
+        if detail is None:
+            raise MemoLensError(
+                "MemoLens Wiki evidence was not found.",
+                code="wiki_evidence_not_found",
+            )
+        return self._wiki.span_evidence(detail)
 
     def creator_context(self) -> dict[str, Any]:
         """Read only the latest confirmed creator profile revision."""
@@ -725,6 +845,84 @@ class MemoLensGateway:
             )
         return self._sqlite_timeline_get(normalized_id, normalized_revision)
 
+    def project_list(
+        self,
+        *,
+        status: str = "current",
+        limit: int = 24,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(status, str) or status not in {
+            "current",
+            "draft",
+            "active",
+            "archived",
+            "all",
+        }:
+            raise MemoLensError("status is invalid.", code="invalid_argument")
+        normalized_limit = _strict_bounded_int(
+            limit, minimum=1, maximum=100, field="limit"
+        )
+        return self._store.project_list(
+            status=status,
+            limit=normalized_limit,
+            cursor=_decode_cursor(cursor),
+        )
+
+    def project_open(self, project_id: str) -> dict[str, Any]:
+        return self._store.project_open(
+            validate_project_identifier(project_id, field="project_id")
+        )
+
+    def project_history(
+        self, project_id: str, *, limit: int = 50
+    ) -> dict[str, Any]:
+        normalized_limit = _strict_bounded_int(
+            limit, minimum=1, maximum=100, field="limit"
+        )
+        return self._store.project_history(
+            validate_project_identifier(project_id, field="project_id"),
+            normalized_limit,
+        )
+
+    def blueprint_shadow(self, project_id: str) -> dict[str, Any]:
+        return self._store.blueprint_shadow(
+            validate_project_identifier(project_id, field="project_id")
+        )
+
+    def blueprint_validate(self, candidate: Any) -> dict[str, Any]:
+        return self._store.blueprint_validate(candidate)
+
+    def blueprint_get(
+        self, project_id: str, *, revision: int | None = None
+    ) -> dict[str, Any]:
+        normalized_revision = None
+        if revision is not None:
+            normalized_revision = _strict_bounded_int(
+                revision,
+                minimum=1,
+                maximum=1_000_000,
+                field="revision",
+            )
+        return self._store.blueprint_get(
+            validate_project_identifier(project_id, field="project_id"),
+            normalized_revision,
+        )
+
+    def blueprint_history(
+        self, project_id: str, *, limit: int = 50
+    ) -> dict[str, Any]:
+        normalized_limit = _strict_bounded_int(
+            limit,
+            minimum=1,
+            maximum=100,
+            field="limit",
+        )
+        return self._store.blueprint_history(
+            validate_project_identifier(project_id, field="project_id"),
+            normalized_limit,
+        )
+
     # Compatibility delegates keep the established internal diagnostic hooks
     # while all SQL and connection policy live in ReadOnlyMemoLensStore.
     def _sqlite_connection(self):  # noqa: ANN202
@@ -748,6 +946,18 @@ class MemoLensGateway:
 
     def _sqlite_media_get(self, asset_id: str) -> dict[str, Any]:
         return self._store.media_get(asset_id)
+
+    def _sqlite_wiki_media_list(
+        self, *, kinds: list[str], limit: int, cursor: str | None
+    ) -> dict[str, Any]:
+        return self._store.wiki_media_list(
+            kinds=kinds,
+            limit=limit,
+            cursor=cursor,
+        )
+
+    def _sqlite_wiki_asset_get(self, asset_id: str) -> dict[str, Any]:
+        return self._store.wiki_asset_get(asset_id)
 
     def _sqlite_video_search(self, query: str, limit: int) -> dict[str, Any]:
         return self._store.video_search(query, limit)

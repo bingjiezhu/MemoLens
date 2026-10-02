@@ -24,7 +24,13 @@ backend_pid=""
 
 backend_is_memolens() {
   local health_url="http://${BACKEND_HOST}:${BACKEND_PORT}/healthz"
-  "${PYTHON_BIN}" - "${health_url}" <<'PY'
+  env \
+    -u PYTHONPATH \
+    -u PYTHONHOME \
+    -u PYTHONINSPECT \
+    -u PYTHONSTARTUP \
+    -u PYTHONUSERBASE \
+    "${PYTHON_BIN}" -I - "${health_url}" <<'PY'
 import json
 import sys
 from urllib.request import urlopen
@@ -61,8 +67,8 @@ else
   MEMOLENS_BACKEND_PORT="${BACKEND_PORT}" \
   MEMOLENS_FRONTEND_PORT="${FRONTEND_PORT}" \
   MEMOLENS_BACKEND_DEBUG="${MEMOLENS_BACKEND_DEBUG:-0}" \
-  PYTHONUNBUFFERED=1 \
-    "${PYTHON_BIN}" backend/app.py &
+  MEMOLENS_PYTHON="${PYTHON_BIN}" \
+    bash "${SCRIPT_DIR}/run_python.sh" backend/app.py &
   backend_pid="$!"
 
   for _ in $(seq 1 40); do

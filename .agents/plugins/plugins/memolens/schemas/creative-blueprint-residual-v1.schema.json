@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://memolens.local/schemas/creative-blueprint-residual-v1.schema.json",
+  "title": "MemoLens Creative Blueprint residual-span profile v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "object",
+    "schema_version",
+    "schema_sha256",
+    "project_id",
+    "revision",
+    "parent",
+    "created_by_operation_id",
+    "status",
+    "semantic_sha256",
+    "semantic",
+    "lineage",
+    "evidence_manifest",
+    "authority"
+  ],
+  "properties": {
+    "object": {"const": "memolens.creative_blueprint"},
+    "schema_version": {"const": "1"},
+    "schema_sha256": {"$ref": "creative-blueprint-v1.schema.json#/$defs/sha256"},
+    "project_id": {"$ref": "creative-blueprint-v1.schema.json#/$defs/identifier"},
+    "revision": {"$ref": "creative-blueprint-v1.schema.json#/$defs/revision"},
+    "parent": {"$ref": "creative-blueprint-v1.schema.json#/$defs/nullable_revision_ref"},
+    "created_by_operation_id": {"$ref": "creative-blueprint-v1.schema.json#/$defs/identifier"},
+    "status": {"const": "proposal"},
+    "semantic_sha256": {"$ref": "creative-blueprint-v1.schema.json#/$defs/sha256"},
+    "semantic": {"$ref": "#/$defs/semantic"},
+    "lineage": {"$ref": "creative-blueprint-v1.schema.json#/$defs/lineage"},
+    "evidence_manifest": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {"$ref": "creative-blueprint-v1.schema.json#/$defs/evidence_manifest_item"}
+    },
+    "authority": {"$ref": "creative-blueprint-v1.schema.json#/$defs/authority"}
+  },
+  "$defs": {
+    "semantic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intent",
+        "script",
+        "direction",
+        "output",
+        "constraints",
+        "material_hints",
+        "reference_refs",
+        "technique_refs",
+        "bindings",
+        "assumptions",
+        "missing_evidence",
+        "open_decisions"
+      ],
+      "properties": {
+        "intent": {"$ref": "creative-blueprint-v1.schema.json#/$defs/intent"},
+        "script": {"$ref": "creative-blueprint-v1.schema.json#/$defs/script"},
+        "direction": {"$ref": "creative-blueprint-v1.schema.json#/$defs/direction"},
+        "output": {"$ref": "creative-blueprint-v1.schema.json#/$defs/output"},
+        "constraints": {"$ref": "creative-blueprint-v1.schema.json#/$defs/constraints"},
+        "material_hints": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "oneOf": [
+              {"$ref": "#/$defs/ordinary_material_hint"},
+              {"$ref": "#/$defs/residual_material_hint"}
+            ]
+          }
+        },
+        "reference_refs": {"type": "array", "maxItems": 64, "items": {"$ref": "creative-blueprint-v1.schema.json#/$defs/reference"}},
+        "technique_refs": {"type": "array", "maxItems": 64, "items": {"$ref": "creative-blueprint-v1.schema.json#/$defs/technique"}},
+        "bindings": {"$ref": "creative-blueprint-v1.schema.json#/$defs/bindings"},
+        "assumptions": {"type": "array", "maxItems": 100, "items": {"$ref": "creative-blueprint-v1.schema.json#/$defs/assumption"}},
+        "missing_evidence": {"type": "array", "maxItems": 100, "items": {"$ref": "creative-blueprint-v1.schema.json#/$defs/missing_evidence"}},
+        "open_decisions": {"type": "array", "maxItems": 100, "items": {"$ref": "creative-blueprint-v1.schema.json#/$defs/open_decision"}}
+      }
+    },
+    "ordinary_material_hint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hint_id", "evidence_ref", "script_block_ids", "reason"],
+      "properties": {
+        "hint_id": {"$ref": "creative-blueprint-v1.schema.json#/$defs/identifier"},
+        "evidence_ref": {
+          "type": "string",
+          "pattern": "^memolens://evidence/(?:asset/(?:asset|img)_[0-9a-f]{24}|span/seg_[0-9a-f]{24}_[1-9][0-9]{0,6}_(?:0|[1-9][0-9]{0,6}))$"
+        },
+        "script_block_ids": {"$ref": "creative-blueprint-v1.schema.json#/$defs/script_block_ids"},
+        "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000}
+      }
+    },
+    "residual_material_hint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hint_id", "evidence_ref", "script_block_ids", "reason", "proof"],
+      "properties": {
+        "hint_id": {"$ref": "creative-blueprint-v1.schema.json#/$defs/identifier"},
+        "evidence_ref": {
+          "type": "string",
+          "pattern": "^memolens://evidence/span/rseg_[0-9a-f]{64}$"
+        },
+        "script_block_ids": {"$ref": "creative-blueprint-v1.schema.json#/$defs/script_block_ids"},
+        "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "proof": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "residual_binding"],
+          "properties": {
+            "kind": {"const": "residual_span"},
+            "residual_binding": {"$ref": "#/$defs/residual_binding"}
+          }
+        }
+      }
+    },
+    "residual_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "object",
+        "contract_version",
+        "residual_id",
+        "parent_segment_id",
+        "asset_id",
+        "asset_sha256",
+        "asset_source_id",
+        "source_binding_sha256",
+        "analysis_run_id",
+        "analysis_revision",
+        "input_asset_sha256",
+        "parent_start_ms",
+        "parent_end_ms",
+        "source_in_ms",
+        "source_out_ms",
+        "usage_revision",
+        "parent_usage_projection_sha256"
+      ],
+      "properties": {
+        "object": {"const": "memolens.residual_binding"},
+        "contract_version": {"const": "1"},
+        "residual_id": {"type": "string", "pattern": "^rseg_[0-9a-f]{64}$"},
+        "parent_segment_id": {"type": "string", "pattern": "^seg_[0-9a-f]{24}_[1-9][0-9]{0,6}_(?:0|[1-9][0-9]{0,6})$"},
+        "asset_id": {"type": "string", "pattern": "^asset_[0-9a-f]{24}$"},
+        "asset_sha256": {"$ref": "creative-blueprint-v1.schema.json#/$defs/sha256"},
+        "asset_source_id": {"type": "string", "pattern": "^src_[0-9a-f]{24}$"},
+        "source_binding_sha256": {"$ref": "creative-blueprint-v1.schema.json#/$defs/sha256"},
+        "analysis_run_id": {"type": "string", "pattern": "^arun_[0-9a-f]{32}$"},
+        "analysis_revision": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "input_asset_sha256": {"$ref": "creative-blueprint-v1.schema.json#/$defs/sha256"},
+        "parent_start_ms": {"type": "integer", "minimum": 0, "maximum": 604800000},
+        "parent_end_ms": {"type": "integer", "minimum": 1, "maximum": 604800000},
+        "source_in_ms": {"type": "integer", "minimum": 0, "maximum": 604800000},
+        "source_out_ms": {"type": "integer", "minimum": 1, "maximum": 604800000},
+        "usage_revision": {"$ref": "creative-blueprint-v1.schema.json#/$defs/sha256"},
+        "parent_usage_projection_sha256": {"$ref": "creative-blueprint-v1.schema.json#/$defs/sha256"}
+      }
+    }
+  }
+}

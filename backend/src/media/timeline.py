@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from core.media_db import IdempotentWriteResult, MediaRepository, canonical_json, new_id
+from .residual_parent import ResidualParentResolutionError, resolve_current_residual_parent
 from .timeline_operations import TimelineEditor, operation_summary, reflow_timeline
 from .timeline_validation import MAX_TIMELINE_DURATION_MS, TimelineValidator
 
@@ -31,6 +32,31 @@ class TimelineValidationError(ValueError):
         self.errors = errors
 
 
+class BlueprintTimelineCompilerUnavailable(ValueError):
+    """A canonical Blueprint exists but no Blueprint-to-Timeline compiler does."""
+
+    code = "blueprint_timeline_compiler_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This project has a canonical Creative Blueprint, but Blueprint-to-Timeline compilation "
+            "is not available in this release."
+        )
+
+
+class BlueprintLegacyTimelineWriteUnavailable(ValueError):
+    """A legacy Timeline is historical once a canonical Blueprint exists."""
+
+    code = "blueprint_legacy_timeline_write_unavailable"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This Timeline is not bound to the project's canonical Creative Blueprint. "
+            "It remains readable as history, but revising or rendering it is disabled "
+            "until Blueprint-to-Timeline compilation is available."
+        )
+
+
 class TimelineService:
     """Deterministic timeline authority. FFmpeg never consumes free-form instructions."""
 
@@ -46,6 +72,20 @@ class TimelineService:
         brief_revision: int = 1,
         connection: sqlite3.Connection | None = None,
     ) -> dict[str, object]:
+        # The Blueprint-head check and the legacy Timeline insert are one
+        # authority decision.  Direct service callers must get the same
+        # BEGIN IMMEDIATE serialization as the idempotent HTTP path; otherwise
+        # a Blueprint could become canonical after the check but before the
+        # Timeline write.
+        if connection is None:
+            with self.repository.transaction(immediate=True) as target:
+                return self.create_from_project(
+                    project_id,
+                    brief_revision=brief_revision,
+                    connection=target,
+                )
+        if self._has_blueprint_head(project_id, connection=connection):
+            raise BlueprintTimelineCompilerUnavailable()
         project = self.repository.get_project(project_id)
         brief_row = self.repository.get_brief(project_id, brief_revision)
         if project is None or brief_row is None:
@@ -62,7 +102,11 @@ class TimelineService:
         for candidate in candidates:
             if cursor >= target:
                 break
-            clip = self._clip_from_match(candidate, timeline_start_ms=cursor)
+            clip = self._clip_from_match(
+                candidate,
+                timeline_start_ms=cursor,
+                connection=connection,
+            )
             if clip is None:
                 continue
             duration = min(int(clip["timeline_duration_ms"]), target - cursor)
@@ -135,6 +179,36 @@ class TimelineService:
             "diff": [],
         }
 
+    def _has_blueprint_head(
+        self,
+        project_id: str,
+        *,
+        connection: sqlite3.Connection | None,
+    ) -> bool:
+        """Validate Blueprint authority inside the caller's transaction.
+
+        Returning ``False`` is allowed only when no head and no orphaned B0
+        artifact exists. Corrupt canonical state raises instead of silently
+        reopening a legacy Timeline write path.
+        """
+
+        if connection is not None:
+            return (
+                self.repository.get_blueprint_head_in_transaction(
+                    connection,
+                    project_id,
+                )
+                is not None
+            )
+        with self.repository.transaction() as read_connection:
+            return (
+                self.repository.get_blueprint_head_in_transaction(
+                    read_connection,
+                    project_id,
+                )
+                is not None
+            )
+
     def create_from_project_idempotent(
         self,
         project_id: str,
@@ -173,9 +247,43 @@ class TimelineService:
         *,
         timeline_start_ms: int,
         duration_override_ms: int | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> dict[str, object] | None:
         if match.get("result_type") == "video_segment":
-            segment = self.repository.get_segment(str(match.get("id") or ""))
+            residual_binding = match.get("residual_binding")
+            match_id = str(match.get("id") or "")
+            if match_id.startswith("rseg_") and not isinstance(
+                residual_binding,
+                dict,
+            ):
+                raise ResidualParentResolutionError(
+                    "residual_binding_required",
+                    "Synthetic residual identities require their exact closed binding.",
+                )
+            if isinstance(residual_binding, dict):
+                resolved = resolve_current_residual_parent(
+                    self.repository,
+                    residual_binding,
+                    candidate=match,
+                    connection=connection,
+                )
+                source_in = int(resolved["source_in_ms"])
+                available = int(resolved["source_out_ms"]) - source_in
+                duration = min(duration_override_ms or available, available)
+                return self._base_clip(
+                    kind="video",
+                    asset={"id": resolved["asset_id"]},
+                    asset_source_id=str(resolved["asset_source_id"]),
+                    segment_id=str(resolved["parent_segment_id"]),
+                    source_in_ms=source_in,
+                    source_out_ms=source_in + duration,
+                    timeline_start_ms=timeline_start_ms,
+                    timeline_duration_ms=duration,
+                    match_id=str(resolved["residual_id"]),
+                    reason="Exact unused residual selected by mixed retrieval.",
+                    residual_binding=dict(resolved["residual_binding"]),
+                )
+            segment = self.repository.get_segment(match_id)
             if not segment or segment.get("source_availability") != "available":
                 return None
             source_in = int(segment["start_ms"])
@@ -195,6 +303,7 @@ class TimelineService:
                 timeline_duration_ms=duration,
                 match_id=str(segment["id"]),
                 reason="Grounded video segment selected by mixed retrieval.",
+                residual_binding=None,
             )
         asset_id = str(match.get("asset_id") or match.get("id") or "")
         asset = self.repository.get_asset(asset_id)
@@ -211,6 +320,7 @@ class TimelineService:
             timeline_duration_ms=duration_override_ms or 3_000,
             match_id=asset_id,
             reason="Grounded image selected by mixed retrieval.",
+            residual_binding=None,
         )
 
     @staticmethod
@@ -226,6 +336,7 @@ class TimelineService:
         timeline_duration_ms: int,
         match_id: str,
         reason: str,
+        residual_binding: dict[str, object] | None,
     ) -> dict[str, object]:
         value: dict[str, object] = {
             "id": new_id("clip"),
@@ -241,6 +352,13 @@ class TimelineService:
             "audio_enabled": kind == "video",
             "provenance": {"reason": reason, "match_id": match_id},
         }
+        if residual_binding is not None:
+            value["provenance"] = {
+                "reason": reason,
+                "match_id": match_id,
+                "parent_segment_id": residual_binding["parent_segment_id"],
+                "residual_binding": residual_binding,
+            }
         if kind == "video":
             value["source_in_ms"] = source_in_ms
             value["source_out_ms"] = source_out_ms
@@ -412,6 +530,26 @@ class TimelineService:
         operations: list[dict[str, object]],
         connection: sqlite3.Connection | None = None,
     ) -> dict[str, object]:
+        # A direct caller gets the same serialized authority decision as the
+        # idempotent HTTP path. This prevents a Blueprint commit from becoming
+        # canonical between the legacy-artifact guard and the Timeline write.
+        if connection is None:
+            with self.repository.transaction(immediate=True) as target:
+                return self.revise(
+                    timeline_id,
+                    base_revision=base_revision,
+                    operations=operations,
+                    connection=target,
+                )
+        current_before_preview = self.repository.get_timeline(
+            timeline_id,
+            base_revision,
+        )
+        if not current_before_preview:
+            raise RuntimeError("revision_conflict:0")
+        project_id = str(current_before_preview["project_id"])
+        if self._has_blueprint_head(project_id, connection=connection):
+            raise BlueprintLegacyTimelineWriteUnavailable()
         preview = self.preview_revision(timeline_id, base_revision=base_revision, operations=operations)
         timeline = preview["timeline"]
         current = self.repository.get_timeline(timeline_id, base_revision)

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 
@@ -11,10 +11,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+if not sys.flags.isolated:
+    print(
+        "MemoLens SQLite writers require isolated Python (-I); use "
+        "scripts/run_python.sh scripts/backfill_image_quality.py.",
+        file=sys.stderr,
+    )
+    raise SystemExit(78)
+
 from core.config import Settings  # noqa: E402
-from core.db import ImageIndexRepository  # noqa: E402
+from core.db import (  # noqa: E402
+    CANONICAL_IMAGE_REANALYSIS_GUIDANCE,
+    ImageIndexRepository,
+)
 from core.image_quality import QUALITY_MODEL_ID, score_image_file  # noqa: E402
 from core.schemas import utc_now_iso  # noqa: E402
+from core.sqlite_runtime import require_safe_sqlite_runtime  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,11 +62,26 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    require_safe_sqlite_runtime()
     settings = Settings.from_env()
     db_path = (args.db_path or settings.db_path).expanduser().resolve()
     image_dir = (args.image_dir or settings.image_library_dir).expanduser().resolve()
 
     repository = ImageIndexRepository(db_path)
+    try:
+        repository.require_legacy_mutation_authority()
+    except RuntimeError as exc:
+        print(
+            json.dumps(
+                {
+                    "error": str(exc),
+                    "guidance": CANONICAL_IMAGE_REANALYSIS_GUIDANCE,
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 78
     repository.ensure_schema()
 
     external_scores = {}
@@ -63,32 +90,10 @@ def main() -> int:
             raise SystemExit("--scores-json is required when --scorer external-json.")
         external_scores = _load_external_scores(args.scores_json)
 
-    connection = sqlite3.connect(db_path)
-    connection.row_factory = sqlite3.Row
-
-    sql = """
-        SELECT
-            id,
-            filename,
-            relative_path,
-            description,
-            tags_json,
-            combined_text,
-            aesthetic_score
-        FROM image_index
-    """
-    where = []
-    params: list[object] = []
-    if not args.force:
-        where.append("aesthetic_score IS NULL")
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY updated_at ASC"
-    if args.limit is not None:
-        sql += " LIMIT ?"
-        params.append(args.limit)
-
-    rows = connection.execute(sql, params).fetchall()
+    rows = repository.fetch_quality_backfill_candidates(
+        force=args.force,
+        limit=args.limit,
+    )
     updated = 0
     skipped_missing_file = 0
     skipped_missing_external_score = 0
@@ -118,29 +123,15 @@ def main() -> int:
             score = quality_scores.aesthetic_score
             technical_quality_score = quality_scores.technical_quality_score
 
-        connection.execute(
-            """
-            UPDATE image_index
-            SET
-                aesthetic_score = ?,
-                aesthetic_model = ?,
-                technical_quality_score = ?,
-                aesthetic_updated_at = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                max(0.0, min(1.0, float(score))),
-                model_label,
-                technical_quality_score,
-                now_iso,
-                now_iso,
-                row["id"],
-            ),
+        repository.update_image_quality(
+            image_id=str(row["id"]),
+            aesthetic_score=max(0.0, min(1.0, float(score))),
+            aesthetic_model=model_label,
+            technical_quality_score=technical_quality_score,
+            aesthetic_updated_at=now_iso,
         )
         updated += 1
 
-    connection.commit()
     print(
         json.dumps(
             {
@@ -158,7 +149,7 @@ def main() -> int:
     return 0
 
 
-def _row_quality_text(row: sqlite3.Row) -> str:
+def _row_quality_text(row: Mapping[str, object]) -> str:
     tags = []
     try:
         parsed_tags = json.loads(str(row["tags_json"] or "[]"))
@@ -211,7 +202,10 @@ def _load_external_scores(path: Path) -> dict[str, float]:
     return scores
 
 
-def _lookup_external_score(scores: dict[str, float], row: sqlite3.Row) -> float | None:
+def _lookup_external_score(
+    scores: dict[str, float],
+    row: Mapping[str, object],
+) -> float | None:
     for key in (row["id"], row["relative_path"], row["filename"]):
         if key in scores:
             return scores[str(key)]

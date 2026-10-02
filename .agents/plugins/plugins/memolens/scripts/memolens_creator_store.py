@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import closing
 from typing import Any
 
 from memolens_contracts import MemoLensError, encode_cursor, safety_summary
+from memolens_image_authority import CanonicalImageObservationReader
 from memolens_sqlite import ReadOnlyDatabase
+from memolens_strict_json import StrictJsonError, StrictJsonLimits, decode_strict_json
 
 
 _PROFILE_FIELDS = {
@@ -35,6 +38,14 @@ _PROFILE_DURATION_FIELDS = {"default_duration_ms", "duration_ms"}
 _PROFILE_LIST_FIELDS = {"must_include", "must_exclude"}
 _PROFILE_SOURCES = {"user_edit", "confirmed_suggestion", "reset"}
 _REVIEW_STATES = {"inbox", "kept", "archived"}
+_PROFILE_JSON_LIMITS = StrictJsonLimits(
+    max_bytes=1_000_000,
+    max_depth=16,
+    max_nodes=10_000,
+    max_object_items=64,
+    max_array_items=64,
+    max_string_chars=12_000,
+)
 
 
 def _valid_sha256(value: Any) -> bool:
@@ -134,6 +145,7 @@ class CreatorMemoryReader:
 
     def __init__(self, database: ReadOnlyDatabase) -> None:
         self.database = database
+        self.image_observations = CanonicalImageObservationReader()
 
     def schema_capabilities(self, connection: sqlite3.Connection) -> dict[str, bool]:
         profile_columns = self.database.columns(
@@ -161,6 +173,107 @@ class CreatorMemoryReader:
                 "note",
             }.issubset(review_columns),
         }
+
+    def binding_exists_in_connection(
+        self, connection: sqlite3.Connection, binding: dict[str, Any]
+    ) -> bool:
+        """Verify one exact confirmed Creator Memory revision in this snapshot.
+
+        This reuses the Creator Memory source/schema boundary instead of letting
+        downstream features treat a matching digest-shaped row as confirmation.
+        """
+
+        if not self.schema_capabilities(connection)["creator_context_available"]:
+            return False
+        profile_id = binding.get("profile_id")
+        revision = binding.get("revision")
+        digest = binding.get("content_sha256")
+        if (
+            not isinstance(profile_id, str)
+            or isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or revision < 1
+            or not _valid_sha256(digest)
+        ):
+            return False
+        try:
+            row = connection.execute(
+                "SELECT profile_json,content_sha256,evidence_json,source "
+                "FROM creator_profile_revisions WHERE profile_id=? AND revision=? "
+                "LIMIT 1",
+                (profile_id, revision),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise MemoLensError(
+                "Creator Memory binding could not be read.",
+                code="database_unavailable",
+            ) from exc
+        if (
+            row is None
+            or row["source"] not in _PROFILE_SOURCES
+            or not _valid_sha256(row["content_sha256"])
+            or str(row["content_sha256"]).casefold() != str(digest).casefold()
+        ):
+            return False
+        try:
+            profile = decode_strict_json(
+                row["profile_json"], limits=_PROFILE_JSON_LIMITS
+            )
+            evidence = decode_strict_json(
+                row["evidence_json"],
+                require_object=False,
+                limits=_PROFILE_JSON_LIMITS,
+            )
+        except StrictJsonError:
+            return False
+        if (
+            not isinstance(profile, dict)
+            or set(profile) - _PROFILE_FIELDS
+            or any(_profile_value(field, value) is None for field, value in profile.items())
+            or not isinstance(evidence, list)
+            or len(evidence) > 64
+        ):
+            return False
+        canonical = json.dumps(
+            profile,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != str(digest).casefold():
+            return False
+        for item in evidence:
+            if not isinstance(item, dict) or set(item) != {
+                "project_id",
+                "brief_revision",
+            }:
+                return False
+            project_id = item.get("project_id")
+            brief_revision = item.get("brief_revision")
+            if (
+                not isinstance(project_id, str)
+                or not project_id
+                or len(project_id) > 200
+                or isinstance(brief_revision, bool)
+                or not isinstance(brief_revision, int)
+                or brief_revision < 1
+            ):
+                return False
+            try:
+                exists = connection.execute(
+                    "SELECT 1 FROM creative_briefs WHERE project_id=? AND revision=? "
+                    "LIMIT 1",
+                    (project_id, brief_revision),
+                ).fetchone()
+            except sqlite3.Error as exc:
+                raise MemoLensError(
+                    "Creator Memory evidence binding could not be read.",
+                    code="database_unavailable",
+                ) from exc
+            if exists is None:
+                return False
+        return True
 
     def creator_context(self) -> dict[str, Any]:
         with closing(self.database.connection()) as connection:
@@ -347,9 +460,19 @@ class CreatorMemoryReader:
                     "The MemoLens Inbox could not be read.",
                     code="database_unavailable",
                 ) from exc
-        has_more = len(rows) > limit
-        selected = rows[:limit]
-        assets = [self._inbox_asset(dict(row)) for row in selected]
+            has_more = len(rows) > limit
+            selected = rows[:limit]
+            assets = []
+            for selected_row in selected:
+                row = dict(selected_row)
+                observation = self.image_observations.read(
+                    connection,
+                    raw={
+                        "kind": row.get("media_kind"),
+                        "id": row.get("asset_id"),
+                    },
+                )
+                assets.append(self._inbox_asset(row, observation=observation))
         return {
             "object": "memolens.inbox_list",
             "schema_version": "1",
@@ -374,7 +497,11 @@ class CreatorMemoryReader:
         }
 
     @staticmethod
-    def _inbox_asset(row: dict[str, Any]) -> dict[str, Any]:
+    def _inbox_asset(
+        row: dict[str, Any],
+        *,
+        observation: dict[str, object] | None,
+    ) -> dict[str, Any]:
         state = str(row.get("inbox_state") or "inbox")
         if state not in _REVIEW_STATES:
             state = "inbox"
@@ -394,6 +521,10 @@ class CreatorMemoryReader:
                 "height": row.get("height"),
             },
             "timing": {"duration_ms": row.get("duration_ms")},
+            # Review state is user-owned Inbox metadata. Canonical image
+            # evidence is a separate, read-only authority envelope and never
+            # inherits Keep/Archive/Favorite assertions.
+            "canonical_image_observation": observation,
             "review": {
                 "revision": int(row.get("review_revision") or 0),
                 "inbox_state": state,

@@ -1,0 +1,48 @@
+# MemoLens is one agent-neutral stdio MCP plus thin DeepSeek Harness wiring.
+# The bundle-root provider resolves the installed package directory without a
+# machine-specific path; the MCP client then starts the same server Codex uses.
+- insert:
+    - id: memolens-bundle-root
+      # Keep the package name bare. DeepSeek Harness resolves active Loader
+      # names both on the host and again while building the Web client module
+      # roster; a profile-relative file name would mount on the host but make
+      # the rich MemoLens tool card undiscoverable in window.__DSH_BOOT__.
+      name: dsh-memolens
+
+    - id: memolens-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      inject: [memolensBundle]
+      config:
+        serverName: memolens
+        transport: stdio
+        command: python3
+        args:
+          - -u
+          - !!js ctx.memolensBundle.mcpScript
+        cwd: !!js ctx.memolensBundle.root
+        env:
+          MEMOLENS_BASE_URL: !!js process.env.MEMOLENS_BASE_URL ?? ''
+          MEMOLENS_DB_PATH: !!js process.env.MEMOLENS_DB_PATH ?? ''
+          MEMOLENS_LIBRARY_DIR: !!js process.env.MEMOLENS_LIBRARY_DIR ?? ''
+          MEMOLENS_APP_STATE_DIR: !!js process.env.MEMOLENS_APP_STATE_DIR ?? ''
+          MEMOLENS_PLUGIN_TRUST_LOCAL_API: !!js process.env.MEMOLENS_PLUGIN_TRUST_LOCAL_API ?? ''
+        toolCallTimeoutMs: 60000
+        failOnStartupError: true
+        reconnect:
+          enabled: true
+          initialDelayMs: 500
+          maxDelayMs: 30000
+          maxAttempts: 10
+
+    - id: memolens-skill
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      inject: [memolensBundle]
+      config:
+        providerName: memolens-plugin
+        includeDefaultRoots: false
+        customSkillDirs:
+          - !!js ctx.memolensBundle.deepseekSkills
+        watch: false
+
+    - id: memolens-prompt
+      name: dsh-memolens/prompt

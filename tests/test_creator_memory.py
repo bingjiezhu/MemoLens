@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -10,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend.src import DESKTOP_TOKEN_HEADER, create_app
+from backend.src import DESKTOP_TOKEN_HEADER, create_app, shutdown_runtime_extensions
 from backend.src.media.creator_memory import (
     CreatorMemoryService,
     ProfileRevisionConflictError,
@@ -20,8 +21,22 @@ from backend.src.media.inbox import MediaInboxService, ReviewRevisionConflictErr
 from backend.src.media.retrieval import MixedRetrievalService
 from core.config import Settings
 from core.db import ImageIndexRepository
-from core.media_db import MediaRepository, V2_CHECKSUM
-from core.photo_atlas import PhotoAtlasService
+from core.image_analysis_schema import V14_SCHEMA_OBJECTS
+from core.media_db import (
+    MediaRepository,
+    SCHEMA_VERSION,
+    V2_CHECKSUM,
+    _V5_SCHEMA_OBJECTS,
+    _V6_SCHEMA_OBJECTS,
+    _V7_SCHEMA_OBJECTS,
+    _V8_SCHEMA_OBJECTS,
+    _V11_SCHEMA_OBJECTS,
+)
+from core.photo_atlas import (
+    AtlasAssetObservationConflictError,
+    PhotoAtlasService,
+)
+from tests.v18_migration_test_support import downgrade_current_v18_to_exact_v17
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -75,7 +90,7 @@ def add_legacy_image_record(
 ) -> None:
     now = "2026-08-12T12:00:00+00:00"
     vector = struct.pack("<4f", 1.0, 0.0, 0.0, 0.0)
-    with sqlite3.connect(db_path) as connection:
+    with closing(sqlite3.connect(db_path)) as connection, connection:
         connection.execute(
             """INSERT INTO image_index(
                    id,sha256,filename,relative_path,mime_type,file_size,width,height,taken_at,
@@ -142,10 +157,7 @@ def add_video_analysis(repository: MediaRepository, asset_id: str) -> str:
 
 
 def shutdown_app(app) -> None:
-    for name in ("media_job_runner", "render_job_runner"):
-        runner = app.extensions.get(name)
-        if runner is not None:
-            runner.shutdown()
+    shutdown_runtime_extensions(app.extensions)
 
 
 class SchemaV3ContractTests(unittest.TestCase):
@@ -155,11 +167,81 @@ class SchemaV3ContractTests(unittest.TestCase):
         self.repository, self.library, self.db_path = initialize_repository(self.root)
 
     def tearDown(self) -> None:
+        self.repository.close()
         self.temporary.cleanup()
 
     def _downgrade_fixture_to_v2(self) -> str:
+        from core.image_read_cutover_schema import V17_SCHEMA_OBJECTS
+        from core.media_db import _V15_SCHEMA_OBJECTS
+        from core.provider_egress_schema import V16_SCHEMA_OBJECTS
+
         database_uuid = self.repository.database_uuid
-        with sqlite3.connect(self.db_path) as connection:
+        downgrade_current_v18_to_exact_v17(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
+            for object_type, name in reversed(V17_SCHEMA_OBJECTS):
+                connection.execute(
+                    f'DROP {object_type.upper()} IF EXISTS "{name}"'
+                )
+            connection.execute(
+                MediaRepository._expected_v14_physical_schema()[
+                    ("trigger", "trg_image_generations_activate_clean_only")
+                ]
+            )
+            for object_type, name in reversed(V16_SCHEMA_OBJECTS):
+                connection.execute(
+                    f'DROP {object_type.upper()} IF EXISTS "{name}"'
+                )
+            for object_type, name in reversed(_V15_SCHEMA_OBJECTS):
+                connection.execute(
+                    f'DROP {object_type.upper()} IF EXISTS "{name}"'
+                )
+            for object_type, name in reversed(V14_SCHEMA_OBJECTS):
+                connection.execute(
+                    f'DROP {object_type.upper()} IF EXISTS "{name}"'
+                )
+            for object_type, name in reversed(_V11_SCHEMA_OBJECTS):
+                connection.execute(
+                    f'DROP {object_type.upper()} IF EXISTS "{name}"'
+                )
+            connection.execute(
+                "DELETE FROM schema_migrations "
+                "WHERE version IN (9,10,11,12,13,14,15,16,17)"
+            )
+            for object_type, name in reversed(_V8_SCHEMA_OBJECTS):
+                connection.execute(
+                    f'DROP {object_type.upper()} IF EXISTS "{name}"'
+                )
+            connection.execute("DELETE FROM schema_migrations WHERE version=8")
+            for object_type, name in reversed(_V7_SCHEMA_OBJECTS):
+                connection.execute(
+                    f'DROP {object_type.upper()} IF EXISTS "{name}"'
+                )
+            connection.execute("DELETE FROM schema_migrations WHERE version=7")
+            for object_type, name in reversed(_V6_SCHEMA_OBJECTS):
+                connection.execute(
+                    f'DROP {object_type.upper()} IF EXISTS "{name}"'
+                )
+            connection.execute("DELETE FROM schema_migrations WHERE version=6")
+            for object_type, name in reversed(_V5_SCHEMA_OBJECTS):
+                connection.execute(
+                    f'DROP {object_type.upper()} IF EXISTS "{name}"'
+                )
+            connection.execute("DELETE FROM schema_migrations WHERE version=5")
+            for trigger in (
+                "trg_blueprint_revisions_no_update",
+                "trg_blueprint_revisions_no_delete",
+                "trg_creative_blueprint_operations_no_update",
+                "trg_creative_blueprint_operations_no_delete",
+                "trg_blueprint_receipts_no_update",
+                "trg_blueprint_receipts_no_delete",
+                "trg_database_meta_no_schema_downgrade",
+            ):
+                connection.execute(f"DROP TRIGGER {trigger}")
+            connection.execute("DROP TABLE blueprint_command_receipts")
+            connection.execute("DROP TABLE creative_blueprint_heads")
+            connection.execute("DROP TABLE creative_blueprint_revisions")
+            connection.execute("DROP TABLE creative_blueprint_operations")
+            connection.execute("DELETE FROM schema_migrations WHERE version=4")
             connection.execute("DROP VIEW current_asset_reviews")
             connection.execute("DROP INDEX idx_asset_reviews_state_created")
             connection.execute("DROP INDEX idx_creator_profiles_created")
@@ -181,16 +263,76 @@ class SchemaV3ContractTests(unittest.TestCase):
 
         self.assertEqual(self.repository.database_uuid, database_uuid)
         self.assertIsNotNone(self.repository.get_asset(str(asset["id"])))
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             self.assertEqual(
                 connection.execute("SELECT schema_version FROM database_meta").fetchone(),
-                (3,),
+                (SCHEMA_VERSION,),
             )
             self.assertEqual(
                 connection.execute(
                     "SELECT name FROM schema_migrations WHERE version=3"
                 ).fetchone(),
                 ("creator_memory_media_inbox",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=5"
+                ).fetchone(),
+                ("paired_agent_decision_authority",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=6"
+                ).fetchone(),
+                ("canonical_coverage_plan_baseline",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=7"
+                ).fetchone(),
+                ("canonical_timeline_first_cut",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=8"
+                ).fetchone(),
+                ("canonical_export_usage_ledger",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=9"
+                ).fetchone(),
+                ("canonical_timeline_reconciliation",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=10"
+                ).fetchone(),
+                ("canonical_timeline_persistent_edit",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=11"
+                ).fetchone(),
+                ("paired_agent_canonical_timeline_edit",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=12"
+                ).fetchone(),
+                ("paired_agent_project_command_receipt_convergence",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=13"
+                ).fetchone(),
+                ("paired_agent_canonical_timeline_restore",),
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT name FROM schema_migrations WHERE version=14"
+                ).fetchone(),
+                ("canonical_image_publication_bridge",),
             )
 
     def test_failed_v3_ddl_rolls_back_every_change(self) -> None:
@@ -202,7 +344,7 @@ class SchemaV3ContractTests(unittest.TestCase):
         with patch("core.media_db.V3_SCHEMA_STATEMENTS", broken), self.assertRaises(sqlite3.Error):
             self.repository.ensure_schema(self.library)
 
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection, connection:
             self.assertIsNone(
                 connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE name='should_rollback'"
@@ -227,6 +369,7 @@ class MediaInboxContractTests(unittest.TestCase):
         add_legacy_image_record(self.db_path, self.image)
 
     def tearDown(self) -> None:
+        self.repository.close()
         self.temporary.cleanup()
 
     def _put(
@@ -272,13 +415,30 @@ class MediaInboxContractTests(unittest.TestCase):
         video_item = next(
             item for item in [*first_page.items, *second_page.items] if item["kind"] == "video"
         )
+        image_item = next(
+            item for item in [*first_page.items, *second_page.items] if item["kind"] == "image"
+        )
         self.assertEqual(video_item["thumbnail_url"], f"/v1/keyframes/{keyframe_id}")
         self.assertEqual(video_item["review"]["revision"], 0)
+        self.assertEqual(image_item["analysis_status"], "legacy_non_current")
+        self.assertEqual(
+            image_item["canonical_image_observation"]["provenance_status"],
+            "legacy_non_current",
+        )
+        self.assertEqual(
+            image_item["canonical_image_observation"]["reason_code"],
+            "legacy_image_identity_only",
+        )
 
-    def test_archive_exits_default_photo_video_atlas_and_undo_restores(self) -> None:
-        atlas = PhotoAtlasService(ImageIndexRepository(self.db_path))
-        atlas.rebuild()
-        self.assertEqual(atlas.overview()["asset_count"], 1)
+    def test_archive_exits_default_photo_video_and_unmanaged_image_never_enters_atlas(self) -> None:
+        atlas = PhotoAtlasService(
+            ImageIndexRepository(self.db_path),
+            self.repository,
+        )
+        rebuilt = atlas.rebuild()
+        self.assertEqual(rebuilt["verified_image_count"], 0)
+        self.assertEqual(rebuilt["parity_gap_count"], 1)
+        self.assertEqual(atlas.overview()["asset_count"], 0)
 
         archived, replayed = self._put(
             str(self.image["id"]),
@@ -292,13 +452,12 @@ class MediaInboxContractTests(unittest.TestCase):
         self.assertEqual(explicit[0]["review"]["inbox_state"], "archived")
         self.assertEqual(ImageIndexRepository(self.db_path).fetch_candidates(), [])
         self.assertEqual(atlas.overview()["asset_count"], 0)
-        generated = atlas.generate(
-            text="Use this archived mountain moment",
-            top_k=1,
-            asset_ids=[str(self.image["id"])],
-        )
-        self.assertEqual(generated["data"][0]["review"]["inbox_state"], "archived")
-        self.assertTrue(generated["data"][0]["review"]["favorite"])
+        with self.assertRaises(AtlasAssetObservationConflictError):
+            atlas.generate(
+                text="Use this archived mountain moment",
+                top_k=1,
+                asset_ids=[str(self.image["id"])],
+            )
 
         replay, replayed = self._put(
             str(self.image["id"]),
@@ -307,7 +466,7 @@ class MediaInboxContractTests(unittest.TestCase):
         )
         self.assertTrue(replayed)
         self.assertEqual(replay, archived)
-        with self.repository._connect() as connection:
+        with closing(self.repository._connect()) as connection, connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM asset_review_revisions WHERE asset_id=?",
@@ -324,8 +483,8 @@ class MediaInboxContractTests(unittest.TestCase):
         self.assertEqual(restored["revision"], 2)
         self.assertTrue(restored["favorite"])
         self.assertEqual(len(self.repository.mixed_candidates()[0]), 1)
-        self.assertEqual(len(ImageIndexRepository(self.db_path).fetch_candidates()), 1)
-        self.assertEqual(atlas.overview()["asset_count"], 1)
+        self.assertEqual(ImageIndexRepository(self.db_path).fetch_candidates(), [])
+        self.assertEqual(atlas.overview()["asset_count"], 0)
 
     def test_path_rebind_gets_new_content_identity_and_fresh_inbox_state(self) -> None:
         self._put(
@@ -354,7 +513,7 @@ class MediaInboxContractTests(unittest.TestCase):
             self._put(str(self.image["id"]), payload, "atomic-review")
 
         self.assertEqual(self.service.get_review(str(self.image["id"]))["revision"], 0)
-        with self.repository._connect() as connection:
+        with closing(self.repository._connect()) as connection, connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM idempotency_records").fetchone()[0], 0)
         saved, _ = self._put(str(self.image["id"]), payload, "atomic-review")
         self.assertEqual(saved["revision"], 1)
@@ -376,6 +535,7 @@ class CreatorMemoryContractTests(unittest.TestCase):
         self.counter = 0
 
     def tearDown(self) -> None:
+        self.repository.close()
         self.temporary.cleanup()
 
     def _put(self, payload: dict[str, object]) -> tuple[dict[str, object], bool]:
@@ -447,10 +607,10 @@ class CreatorMemoryContractTests(unittest.TestCase):
             {"tone": "warm", "aspect_ratio": "9:16", "platform": "Xiaohongshu"},
             {"created_by": "test"},
         )
-        with self.repository._connect() as connection:
+        with closing(self.repository._connect()) as connection, connection:
             before = connection.execute("SELECT COUNT(*) FROM creator_profile_revisions").fetchone()[0]
         suggestions = self.service.suggestions()
-        with self.repository._connect() as connection:
+        with closing(self.repository._connect()) as connection, connection:
             after = connection.execute("SELECT COUNT(*) FROM creator_profile_revisions").fetchone()[0]
         self.assertEqual(before, after)
         self.assertEqual({item["field"] for item in suggestions}, {"tone", "aspect_ratio", "platform"})
@@ -547,8 +707,15 @@ class CreatorMemoryContractTests(unittest.TestCase):
         )
 
     def test_director_freezes_only_explicitly_applied_profile_fields(self) -> None:
-        image = register_asset(self.repository, self.library, "mountain.jpg", b"mountain-image")
-        add_legacy_image_record(self.db_path, image)
+        video = register_asset(
+            self.repository,
+            self.library,
+            "mountain.mp4",
+            b"mountain-video",
+            kind="video",
+        )
+        add_video_analysis(self.repository, str(video["id"]))
+        segment_id = "segment-inbox-video"
         profile, _ = self._put(
             {
                 "base_revision": 0,
@@ -569,7 +736,7 @@ class CreatorMemoryContractTests(unittest.TestCase):
         project, _ = director.create_brief(
             {
                 "goal": "mountain",
-                "candidate_refs": [str(image["id"])],
+                "candidate_refs": [segment_id],
                 "tone": "warm",
                 "aspect_ratio": "9:16",
                 "creator_profile_ref": reference,
@@ -583,7 +750,7 @@ class CreatorMemoryContractTests(unittest.TestCase):
             director.create_brief(
                 {
                     "goal": "mountain",
-                    "candidate_refs": [str(image["id"])],
+                    "candidate_refs": [segment_id],
                     "tone": "cold",
                     "creator_profile_ref": reference,
                     "applied_profile_fields": ["tone"],
@@ -796,7 +963,7 @@ class CreatorMemoryRouteTests(unittest.TestCase):
         self.assertEqual(different_hash.status_code, 409)
         self.assertEqual(different_hash.json["code"], "idempotency_conflict")
 
-        with self.repository._connect() as connection:
+        with closing(self.repository._connect()) as connection, connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM creator_profile_revisions WHERE profile_id='default'"

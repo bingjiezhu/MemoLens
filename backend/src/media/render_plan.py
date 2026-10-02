@@ -10,6 +10,7 @@ from .video import MediaCapabilityError
 
 MIN_RENDER_FREE_BYTES = 256 * 1024 * 1024
 ESTIMATED_RENDER_BYTES_PER_SECOND_720P = 3 * 1024 * 1024
+RENDER_PROFILE_REGISTRY = frozenset({"export-1080p", "preview-low"})
 
 
 @dataclass(frozen=True)
@@ -34,6 +35,11 @@ def even(value: int) -> int:
 
 
 def dimensions(fmt: dict[str, object], profile: str) -> tuple[int, int]:
+    if profile not in RENDER_PROFILE_REGISTRY:
+        raise MediaCapabilityError(
+            "unknown_render_profile",
+            "The render profile is not registered for production dispatch.",
+        )
     width, height = int(fmt["width"]), int(fmt["height"])
     if profile == "preview-low":
         target_width, target_height = (1280, 720) if width > height else (720, 1280) if height > width else (720, 720)
@@ -73,6 +79,11 @@ def concat_manifest(paths: Iterable[Path]) -> str:
 
 
 def build_render_plan(timeline: dict[str, object], profile: str) -> RenderPlan:
+    if profile not in RENDER_PROFILE_REGISTRY:
+        raise MediaCapabilityError(
+            "unknown_render_profile",
+            "The render profile is not registered for production dispatch.",
+        )
     fmt = timeline["format"]
     width, height = dimensions(fmt, profile)
     duration_ms = int(fmt["duration_ms"])

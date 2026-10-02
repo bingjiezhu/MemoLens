@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+normalize_network_profile() {
+  local value="${MEMOLENS_NETWORK_PROFILE-online}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "${value}" | tr '[:upper:]' '[:lower:]'
+}
+
+NETWORK_PROFILE="$(normalize_network_profile)"
+case "${NETWORK_PROFILE}" in
+  online)
+    OFFLINE_NETWORKING="no"
+    ;;
+  offline)
+    OFFLINE_NETWORKING="yes"
+    ;;
+  *)
+    echo "MemoLens network profile is invalid; Electron runtime preparation networking is disabled." >&2
+    exit 78
+    ;;
+esac
+
 if [ "$(uname -s)" != "Darwin" ]; then
   exit 0
 fi
@@ -12,8 +33,19 @@ APP_STATE_DIR="${HOME}/Library/Application Support/MemoLens"
 APP_STATE_DIR="${MEMOLENS_APP_STATE_DIR:-${APP_STATE_DIR}}"
 RUNTIME_ROOT="${APP_STATE_DIR}/runtime"
 TARGET_APP="${RUNTIME_ROOT}/Electron.app"
+TARGET_BIN="${TARGET_APP}/Contents/MacOS/Electron"
 
 if [ ! -d "${SOURCE_APP}" ]; then
+  if [ "${OFFLINE_NETWORKING}" = "yes" ]; then
+    if [ -x "${TARGET_BIN}" ] \
+      && codesign --verify --deep --verbose=2 "${TARGET_APP}" >/dev/null 2>&1; then
+      exit 0
+    fi
+    echo "MemoLens offline launch needs an already prepared Electron.app runtime." >&2
+    echo "Electron runtime preparation stopped before its downloader was invoked." >&2
+    exit 78
+  fi
+
   ELECTRON_BIN="${PROJECT_ROOT}/node_modules/.bin/electron"
   if [ ! -x "${ELECTRON_BIN}" ]; then
     echo "Electron is not installed under node_modules. Run npm install first." >&2

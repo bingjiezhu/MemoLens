@@ -30,3 +30,9 @@ export {
   resolveVideoResourceUrl,
   VideoApiError,
 } from "./api/transport";
+export {
+  blueprintRestoreIdempotencyKey,
+  fetchBlueprintRevision,
+  fetchBlueprintWorkspace,
+  restoreBlueprintRevision,
+} from "../blueprint/workspaceApi";

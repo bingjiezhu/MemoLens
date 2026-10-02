@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from memolens_contracts import MemoLensError, compact_asset, safety_summary
+from memolens_contracts import (
+    MemoLensError,
+    compact_asset,
+    compact_atlas_asset,
+    safety_summary,
+)
 
 
 def present_memories(
@@ -67,10 +72,18 @@ def _memory_card(raw: dict[str, Any], library_dir: Path | None) -> dict[str, Any
     representatives = raw.get("representative_assets")
     if not isinstance(representatives, list):
         representatives = raw.get("best_assets")
+    if representatives is None:
+        representatives = []
+    if not isinstance(representatives, list) or any(
+        not isinstance(asset, dict) for asset in representatives[:5]
+    ):
+        raise MemoLensError(
+            "MemoLens Atlas returned an invalid memory representative list.",
+            code="canonical_image_observation_invalid",
+        )
     card["representative_assets"] = [
-        compact_asset(asset, library_dir)
-        for asset in (representatives or [])[:5]
-        if isinstance(asset, dict)
+        compact_atlas_asset(asset, library_dir)
+        for asset in representatives[:5]
     ]
     return card
 

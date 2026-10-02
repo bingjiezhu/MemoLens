@@ -73,7 +73,11 @@ class QueryPlannerUnicodeRegressionTests(unittest.TestCase):
         self.assertNotIn("English words", SEARCH_INSPIRATION_PROMPT)
 
     def test_model_suggestions_do_not_apply_an_english_length_floor(self) -> None:
-        settings = SimpleNamespace(query_provider="vertex", query_api_key=None)
+        settings = SimpleNamespace(
+            query_provider="vertex",
+            query_api_key=None,
+            query_base_url="https://example.invalid/v1",
+        )
         planner = OpenAICompatibleQueryPlanner(settings)
         with patch.object(
             planner,

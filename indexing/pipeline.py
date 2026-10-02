@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
 from core.config import Settings
 from core.db import ImageIndexRepository
+from core.image_quality import score_image_bytes
 from core.media_db import MediaRepository
-from core.image_quality import score_image_bytes, score_image_file
 from core.schemas import (
     IndexedImageSummary,
     IndexingJobResult,
@@ -17,10 +18,14 @@ from core.schemas import (
 from core.text_embeddings import TextEmbeddingService, build_combined_text
 from .embeddings import EmbeddingService
 from .files import (
+    PinnedLibraryRoot,
+    collect_pinned_library_candidates,
     decode_base64_image,
     extract_local_image_metadata,
     extract_uploaded_image_metadata,
     is_supported_image,
+    open_pinned_library_root,
+    open_pinned_local_image,
     prepare_image_for_modeling,
     prepare_uploaded_image_for_modeling,
 )
@@ -47,94 +52,104 @@ class IndexingService:
         self.geocoder = geocoder
         self.media_repository = media_repository
 
-    def _sync_media_asset(self, record: StoredImageRecord, library_root: Path) -> None:
-        if self.media_repository is None:
-            return
-        self._sync_media_identity(
-            asset_id=record.id,
-            sha256=record.sha256,
-            filename=record.filename,
-            relative_path=record.relative_path,
-            mime_type=record.mime_type,
-            file_size=record.file_size,
-            width=int(record.width or 1),
-            height=int(record.height or 1),
-            library_root=library_root,
-        )
-
-    def _sync_media_identity(
+    def run(
         self,
+        indexing_request: IndexingRequest,
         *,
-        asset_id: str,
-        sha256: str,
-        filename: str,
-        relative_path: str,
-        mime_type: str,
-        file_size: int,
-        width: int,
-        height: int,
-        library_root: Path,
-    ) -> None:
-        if self.media_repository is None or library_root.resolve() != self.settings.image_library_dir.resolve():
-            return
-        source = (library_root / relative_path).resolve(strict=True)
-        source.relative_to(library_root)
-        if source.is_symlink() or not source.is_file():
-            raise ValueError("Image media source must be a regular non-symlink file.")
-        metadata = source.stat()
-        registered_root = self.media_repository.register_library_root(library_root)
-        asset = self.media_repository.upsert_asset_source(
-            root_id=str(registered_root["id"]),
-            relative_path=relative_path,
-            filename=filename,
-            kind="image",
-            sha256=sha256,
-            mime_type=mime_type,
-            file_size=file_size,
-            mtime_ns=metadata.st_mtime_ns,
-            source_file_id=str(metadata.st_ino),
-            asset_id_override=asset_id,
+        pinned_root: PinnedLibraryRoot | None = None,
+    ) -> IndexingJobResult:
+        requested_root = Path(
+            os.path.realpath(
+                os.path.abspath(
+                Path(
+                    indexing_request.input.image_dir
+                    or self.settings.image_library_dir
+                ).expanduser()
+                )
+            )
         )
-        self.media_repository.update_image_probe(str(asset["id"]), width=width, height=height)
+        expected_identity = (
+            None
+            if indexing_request.library_root_identity is None
+            else (
+                indexing_request.library_root_identity.device,
+                indexing_request.library_root_identity.inode,
+            )
+        )
+        owns_root = pinned_root is None
+        root = pinned_root or open_pinned_library_root(
+            requested_root,
+            expected_identity=expected_identity,
+        )
+        try:
+            if root.root_path != requested_root:
+                raise PermissionError(
+                    "Indexing root does not match the pinned library root."
+                )
+            root.assert_expected_identity(expected_identity)
+            return self._run_with_pinned_root(indexing_request, root)
+        finally:
+            if owns_root:
+                root.close()
 
-    def run(self, indexing_request: IndexingRequest) -> IndexingJobResult:
-        library_root = Path(indexing_request.input.image_dir or self.settings.image_library_dir).expanduser().resolve()
+    def _run_with_pinned_root(
+        self,
+        indexing_request: IndexingRequest,
+        pinned_root: PinnedLibraryRoot,
+    ) -> IndexingJobResult:
+        library_root = pinned_root.root_path
+        if indexing_request.persist_to_server:
+            raise ValueError(
+                "legacy_direct_image_persistence_disabled: use the durable image import adapter"
+            )
         if indexing_request.input.image is not None:
             return self._run_uploaded_image(indexing_request, library_root)
 
-        candidates = self._collect_candidates(library_root, indexing_request)
+        candidates = self._collect_candidates(pinned_root, indexing_request)
 
         indexed: list[IndexedImageSummary] = []
         skipped: list[IndexedImageSummary] = []
         failed: list[IndexedImageSummary] = []
         records: list[StoredImageRecord] = []
 
-        for image_path in candidates:
+        for relative_path in candidates:
             try:
-                local_metadata = extract_local_image_metadata(image_path, library_root)
-            except Exception as exc:  # pragma: no cover - defensive guard
-                failed.append(
-                    IndexedImageSummary(
-                        id=f"failed_{image_path.stem}",
-                        filename=image_path.name,
-                        relative_path=str(image_path),
-                        status="failed",
-                        message=f"metadata extraction failed: {exc}",
+                with open_pinned_local_image(
+                    pinned_root=pinned_root,
+                    relative_path=relative_path,
+                ) as source:
+                    local_metadata = extract_local_image_metadata(source)
+                    geo_metadata = self.geocoder.reverse(local_metadata.lat, local_metadata.lon)
+                    prepared_image = prepare_image_for_modeling(
+                        source=source,
+                        target_width=self.settings.process_image_width,
                     )
-                )
-                continue
+                    vision_metadata = self.vision_client.describe_image(
+                        prepared_image=prepared_image,
+                        model=indexing_request.model or self.settings.vision_model,
+                    )
+                    combined_text = build_combined_text(
+                        description=vision_metadata.description,
+                        tags=vision_metadata.tags,
+                        place_name=geo_metadata.place_name,
+                        country=geo_metadata.country,
+                        location_hint=vision_metadata.location_hint,
+                        semantic_hints=self.settings.semantic_hints,
+                    )
+                    embedding = self.embedding_service.encode_image(
+                        prepared_image.image,
+                        semantic_text=combined_text,
+                        source_name=prepared_image.source_name,
+                    )
+                    combined_text_embedding_blob = self._encode_combined_text(combined_text)
+                    quality_scores = score_image_bytes(
+                        source.content_bytes,
+                        text=combined_text,
+                    )
 
-            existing_record = None
-            if indexing_request.persist_to_server and not indexing_request.reindex:
-                existing_record = self.repository.get_by_sha256(local_metadata.sha256)
-
-            if existing_record is not None:
-                skip_message = "already indexed"
-                if (
-                    str(existing_record["relative_path"] or "") != local_metadata.relative_path
-                    or str(existing_record["filename"] or "") != local_metadata.filename
-                ):
-                    self.repository.refresh_existing_file_metadata(
+                    now_iso = utc_now_iso()
+                    record = StoredImageRecord(
+                        id=local_metadata.id,
                         sha256=local_metadata.sha256,
                         filename=local_metadata.filename,
                         relative_path=local_metadata.relative_path,
@@ -146,116 +161,47 @@ class IndexingService:
                         lat=local_metadata.lat,
                         lon=local_metadata.lon,
                         altitude=local_metadata.altitude,
-                        updated_at=utc_now_iso(),
+                        place_name=geo_metadata.place_name,
+                        country=geo_metadata.country,
+                        description=vision_metadata.description,
+                        tags=vision_metadata.tags,
+                        combined_text=combined_text,
+                        text_embedding_model=(
+                            self.settings.text_embedding_model_id
+                            if combined_text_embedding_blob is not None
+                            else None
+                        ),
+                        combined_text_embedding_blob=combined_text_embedding_blob,
+                        embedding_backend=self.settings.embedding_backend,
+                        embedding_blob=embedding.astype("float32").tobytes(),
+                        created_at=now_iso,
+                        updated_at=now_iso,
+                        aesthetic_score=quality_scores.aesthetic_score,
+                        aesthetic_model=quality_scores.model,
+                        technical_quality_score=quality_scores.technical_quality_score,
+                        aesthetic_updated_at=now_iso,
                     )
-                    skip_message = "already indexed (path updated)"
+                    records.append(record)
 
-                self._sync_media_identity(
-                    asset_id=str(existing_record["id"] or local_metadata.id),
-                    sha256=local_metadata.sha256,
-                    filename=local_metadata.filename,
-                    relative_path=local_metadata.relative_path,
-                    mime_type=local_metadata.mime_type,
-                    file_size=local_metadata.file_size,
-                    width=int(local_metadata.width or 1),
-                    height=int(local_metadata.height or 1),
-                    library_root=library_root,
-                )
-
-                skipped.append(
-                    IndexedImageSummary(
-                        id=str(existing_record["id"] or local_metadata.id),
-                        filename=local_metadata.filename,
-                        relative_path=local_metadata.relative_path,
-                        status="skipped",
-                        message=skip_message,
+                    indexed.append(
+                        IndexedImageSummary(
+                            id=record.id,
+                            filename=record.filename,
+                            relative_path=record.relative_path,
+                            status="processed",
+                            tags=record.tags,
+                            description=record.description,
+                            taken_at=record.taken_at,
+                            place_name=record.place_name,
+                            country=record.country,
+                        )
                     )
-                )
-                continue
-
-            try:
-                geo_metadata = self.geocoder.reverse(local_metadata.lat, local_metadata.lon)
-                prepared_image = prepare_image_for_modeling(
-                    image_path=image_path,
-                    target_width=self.settings.process_image_width,
-                )
-                vision_metadata = self.vision_client.describe_image(
-                    prepared_image=prepared_image,
-                    model=indexing_request.model or self.settings.vision_model,
-                )
-                combined_text = build_combined_text(
-                    description=vision_metadata.description,
-                    tags=vision_metadata.tags,
-                    place_name=geo_metadata.place_name,
-                    country=geo_metadata.country,
-                    location_hint=vision_metadata.location_hint,
-                    semantic_hints=self.settings.semantic_hints,
-                )
-                embedding = self.embedding_service.encode_image(
-                    prepared_image.image,
-                    semantic_text=combined_text,
-                    source_name=prepared_image.source_name,
-                )
-                combined_text_embedding_blob = self._encode_combined_text(combined_text)
-                quality_scores = score_image_file(image_path, text=combined_text)
-
-                now_iso = utc_now_iso()
-                record = StoredImageRecord(
-                    id=local_metadata.id,
-                    sha256=local_metadata.sha256,
-                    filename=local_metadata.filename,
-                    relative_path=local_metadata.relative_path,
-                    mime_type=local_metadata.mime_type,
-                    file_size=local_metadata.file_size,
-                    width=local_metadata.width,
-                    height=local_metadata.height,
-                    taken_at=local_metadata.taken_at,
-                    lat=local_metadata.lat,
-                    lon=local_metadata.lon,
-                    altitude=local_metadata.altitude,
-                    place_name=geo_metadata.place_name,
-                    country=geo_metadata.country,
-                    description=vision_metadata.description,
-                    tags=vision_metadata.tags,
-                    combined_text=combined_text,
-                    text_embedding_model=(
-                        self.settings.text_embedding_model_id if combined_text_embedding_blob is not None else None
-                    ),
-                    combined_text_embedding_blob=combined_text_embedding_blob,
-                    embedding_backend=self.settings.embedding_backend,
-                    embedding_blob=embedding.astype("float32").tobytes(),
-                    created_at=now_iso,
-                    updated_at=now_iso,
-                    aesthetic_score=quality_scores.aesthetic_score,
-                    aesthetic_model=quality_scores.model,
-                    technical_quality_score=quality_scores.technical_quality_score,
-                    aesthetic_updated_at=now_iso,
-                )
-                if indexing_request.persist_to_server:
-                    self.repository.upsert(record)
-                    self._sync_media_asset(record, library_root)
-                records.append(record)
-                summary_status = "indexed" if indexing_request.persist_to_server else "processed"
-
-                indexed.append(
-                    IndexedImageSummary(
-                        id=record.id,
-                        filename=record.filename,
-                        relative_path=record.relative_path,
-                        status=summary_status,
-                        tags=record.tags,
-                        description=record.description,
-                        taken_at=record.taken_at,
-                        place_name=record.place_name,
-                        country=record.country,
-                    )
-                )
-            except Exception as exc:  # pragma: no cover - keeps one bad image from killing the job
+            except Exception as exc:  # pragma: no cover - isolate one unsafe/bad source
                 failed.append(
                     IndexedImageSummary(
-                        id=local_metadata.id,
-                        filename=local_metadata.filename,
-                        relative_path=local_metadata.relative_path,
+                        id=f"failed_{relative_path.stem}",
+                        filename=relative_path.name,
+                        relative_path=str(relative_path),
                         status="failed",
                         message=str(exc),
                     )
@@ -318,107 +264,91 @@ class IndexingService:
                 created=int(time.time()),
             )
 
-        if (
-            indexing_request.persist_to_server
-            and self.repository.has_sha256(local_metadata.sha256)
-            and not indexing_request.reindex
-        ):
-            skipped.append(
+        try:
+            geo_metadata = self.geocoder.reverse(local_metadata.lat, local_metadata.lon)
+            prepared_image = prepare_uploaded_image_for_modeling(
+                content_bytes=raw_bytes,
+                filename=uploaded.filename,
+                target_width=self.settings.process_image_width,
+            )
+            vision_metadata = self.vision_client.describe_image(
+                prepared_image=prepared_image,
+                model=indexing_request.model or self.settings.vision_model,
+            )
+            combined_text = build_combined_text(
+                description=vision_metadata.description,
+                tags=vision_metadata.tags,
+                place_name=geo_metadata.place_name,
+                country=geo_metadata.country,
+                location_hint=vision_metadata.location_hint,
+                semantic_hints=self.settings.semantic_hints,
+            )
+            embedding = self.embedding_service.encode_image(
+                prepared_image.image,
+                semantic_text=combined_text,
+                source_name=prepared_image.source_name,
+            )
+            combined_text_embedding_blob = self._encode_combined_text(combined_text)
+            quality_scores = score_image_bytes(raw_bytes, text=combined_text)
+
+            now_iso = utc_now_iso()
+            record = StoredImageRecord(
+                id=local_metadata.id,
+                sha256=local_metadata.sha256,
+                filename=local_metadata.filename,
+                relative_path=local_metadata.relative_path,
+                mime_type=local_metadata.mime_type,
+                file_size=local_metadata.file_size,
+                width=local_metadata.width,
+                height=local_metadata.height,
+                taken_at=local_metadata.taken_at,
+                lat=local_metadata.lat,
+                lon=local_metadata.lon,
+                altitude=local_metadata.altitude,
+                place_name=geo_metadata.place_name,
+                country=geo_metadata.country,
+                description=vision_metadata.description,
+                tags=vision_metadata.tags,
+                combined_text=combined_text,
+                text_embedding_model=(
+                    self.settings.text_embedding_model_id
+                    if combined_text_embedding_blob is not None
+                    else None
+                ),
+                combined_text_embedding_blob=combined_text_embedding_blob,
+                embedding_backend=self.settings.embedding_backend,
+                embedding_blob=embedding.astype("float32").tobytes(),
+                created_at=now_iso,
+                updated_at=now_iso,
+                aesthetic_score=quality_scores.aesthetic_score,
+                aesthetic_model=quality_scores.model,
+                technical_quality_score=quality_scores.technical_quality_score,
+                aesthetic_updated_at=now_iso,
+            )
+            records.append(record)
+            indexed.append(
+                IndexedImageSummary(
+                    id=record.id,
+                    filename=record.filename,
+                    relative_path=record.relative_path,
+                    status="processed",
+                    tags=record.tags,
+                    description=record.description,
+                    taken_at=record.taken_at,
+                    place_name=record.place_name,
+                    country=record.country,
+                )
+            )
+        except Exception as exc:
+            failed.append(
                 IndexedImageSummary(
                     id=local_metadata.id,
                     filename=local_metadata.filename,
                     relative_path=local_metadata.relative_path,
-                    status="skipped",
-                    message="already indexed",
+                    status="failed",
+                    message=str(exc),
                 )
             )
-        else:
-            try:
-                geo_metadata = self.geocoder.reverse(local_metadata.lat, local_metadata.lon)
-                prepared_image = prepare_uploaded_image_for_modeling(
-                    content_bytes=raw_bytes,
-                    filename=uploaded.filename,
-                    target_width=self.settings.process_image_width,
-                )
-                vision_metadata = self.vision_client.describe_image(
-                    prepared_image=prepared_image,
-                    model=indexing_request.model or self.settings.vision_model,
-                )
-                combined_text = build_combined_text(
-                    description=vision_metadata.description,
-                    tags=vision_metadata.tags,
-                    place_name=geo_metadata.place_name,
-                    country=geo_metadata.country,
-                    location_hint=vision_metadata.location_hint,
-                    semantic_hints=self.settings.semantic_hints,
-                )
-                embedding = self.embedding_service.encode_image(
-                    prepared_image.image,
-                    semantic_text=combined_text,
-                    source_name=prepared_image.source_name,
-                )
-                combined_text_embedding_blob = self._encode_combined_text(combined_text)
-                quality_scores = score_image_bytes(raw_bytes, text=combined_text)
-
-                now_iso = utc_now_iso()
-                record = StoredImageRecord(
-                    id=local_metadata.id,
-                    sha256=local_metadata.sha256,
-                    filename=local_metadata.filename,
-                    relative_path=local_metadata.relative_path,
-                    mime_type=local_metadata.mime_type,
-                    file_size=local_metadata.file_size,
-                    width=local_metadata.width,
-                    height=local_metadata.height,
-                    taken_at=local_metadata.taken_at,
-                    lat=local_metadata.lat,
-                    lon=local_metadata.lon,
-                    altitude=local_metadata.altitude,
-                    place_name=geo_metadata.place_name,
-                    country=geo_metadata.country,
-                    description=vision_metadata.description,
-                    tags=vision_metadata.tags,
-                    combined_text=combined_text,
-                    text_embedding_model=(
-                        self.settings.text_embedding_model_id if combined_text_embedding_blob is not None else None
-                    ),
-                    combined_text_embedding_blob=combined_text_embedding_blob,
-                    embedding_backend=self.settings.embedding_backend,
-                    embedding_blob=embedding.astype("float32").tobytes(),
-                    created_at=now_iso,
-                    updated_at=now_iso,
-                    aesthetic_score=quality_scores.aesthetic_score,
-                    aesthetic_model=quality_scores.model,
-                    technical_quality_score=quality_scores.technical_quality_score,
-                    aesthetic_updated_at=now_iso,
-                )
-                if indexing_request.persist_to_server:
-                    self.repository.upsert(record)
-                records.append(record)
-                summary_status = "indexed" if indexing_request.persist_to_server else "processed"
-                indexed.append(
-                    IndexedImageSummary(
-                        id=record.id,
-                        filename=record.filename,
-                        relative_path=record.relative_path,
-                        status=summary_status,
-                        tags=record.tags,
-                        description=record.description,
-                        taken_at=record.taken_at,
-                        place_name=record.place_name,
-                        country=record.country,
-                    )
-                )
-            except Exception as exc:
-                failed.append(
-                    IndexedImageSummary(
-                        id=local_metadata.id,
-                        filename=local_metadata.filename,
-                        relative_path=local_metadata.relative_path,
-                        status="failed",
-                        message=str(exc),
-                    )
-                )
 
         return IndexingJobResult(
             id=f"idxjob_{int(time.time())}",
@@ -435,22 +365,34 @@ class IndexingService:
 
     def _collect_candidates(
         self,
-        library_root: Path,
+        pinned_root: PinnedLibraryRoot,
         indexing_request: IndexingRequest,
     ) -> list[Path]:
+        library_root = pinned_root.root_path
         explicit_files = indexing_request.input.files
         if explicit_files:
-            candidates = [self._resolve_candidate(library_root, Path(file_path)) for file_path in explicit_files]
+            candidates = [
+                self._relative_candidate(library_root, Path(file_path))
+                for file_path in explicit_files
+            ]
         else:
-            if not library_root.exists():
-                raise FileNotFoundError(f"Image directory does not exist: {library_root}")
-            pattern = "**/*" if indexing_request.input.recursive else "*"
-            candidates = [path for path in library_root.glob(pattern) if path.is_file()]
+            candidates = collect_pinned_library_candidates(
+                pinned_root,
+                recursive=indexing_request.input.recursive,
+            )
 
-        filtered = []
+        filtered: list[Path] = []
+        database_path = Path(
+            os.path.abspath(self.settings.db_path.expanduser())
+        )
+        try:
+            database_relative_path: Path | None = database_path.relative_to(
+                library_root
+            )
+        except ValueError:
+            database_relative_path = None
         for candidate in sorted(candidates):
-            resolved = candidate.resolve()
-            if resolved == self.settings.db_path.resolve():
+            if database_relative_path is not None and candidate == database_relative_path:
                 continue
             if is_supported_image(candidate):
                 filtered.append(candidate)
@@ -460,10 +402,20 @@ class IndexingService:
         return filtered
 
     @staticmethod
-    def _resolve_candidate(library_root: Path, candidate: Path) -> Path:
-        if candidate.is_absolute():
-            return candidate.resolve()
-        return (library_root / candidate).resolve()
+    def _relative_candidate(library_root: Path, candidate: Path) -> Path:
+        lexical_path = candidate.expanduser()
+        if not lexical_path.is_absolute():
+            lexical_path = library_root / lexical_path
+        normalized = Path(os.path.abspath(lexical_path))
+        try:
+            relative_path = normalized.relative_to(library_root)
+        except ValueError as exc:
+            raise ValueError("Indexing files must stay inside the active library root.") from exc
+        if not relative_path.parts or any(
+            part in {"", ".", ".."} for part in relative_path.parts
+        ):
+            raise ValueError("Indexing file path is not a normalized library source.")
+        return relative_path
 
     def _encode_combined_text(self, combined_text: str) -> bytes | None:
         try:

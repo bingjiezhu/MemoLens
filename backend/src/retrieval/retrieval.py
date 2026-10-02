@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from dataclasses import dataclass, field
 import json
 import math
 import re
@@ -127,6 +128,23 @@ CLOSE_FOCUS_TERMS = [
     "path",
     "road",
 ]
+
+
+@dataclass
+class CanonicalRetrievalResponse(RetrievalResponse):
+    """Retrieval response plus the generation proof used before ranking.
+
+    The proof map is deliberately not serialized by ``to_response``.  The HTTP
+    boundary must first compare it with a freshly verified canonical consumer
+    observation and only then expose the closed public fields.
+    """
+
+    canonical_projection_bindings: dict[str, dict[str, object]] = field(
+        default_factory=dict,
+        repr=False,
+    )
+
+
 DIVERSITY_GENERIC_TERMS = {
     "and",
     "with",
@@ -268,6 +286,16 @@ class RetrievalService:
             date_to=plan.query.date_to,
             location_text=plan.query.location_text,
         )
+        canonical_projection_bindings: dict[str, dict[str, object]] = {}
+        for row in candidates:
+            binding = self._canonical_projection_binding(row)
+            if binding is None:
+                continue
+            asset_id = str(row["id"])
+            previous = canonical_projection_bindings.get(asset_id)
+            if previous is not None and previous != binding:
+                raise RuntimeError("canonical_image_projection_binding_ambiguous")
+            canonical_projection_bindings[asset_id] = binding
         query_text_embedding = self._encode_query_text(plan.query.descriptive_query)
         ranked = self._rank_candidates(
             candidates,
@@ -275,14 +303,55 @@ class RetrievalService:
             query_text_embedding=query_text_embedding,
         )[: plan.query.top_k]
 
-        return RetrievalResponse(
+        return CanonicalRetrievalResponse(
             id=f"ret_{int(time.time())}",
             query_text=retrieval_request.text,
             current_datetime=current_datetime,
             parsed_query=plan.query,
             data=ranked,
             status="completed",
+            canonical_projection_bindings=canonical_projection_bindings,
         )
+
+    @staticmethod
+    def _canonical_projection_binding(row: object) -> dict[str, object] | None:
+        fields = (
+            "canonical_generation_id",
+            "canonical_analysis_run_id",
+            "canonical_analysis_revision",
+            "canonical_content_sha256",
+            "canonical_row_sha256",
+        )
+        try:
+            values = {field: row[field] for field in fields}  # type: ignore[index]
+        except (IndexError, KeyError, TypeError):
+            return None
+        if all(value is None for value in values.values()):
+            return None
+        if (
+            type(values["canonical_generation_id"]) is not str
+            or not values["canonical_generation_id"]
+            or type(values["canonical_analysis_run_id"]) is not str
+            or not values["canonical_analysis_run_id"]
+            or type(values["canonical_analysis_revision"]) is not int
+            or int(values["canonical_analysis_revision"]) < 1
+            or type(values["canonical_content_sha256"]) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", values["canonical_content_sha256"])
+            is None
+            or type(values["canonical_row_sha256"]) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", values["canonical_row_sha256"])
+            is None
+        ):
+            raise RuntimeError("canonical_image_projection_binding_invalid")
+        return {
+            "generation_id": values["canonical_generation_id"],
+            "analysis_binding": {
+                "analysis_run_id": values["canonical_analysis_run_id"],
+                "revision": values["canonical_analysis_revision"],
+                "content_sha256": values["canonical_content_sha256"],
+            },
+            "row_sha256": values["canonical_row_sha256"],
+        }
 
     def _rank_candidates(
         self,

@@ -1,0 +1,476 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://memolens.local/schemas/creative-blueprint-candidate-v1.schema.json",
+  "title": "MemoLens Creative Blueprint Candidate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "object",
+    "schema_version",
+    "project_id",
+    "base",
+    "intent",
+    "script",
+    "direction",
+    "output",
+    "constraints",
+    "material_hints",
+    "reference_refs",
+    "technique_refs",
+    "bindings",
+    "assumptions",
+    "missing_evidence",
+    "open_decisions"
+  ],
+  "properties": {
+    "object": {
+      "const": "memolens.creative_blueprint_candidate"
+    },
+    "schema_version": {
+      "const": "1"
+    },
+    "project_id": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+      "maxLength": 200
+    },
+    "base": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["legacy_brief", "observed_timeline"],
+      "properties": {
+        "legacy_brief": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["revision", "content_sha256"],
+          "properties": {
+            "revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "content_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            }
+          }
+        },
+        "observed_timeline": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["timeline_id", "revision", "content_sha256"],
+          "properties": {
+            "timeline_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+              "maxLength": 200
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            "content_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            }
+          }
+        }
+      }
+    },
+    "intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goal", "stance", "audience", "platform", "declared_source"],
+      "properties": {
+        "goal": {"type": ["string", "null"], "minLength": 1, "maxLength": 4000},
+        "stance": {"type": ["string", "null"], "minLength": 1, "maxLength": 4000},
+        "audience": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "platform": {"type": ["string", "null"], "minLength": 1, "maxLength": 200},
+        "declared_source": {
+          "enum": ["caller_declared_user_input", "agent_proposal", "legacy_unknown", "unknown"]
+        }
+      }
+    },
+    "script": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["declared_source", "blocks"],
+      "properties": {
+        "declared_source": {
+          "enum": ["caller_declared_user_input", "agent_proposal", "legacy_unknown", "unknown"]
+        },
+        "blocks": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["block_id", "text"],
+            "properties": {
+              "block_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                "maxLength": 200
+              },
+              "text": {"type": "string", "minLength": 1, "maxLength": 12000}
+            }
+          }
+        }
+      }
+    },
+    "direction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["theme", "narrative_arc", "emotion", "tone", "pace", "declared_source"],
+      "properties": {
+        "theme": {"type": ["string", "null"], "minLength": 1, "maxLength": 4000},
+        "narrative_arc": {"type": ["string", "null"], "minLength": 1, "maxLength": 4000},
+        "emotion": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "tone": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "pace": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+        "declared_source": {
+          "enum": ["caller_declared_user_input", "agent_proposal", "legacy_unknown", "unknown"]
+        }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["duration_target_ms", "aspect_ratio"],
+      "properties": {
+        "duration_target_ms": {
+          "type": ["integer", "null"],
+          "minimum": 1000,
+          "maximum": 1800000
+        },
+        "aspect_ratio": {
+          "type": ["string", "null"],
+          "enum": ["16:9", "9:16", "1:1", "4:5", null],
+          "maxLength": 4
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["must_include", "must_exclude"],
+      "properties": {
+        "must_include": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["constraint_id", "text", "evidence_ref", "script_block_ids"],
+            "properties": {
+              "constraint_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                "maxLength": 200
+              },
+              "text": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+              "evidence_ref": {
+                "type": ["string", "null"],
+                "pattern": "^memolens://evidence/(asset|span)/[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                "maxLength": 260
+              },
+              "script_block_ids": {
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                  "maxLength": 200
+                }
+              }
+            }
+          }
+        },
+        "must_exclude": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["constraint_id", "text", "evidence_ref", "script_block_ids"],
+            "properties": {
+              "constraint_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                "maxLength": 200
+              },
+              "text": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+              "evidence_ref": {
+                "type": ["string", "null"],
+                "pattern": "^memolens://evidence/(asset|span)/[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                "maxLength": 260
+              },
+              "script_block_ids": {
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                  "maxLength": 200
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "material_hints": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hint_id", "evidence_ref", "script_block_ids", "reason"],
+            "properties": {
+              "hint_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                "maxLength": 200
+              },
+              "evidence_ref": {
+                "type": "string",
+                "pattern": "^memolens://evidence/(?:asset|span)/(?!rseg_[0-9a-f]{64}$)[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                "maxLength": 260
+              },
+              "script_block_ids": {
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                  "maxLength": 200
+                }
+              },
+              "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000}
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hint_id", "evidence_ref", "script_block_ids", "reason", "proof"],
+            "properties": {
+              "hint_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                "maxLength": 200
+              },
+              "evidence_ref": {
+                "type": "string",
+                "pattern": "^memolens://evidence/span/rseg_[0-9a-f]{64}$",
+                "maxLength": 260
+              },
+              "script_block_ids": {
+                "type": "array",
+                "maxItems": 128,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+                  "maxLength": 200
+                }
+              },
+              "reason": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000},
+              "proof": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "residual_binding"],
+                "properties": {
+                  "kind": {"const": "residual_span"},
+                  "residual_binding": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "object", "contract_version", "residual_id", "parent_segment_id",
+                      "asset_id", "asset_sha256", "asset_source_id",
+                      "source_binding_sha256", "analysis_run_id", "analysis_revision",
+                      "input_asset_sha256", "parent_start_ms", "parent_end_ms",
+                      "source_in_ms", "source_out_ms", "usage_revision",
+                      "parent_usage_projection_sha256"
+                    ],
+                    "properties": {
+                      "object": {"const": "memolens.residual_binding"},
+                      "contract_version": {"const": "1"},
+                      "residual_id": {"type": "string", "pattern": "^rseg_[0-9a-f]{64}$"},
+                      "parent_segment_id": {"type": "string", "pattern": "^seg_[0-9a-f]{24}_[1-9][0-9]{0,6}_(?:0|[1-9][0-9]{0,6})$"},
+                      "asset_id": {"type": "string", "pattern": "^asset_[0-9a-f]{24}$"},
+                      "asset_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                      "asset_source_id": {"type": "string", "pattern": "^src_[0-9a-f]{24}$"},
+                      "source_binding_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                      "analysis_run_id": {"type": "string", "pattern": "^arun_[0-9a-f]{32}$"},
+                      "analysis_revision": {"type": "integer", "minimum": 1, "maximum": 1000000},
+                      "input_asset_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                      "parent_start_ms": {"type": "integer", "minimum": 0, "maximum": 604800000},
+                      "parent_end_ms": {"type": "integer", "minimum": 1, "maximum": 604800000},
+                      "source_in_ms": {"type": "integer", "minimum": 0, "maximum": 604800000},
+                      "source_out_ms": {"type": "integer", "minimum": 1, "maximum": 604800000},
+                      "usage_revision": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                      "parent_usage_projection_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "reference_refs": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reference_id", "kind", "locator", "note"],
+        "properties": {
+          "reference_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+            "maxLength": 200
+          },
+          "kind": {
+            "enum": ["project", "research_snapshot", "evidence", "external_https", "user_text"]
+          },
+          "locator": {"type": "string", "minLength": 1, "maxLength": 4000},
+          "note": {"type": ["string", "null"], "minLength": 1, "maxLength": 1000}
+        }
+      }
+    },
+    "technique_refs": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["card_id", "revision", "declared_state"],
+        "properties": {
+          "card_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+            "maxLength": 200
+          },
+          "revision": {"type": "integer", "minimum": 1, "maximum": 1000000},
+          "declared_state": {"enum": ["proposed", "selected", "rejected"]}
+        }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["creator_context", "wiki_generation"],
+      "properties": {
+        "creator_context": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["profile_id", "revision", "content_sha256"],
+          "properties": {
+            "profile_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+              "maxLength": 200
+            },
+            "revision": {"type": "integer", "minimum": 1, "maximum": 1000000},
+            "content_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            }
+          }
+        },
+        "wiki_generation": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["generation_id", "content_sha256"],
+          "properties": {
+            "generation_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+              "maxLength": 200
+            },
+            "content_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$",
+              "maxLength": 64
+            }
+          }
+        }
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assumption_id", "text"],
+        "properties": {
+          "assumption_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+            "maxLength": 200
+          },
+          "text": {"type": "string", "minLength": 1, "maxLength": 1000}
+        }
+      }
+    },
+    "missing_evidence": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["gap_id", "description", "script_block_ids", "required_before"],
+        "properties": {
+          "gap_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+            "maxLength": 200
+          },
+          "description": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "script_block_ids": {
+            "type": "array",
+            "maxItems": 128,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+              "maxLength": 200
+            }
+          },
+          "required_before": {"enum": ["coverage", "timeline", "render", "publish", "not_blocking"]}
+        }
+      }
+    },
+    "open_decisions": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["decision_id", "question", "scope", "required_before"],
+        "properties": {
+          "decision_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$",
+            "maxLength": 200
+          },
+          "question": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "scope": {"enum": ["intent", "stance", "script", "direction", "output", "material", "reference", "technique", "other"]},
+          "required_before": {"enum": ["coverage", "timeline", "render", "publish", "not_blocking"]}
+        }
+      }
+    }
+  }
+}

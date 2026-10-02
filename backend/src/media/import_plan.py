@@ -1,13 +1,62 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Mapping, Protocol
 
 from core.media_db import MediaRepository, canonical_json, new_id, utc_now_iso
+
+if TYPE_CHECKING:
+    from indexing.files import PinnedLibraryRoot
+
+    from .source_identity import FileIdentity, PinnedMediaSource
 
 
 ACTIVE_JOB_STATES = frozenset({"queued", "running", "cancelling"})
 ANALYSIS_PROFILE_ID = "adaptive-local-v1"
+IMAGE_ANALYSIS_PROFILE_ID = "canonical-image-local-v1"
+IMAGE_ANALYSIS_PROFILE = MappingProxyType(
+    {
+        "profile_id": IMAGE_ANALYSIS_PROFILE_ID,
+        "profile_version": "1",
+        "profile_sha256": hashlib.sha256(IMAGE_ANALYSIS_PROFILE_ID.encode()).hexdigest(),
+    }
+)
+IMAGE_IMPORT_ENQUEUE_SCOPE = "media-import/image-analysis"
+
+
+class ImageAnalysisTransactionEnqueuer(Protocol):
+    """Core-owned image admission that writes through a caller transaction."""
+
+    def __call__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        runtime_generation: str,
+        database_file_identity: tuple[int, int],
+        source_binding: Mapping[str, object],
+        asset_id: str,
+        source_id: str,
+        analysis_profile: Mapping[str, object],
+        expected_head: Mapping[str, object] | None,
+        enqueue_scope: str,
+        idempotency_key: str,
+    ) -> dict[str, object]: ...
+
+
+@dataclass(frozen=True)
+class ImageImportEnqueueAuthority:
+    """Server-derived authority for image jobs created by one HTTP import."""
+
+    runtime_generation: str
+    database_file_identity: tuple[int, int]
+    operation_id: str
+
+    def key_for(self, *, asset_id: str, source_id: str) -> str:
+        material = f"{self.operation_id}\0{asset_id}\0{source_id}"
+        return f"image-import-{hashlib.sha256(material.encode()).hexdigest()}"
 
 
 @dataclass(frozen=True)
@@ -22,17 +71,56 @@ class PreparedMediaAsset:
     file_size: int
     mtime_ns: int
     source_file_id: str
+    source_identity: "FileIdentity"
     width: int | None = None
     height: int | None = None
     probe_error: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass
 class MediaImportPlan:
     dry_run: bool
     kinds: list[str]
     assets: list[PreparedMediaAsset]
     rejected: list[dict[str, object]]
+    root_permission_fingerprint: str | None = None
+    pinned_root: "PinnedLibraryRoot | None" = field(default=None, repr=False, compare=False)
+    pinned_sources: tuple["PinnedMediaSource", ...] = field(
+        default=(),
+        repr=False,
+        compare=False,
+    )
+    _closed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def verify_source_bindings(self) -> None:
+        if self._closed:
+            raise ValueError("Prepared media import source bindings are closed.")
+        if self.pinned_root is not None:
+            self.pinned_root.verify_current_path_identity()
+        by_path = {source.relative_path.as_posix(): source for source in self.pinned_sources}
+        for asset in self.assets:
+            source = by_path.get(asset.relative_path)
+            if source is None or source.identity != asset.source_identity:
+                raise ValueError("Prepared media import source binding is incomplete.")
+            source.verify_current_identity()
+
+    @property
+    def has_enqueueable_image(self) -> bool:
+        return not self.dry_run and any(
+            item.kind == "image" and item.probe_error is None for item in self.assets
+        )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        for source in self.pinned_sources:
+            source.close()
+        if self.pinned_root is not None:
+            self.pinned_root.close()
+        self._closed = True
+
+    def __del__(self) -> None:
+        self.close()
 
 
 @dataclass(frozen=True)
@@ -59,8 +147,14 @@ def apply_import_plan(
     *,
     root_id: str,
     plan: MediaImportPlan,
+    image_enqueue: ImageAnalysisTransactionEnqueuer | None = None,
+    image_authority: ImageImportEnqueueAuthority | None = None,
 ) -> MediaImportResult:
     """Apply one prepared manifest using only the caller-owned transaction."""
+
+    if (image_enqueue is None) != (image_authority is None):
+        raise RuntimeError("Image import enqueue authority is incomplete.")
+    plan.verify_source_bindings()
 
     assets: list[dict[str, object]] = []
     jobs_by_id: dict[str, dict[str, object]] = {}
@@ -98,6 +192,17 @@ def apply_import_plan(
             rejection = _apply_image_probe(connection, item=item, asset=asset)
             if rejection is not None:
                 rejected.append(rejection)
+            elif image_enqueue is not None and image_authority is not None:
+                job = _schedule_image_analysis_job(
+                    connection,
+                    item=item,
+                    asset=asset,
+                    root_id=root_id,
+                    root_permission_fingerprint=plan.root_permission_fingerprint,
+                    enqueue=image_enqueue,
+                    authority=image_authority,
+                )
+                jobs_by_id.setdefault(str(job["id"]), job)
         else:
             job = _schedule_video_job(
                 connection,
@@ -109,7 +214,7 @@ def apply_import_plan(
                 jobs_by_id.setdefault(str(job["id"]), job)
         assets.append(asset)
 
-    return MediaImportResult(
+    result = MediaImportResult(
         dry_run=plan.dry_run,
         kinds=list(plan.kinds),
         assets=assets,
@@ -118,6 +223,10 @@ def apply_import_plan(
         skipped=skipped,
         rejected=rejected,
     )
+    # A root/leaf replacement during the transaction invalidates every domain
+    # write by raising before the caller can commit it.
+    plan.verify_source_bindings()
+    return result
 
 
 def _database_uuid(connection: sqlite3.Connection) -> str:
@@ -273,6 +382,71 @@ def _apply_image_probe(
     )
     asset["probe_status"] = "ready"
     return None
+
+
+def _schedule_image_analysis_job(
+    connection: sqlite3.Connection,
+    *,
+    item: PreparedMediaAsset,
+    asset: Mapping[str, object],
+    root_id: str,
+    root_permission_fingerprint: str | None,
+    enqueue: ImageAnalysisTransactionEnqueuer,
+    authority: ImageImportEnqueueAuthority,
+) -> dict[str, object]:
+    """Pass exact pinned import facts to the canonical core admission boundary."""
+
+    if root_permission_fingerprint is None:
+        raise RuntimeError("Prepared image import root authority is missing.")
+    asset_id = str(asset.get("id") or "")
+    source_id = str(asset.get("asset_source_id") or "")
+    if not asset_id or not source_id:
+        raise RuntimeError("Prepared image import identity is incomplete.")
+    expected_row = connection.execute(
+        """SELECT analysis_run_id,revision,content_sha256
+             FROM image_analysis_heads WHERE asset_id=?""",
+        (asset_id,),
+    ).fetchone()
+    expected_head = dict(expected_row) if expected_row is not None else None
+    identity = item.source_identity
+    identity_material = (
+        f"{identity.device}\0{identity.inode}\0{identity.size}\0"
+        f"{identity.mtime_ns}\0{identity.ctime_ns}"
+    )
+    source_binding: dict[str, object] = {
+        "source_id": source_id,
+        "library_root_id": root_id,
+        "relative_path": item.relative_path,
+        "observed_size": identity.size,
+        "observed_mtime_ns": identity.mtime_ns,
+        "observed_ctime_ns": identity.ctime_ns,
+        "source_device": identity.device,
+        "source_inode": identity.inode,
+        "file_identity_sha256": hashlib.sha256(identity_material.encode()).hexdigest(),
+        "root_permission_fingerprint": root_permission_fingerprint,
+        "asset_id": asset_id,
+        "input_asset_sha256": item.sha256,
+    }
+    job = enqueue(
+        connection,
+        runtime_generation=authority.runtime_generation,
+        database_file_identity=authority.database_file_identity,
+        source_binding=source_binding,
+        asset_id=asset_id,
+        source_id=source_id,
+        analysis_profile=IMAGE_ANALYSIS_PROFILE,
+        expected_head=expected_head,
+        enqueue_scope=IMAGE_IMPORT_ENQUEUE_SCOPE,
+        idempotency_key=authority.key_for(asset_id=asset_id, source_id=source_id),
+    )
+    if (
+        not isinstance(job, dict)
+        or not job.get("id")
+        or job.get("kind") != "image_analysis"
+        or job.get("asset_id") != asset_id
+    ):
+        raise RuntimeError("Canonical image enqueue returned an invalid job.")
+    return job
 
 
 def _schedule_video_job(

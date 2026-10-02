@@ -13,23 +13,46 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from backend.src.media.video import (
     IMAGE_EXTENSIONS,
+    MEDIA_JOB_KIND_REGISTRY,
     VIDEO_EXTENSIONS,
-    discover_media,
     mime_type_for,
 )
 from core.media_db import MediaRepository
 
 from .import_plan import (
+    ImageAnalysisTransactionEnqueuer,
+    ImageImportEnqueueAuthority,
     MediaImportPlan,
     MediaImportResult,
     PreparedMediaAsset,
     apply_import_plan,
 )
+from .source_identity import (
+    PinnedMediaSource,
+    collect_media_relative_paths,
+    open_pinned_media_source,
+    pinned_root_permission_fingerprint,
+)
+from indexing.files import open_pinned_library_root
 
 
 MAX_IMPORT_FILES = 500
 MAX_IMPORT_BYTES = 20 * 1024 * 1024 * 1024
 IMPORT_TIMEOUT_SECONDS = 30.0
+SERVER_OWNED_IMAGE_AUTHORITY_FIELDS = frozenset(
+    {
+        "analysis_profile",
+        "asset_id",
+        "database_device",
+        "database_file_identity",
+        "database_inode",
+        "enqueue_scope",
+        "expected_head",
+        "runtime_generation",
+        "source_binding",
+        "source_id",
+    }
+)
 
 
 class MediaJobSubmitter(Protocol):
@@ -74,7 +97,7 @@ class MediaImportService:
         root: Path,
         payload: Mapping[str, object],
     ) -> MediaImportResult:
-        plan = self.prepare_import(root=root, payload=payload)
+        plan = self.prepare_import(root_id=root_id, root=root, payload=payload)
         with self.repository.transaction(immediate=True) as connection:
             result = self.apply_prepared(connection, root_id=root_id, plan=plan)
         self.submit_jobs(result.jobs)
@@ -83,6 +106,7 @@ class MediaImportService:
     def prepare_import(
         self,
         *,
+        root_id: str,
         root: Path,
         payload: Mapping[str, object],
     ) -> MediaImportPlan:
@@ -90,46 +114,82 @@ class MediaImportService:
 
         options = self._parse_options(payload)
         deadline = self._clock() + IMPORT_TIMEOUT_SECONDS
-        paths = discover_media(
-            root,
-            recursive=options.recursive,
-            files=options.relative_paths,
-            extensions=self.supported_extensions(options.kinds),
-            max_files=MAX_IMPORT_FILES,
-            max_total_bytes=MAX_IMPORT_BYTES,
-            deadline=deadline,
-        )
+        pinned_root = open_pinned_library_root(root)
         assets: list[PreparedMediaAsset] = []
         rejected: list[dict[str, object]] = []
+        pinned_sources: list[PinnedMediaSource] = []
 
-        for path in paths:
-            self._require_time_remaining(deadline)
-            relative_path = path.relative_to(root).as_posix()
-            try:
-                assets.append(
-                    self._prepare_asset(
-                        path,
-                        relative_path=relative_path,
-                        deadline=deadline,
-                        probe_image=not options.dry_run,
+        try:
+            root_record = self.repository.library_root(root_id)
+            if (
+                root_record is None
+                or root_record.get("status") != "active"
+                or str(root_record.get("canonical_path") or "") != str(pinned_root.root_path)
+                or str(root_record.get("permission_fingerprint") or "")
+                != pinned_root_permission_fingerprint(pinned_root)
+            ):
+                raise ValueError(
+                    "Approved Library root does not match its persisted filesystem identity."
+                )
+            relative_paths = collect_media_relative_paths(
+                pinned_root,
+                recursive=options.recursive,
+                files=options.relative_paths,
+                extensions=self.supported_extensions(options.kinds),
+                max_files=MAX_IMPORT_FILES,
+                max_total_bytes=MAX_IMPORT_BYTES,
+                deadline=deadline,
+                clock=self._clock,
+            )
+            for relative in relative_paths:
+                self._require_time_remaining(deadline)
+                relative_path = relative.as_posix()
+                source: PinnedMediaSource | None = None
+                try:
+                    source = open_pinned_media_source(
+                        pinned_root=pinned_root,
+                        relative_path=relative,
+                        max_bytes=MAX_IMPORT_BYTES,
                     )
-                )
-            except (OSError, ValueError) as exc:
-                rejected.append(
-                    {
-                        "relative_path": relative_path,
-                        "code": "import_rejected",
-                        "message": str(exc),
-                        "retryable": False,
-                    }
-                )
+                    assets.append(
+                        self._prepare_asset(
+                            source,
+                            relative_path=relative_path,
+                            deadline=deadline,
+                            probe_image=not options.dry_run,
+                        )
+                    )
+                    pinned_sources.append(source)
+                    source = None
+                except (OSError, ValueError) as exc:
+                    rejected.append(
+                        {
+                            "relative_path": relative_path,
+                            "code": "import_rejected",
+                            "message": str(exc),
+                            "retryable": False,
+                        }
+                    )
+                finally:
+                    if source is not None:
+                        source.close()
 
-        return MediaImportPlan(
-            dry_run=options.dry_run,
-            kinds=options.kinds,
-            assets=assets,
-            rejected=rejected,
-        )
+            return MediaImportPlan(
+                dry_run=options.dry_run,
+                kinds=options.kinds,
+                assets=assets,
+                rejected=rejected,
+                root_permission_fingerprint=pinned_root_permission_fingerprint(
+                    pinned_root
+                ),
+                pinned_root=pinned_root,
+                pinned_sources=tuple(pinned_sources),
+            )
+        except Exception:
+            for source in pinned_sources:
+                source.close()
+            pinned_root.close()
+            raise
 
     @staticmethod
     def apply_prepared(
@@ -137,8 +197,21 @@ class MediaImportService:
         *,
         root_id: str,
         plan: MediaImportPlan,
+        image_enqueue: ImageAnalysisTransactionEnqueuer | None = None,
+        image_authority: ImageImportEnqueueAuthority | None = None,
+        retain_source_bindings: bool = False,
     ) -> MediaImportResult:
-        return apply_import_plan(connection, root_id=root_id, plan=plan)
+        try:
+            return apply_import_plan(
+                connection,
+                root_id=root_id,
+                plan=plan,
+                image_enqueue=image_enqueue,
+                image_authority=image_authority,
+            )
+        finally:
+            if not retain_source_bindings:
+                plan.close()
 
     def submit_jobs(self, jobs: list[dict[str, object]]) -> None:
         """Dispatch only committed work that still needs a process-local runner."""
@@ -150,9 +223,16 @@ class MediaImportService:
                 continue
             submitted.add(job_id)
             current = self.repository.get_media_job(job_id)
+            kind = current.get("kind") if current is not None else None
+            admitted_statuses = (
+                {"queued"}
+                if kind == "image_analysis"
+                else {"queued", "interrupted"}
+            )
             if (
                 current is None
-                or current.get("status") not in {"queued", "interrupted"}
+                or kind not in MEDIA_JOB_KIND_REGISTRY
+                or current.get("status") not in admitted_statuses
                 or bool(current.get("cancel_requested"))
             ):
                 continue
@@ -160,6 +240,13 @@ class MediaImportService:
 
     @staticmethod
     def _parse_options(payload: Mapping[str, object]) -> _ImportOptions:
+        forbidden = sorted(SERVER_OWNED_IMAGE_AUTHORITY_FIELDS.intersection(payload))
+        if forbidden:
+            raise ValueError(
+                "Image analysis authority fields are server-derived and cannot be supplied: "
+                + ", ".join(forbidden)
+                + "."
+            )
         recursive = payload.get("recursive", True)
         dry_run = payload.get("dry_run", False)
         if not isinstance(recursive, bool) or not isinstance(dry_run, bool):
@@ -189,24 +276,24 @@ class MediaImportService:
 
     def _prepare_asset(
         self,
-        path: Path,
+        source: PinnedMediaSource,
         *,
         relative_path: str,
         deadline: float,
         probe_image: bool,
     ) -> PreparedMediaAsset:
         digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            before = os.fstat(handle.fileno())
-            if not stat.S_ISREG(before.st_mode):
-                raise ValueError("Media source must be a regular non-symlink file.")
+        before = os.fstat(source.descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("Media source must be a regular non-symlink file.")
+        with source.open_handle() as handle:
             while True:
                 self._require_time_remaining(deadline)
                 chunk = handle.read(1024 * 1024)
                 if not chunk:
                     break
                 digest.update(chunk)
-            kind = "video" if path.suffix.casefold() in VIDEO_EXTENSIONS else "image"
+            kind = "video" if source.relative_path.suffix.casefold() in VIDEO_EXTENSIONS else "image"
             width: int | None = None
             height: int | None = None
             probe_error: str | None = None
@@ -219,22 +306,19 @@ class MediaImportService:
                     probe_error = str(exc)
             self._require_time_remaining(deadline)
             after = os.fstat(handle.fileno())
-
-        current = path.lstat()
-        identities = {
-            (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns) for value in (before, after, current)
-        }
-        if stat.S_ISLNK(current.st_mode) or not stat.S_ISREG(current.st_mode) or len(identities) != 1:
+        if source.identity != source.identity.from_stat(after):
             raise ValueError("Media source changed while the import manifest was prepared.")
+        source.verify_current_identity()
         return PreparedMediaAsset(
             kind=kind,
-            filename=path.name,
+            filename=source.relative_path.name,
             relative_path=relative_path,
             sha256=digest.hexdigest(),
-            mime_type=mime_type_for(path, kind),
+            mime_type=mime_type_for(source.relative_path, kind),
             file_size=before.st_size,
             mtime_ns=before.st_mtime_ns,
             source_file_id=str(before.st_ino),
+            source_identity=source.identity,
             width=width,
             height=height,
             probe_error=probe_error,

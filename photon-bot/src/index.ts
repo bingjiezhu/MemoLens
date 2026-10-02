@@ -11,12 +11,13 @@ export async function startBot(): Promise<void> {
   const backendClient = new BackendClient(config);
   const sessionStore = new SessionStore(config.sessionTtlMinutes);
   const activeChats = new Set<string>();
+  const adapter = new DiscordAdapter(config);
   const agent = createAgent({
     config,
     backendClient,
     sessionStore,
+    requireMessageAdmission: (message) => adapter.requireAdmittedMessage(message),
   });
-  const adapter = new DiscordAdapter(config);
 
   registerShutdown(adapter);
 
@@ -42,7 +43,7 @@ export async function startBot(): Promise<void> {
         await adapter.sendReply(message.chatId, {
           text: "I am still working on the previous request in this channel. Give me a moment, then try again.",
           imagePaths: [],
-        });
+        }, message.admission);
         return;
       }
 
@@ -66,7 +67,7 @@ export async function startBot(): Promise<void> {
       }
 
       try {
-        await adapter.sendReply(message.chatId, reply);
+        await adapter.sendReply(message.chatId, reply, message.admission);
       } catch (error) {
         log(config.logLevel, "error", "Sending reply failed.", {
           error: error instanceof Error ? error.message : String(error),

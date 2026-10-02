@@ -1,19 +1,16 @@
 # Spec 005：MemoLens Video Creative Workbench
 
-原先怎么写 / 入门统一叙事：状态为 `PROPOSED`（不表示已实现或可发布）；产品能力代号 MemoLens `0.2.0` Video Creative Workbench；实际发布版本 `TBD`，因仓库已有不可变 `v0.2.0` 标签，实现产物 MUST 使用更高 SemVer（预期 `0.3.0`）。
+> **Supersession note（2026-08-22）**：本规范中已经存在的 segment evidence、typed Timeline revision/diff、validation、preview/render 和原件不动规则继续保留；涉及 Codex-only、内置/本地模型优先、固定创作确认点、发布后才记录 usage 或创作主链的表述，由 [43 问产品对齐记录](product-decisions-43-questions-2026-08-22.md) 以及 [ML-014](014-agent-navigable-media-wiki/spec.md)–[ML-018](018-script-coverage-global-footage-assignment/spec.md) 细化并覆盖。代码状态仍以本文件的实现审计为准，不因新目标自动变为已实现。
 
-代码与发布核对后的现状：该工作台已随 **0.3.0** 进入仓库，当前产品版本是 **0.5.0**。下文仍是当时的设计合同（含当时未实施项与发布门槛），不是一份尚未开工的提案。
-
-为什么会有这样的更新：GitHub README 链到本文件。继续只写 `PROPOSED` 会让后来者以为视频初剪还没做。Spec 004《Evidence-Backed Retrieval & Privacy Benchmark》当时被列为 RC 门槛，**本仓库没有这份文件**；检索/隐私约束以 `SECURITY.md`、`docs/product-strategy.md` 和测试为准。
-
-- 状态：`SHIPPED`（0.3.0+；正文仍保留提案期措辞）
-- 产品能力代号：MemoLens `0.2.0` Video Creative Workbench（提案名）
-- 实际发布版本：`0.3.0` 起；**MUST NOT** 重打、移动或覆盖 `v0.2.0`
+- 状态：`PARTIALLY IMPLEMENTED / VALIDATION REQUIRED`（grounded brief、segment evidence、timeline revision/diff/validation 与 720p preview 已实现；最终 1080p export 尚未交付）
+- 组合决策：[2026-08-20 Spec ↔ 实现决策复核](implementation-decisions-2026-08-20.md)；保留现有证据链，不把本状态误写为全部 User Story 已完成
+- 产品能力代号：MemoLens `0.2.0` Video Creative Workbench
+- 实际发布版本：`TBD`；由于仓库已有不可变 `v0.2.0` 标签，实现产物 **MUST** 使用更高的 SemVer（预期 `0.3.0`），**MUST NOT** 重打、移动或覆盖 `v0.2.0`
 - API 版本：`v1` 路径不变；响应增加 `schema_version`
-- 数据库目标版本：`2`（后续 0.5.0 将媒体库升到 `3`，见 Spec 006）
+- 数据库目标版本：`2`
 - 负责人：MemoLens maintainers
-- 最后更新：2026-08-14
-- 依赖规范：Spec 004 未收入本仓库；不要把它当作可点击的文档链接
+- 最后更新：2026-08-22（增加产品决策 supersession；主体实现审计仍为 2026-08-12/20）
+- 依赖规范：[Spec 004《MemoLens Evidence-Backed Retrieval & Privacy Benchmark》](004-evidence-backed-retrieval-privacy-benchmark/spec.md)（RC 前 **MUST** 固定 benchmark run、数据 manifest 与 commit SHA）
 
 本文使用 RFC 2119 风格术语：**MUST（必须）**、**MUST NOT（禁止）**、**SHOULD（应该）**、**SHOULD NOT（不应该）**、**MAY（可以）**。
 

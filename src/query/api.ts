@@ -2,6 +2,7 @@ import { analyzePrompt } from "./studio";
 import type {
   AtlasBasket,
   AtlasAsset,
+  AtlasCanonicalImageObservation,
   AtlasLens,
   AtlasMemoryDetail,
   AtlasMode,
@@ -20,6 +21,11 @@ import type {
 
 interface RetrievalApiImage {
   id: string;
+  asset_id: string;
+  analysis_status: "current";
+  analysis_binding: AtlasCanonicalImageObservation["analysis_binding"];
+  projection: AtlasCanonicalImageObservation["projection"];
+  canonical_image_observation: AtlasCanonicalImageObservation;
   filename: string;
   relative_path: string;
   taken_at: string | null;
@@ -125,6 +131,7 @@ interface AtlasRequestOptions {
   limit?: number;
   clusterId?: string | null;
   assetIds?: string[];
+  assetObservations?: Array<AtlasCanonicalImageObservation | undefined>;
   selectedMemoryIds?: string[];
   inspirationId?: string | null;
   previewWidth?: number;
@@ -248,6 +255,344 @@ function buildAtlasPayload(options: AtlasRequestOptions): Record<string, unknown
   };
 }
 
+type UnknownRecord = Record<string, unknown>;
+
+const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: UnknownRecord, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length
+    && actual.every((key, index) => key === expected[index]);
+}
+
+function invalidAtlasObservation(): never {
+  throw new Error(
+    "Atlas response did not preserve an exact verified-current image observation.",
+  );
+}
+
+function normalizeAnalysisBinding(
+  value: unknown,
+): AtlasCanonicalImageObservation["analysis_binding"] {
+  if (
+    !isRecord(value)
+    || !hasExactKeys(value, ["analysis_run_id", "revision", "content_sha256"])
+    || typeof value.analysis_run_id !== "string"
+    || value.analysis_run_id.length === 0
+    || value.analysis_run_id.length > 200
+    || !Number.isSafeInteger(value.revision)
+    || Number(value.revision) < 1
+    || typeof value.content_sha256 !== "string"
+    || !SHA256_PATTERN.test(value.content_sha256)
+  ) {
+    return invalidAtlasObservation();
+  }
+  return {
+    analysis_run_id: value.analysis_run_id,
+    revision: Number(value.revision),
+    content_sha256: value.content_sha256,
+  };
+}
+
+function normalizeProjection(
+  value: unknown,
+): AtlasCanonicalImageObservation["projection"] {
+  const fields = [
+    "status",
+    "generation_id",
+    "processing_generation_id",
+    "receipt_sha256",
+    "row_sha256",
+    "reason_code",
+  ] as const;
+  if (
+    !isRecord(value)
+    || !hasExactKeys(value, fields)
+    || value.status !== "current"
+    || typeof value.generation_id !== "string"
+    || value.generation_id.length === 0
+    || value.generation_id.length > 200
+    || typeof value.processing_generation_id !== "string"
+    || value.processing_generation_id.length === 0
+    || value.processing_generation_id.length > 200
+    || typeof value.receipt_sha256 !== "string"
+    || !SHA256_PATTERN.test(value.receipt_sha256)
+    || typeof value.row_sha256 !== "string"
+    || !SHA256_PATTERN.test(value.row_sha256)
+    || value.reason_code !== null
+  ) {
+    return invalidAtlasObservation();
+  }
+  return {
+    status: "current",
+    generation_id: value.generation_id,
+    processing_generation_id: value.processing_generation_id,
+    receipt_sha256: value.receipt_sha256,
+    row_sha256: value.row_sha256,
+    reason_code: null,
+  };
+}
+
+const IMAGE_STAGE_NAMES = [
+  "metadata",
+  "geocode",
+  "vision",
+  "embedding",
+  "quality",
+] as const;
+const IMAGE_STAGE_STATUSES = new Set([
+  "succeeded",
+  "partial",
+  "unsupported",
+  "disabled",
+  "failed",
+  "unknown",
+]);
+
+function normalizeStages(
+  value: unknown,
+): AtlasCanonicalImageObservation["stages"] {
+  if (!isRecord(value) || !hasExactKeys(value, IMAGE_STAGE_NAMES)) {
+    return invalidAtlasObservation();
+  }
+  const normalized: UnknownRecord = {};
+  for (const name of IMAGE_STAGE_NAMES) {
+    const stage = value[name];
+    if (
+      !isRecord(stage)
+      || !hasExactKeys(stage, ["status", "provenance", "output", "reason_code"])
+      || typeof stage.status !== "string"
+      || !IMAGE_STAGE_STATUSES.has(stage.status)
+      || !isRecord(stage.provenance)
+      || !hasExactKeys(stage.provenance, [
+        "producer_id",
+        "producer_version",
+        "model_id",
+        "model_version",
+        "rule_id",
+        "rule_version",
+      ])
+      || typeof stage.provenance.producer_id !== "string"
+      || typeof stage.provenance.producer_version !== "string"
+      || (stage.provenance.model_id !== null
+        && typeof stage.provenance.model_id !== "string")
+      || (stage.provenance.model_version !== null
+        && typeof stage.provenance.model_version !== "string")
+      || (stage.provenance.rule_id !== null
+        && typeof stage.provenance.rule_id !== "string")
+      || (stage.provenance.rule_version !== null
+        && typeof stage.provenance.rule_version !== "string")
+      || (stage.output !== null && !isRecord(stage.output))
+      || (stage.reason_code !== null && typeof stage.reason_code !== "string")
+    ) {
+      return invalidAtlasObservation();
+    }
+    normalized[name] = {
+      status: stage.status,
+      provenance: { ...stage.provenance },
+      output: stage.output === null ? null : { ...stage.output },
+      reason_code: stage.reason_code,
+    };
+  }
+  return normalized as AtlasCanonicalImageObservation["stages"];
+}
+
+function sameAnalysisBinding(
+  left: AtlasCanonicalImageObservation["analysis_binding"],
+  right: AtlasCanonicalImageObservation["analysis_binding"],
+): boolean {
+  return left.analysis_run_id === right.analysis_run_id
+    && left.revision === right.revision
+    && left.content_sha256 === right.content_sha256;
+}
+
+function sameProjection(
+  left: AtlasCanonicalImageObservation["projection"],
+  right: AtlasCanonicalImageObservation["projection"],
+): boolean {
+  return left.status === right.status
+    && left.generation_id === right.generation_id
+    && left.processing_generation_id === right.processing_generation_id
+    && left.receipt_sha256 === right.receipt_sha256
+    && left.row_sha256 === right.row_sha256
+    && left.reason_code === right.reason_code;
+}
+
+export function normalizeAtlasCanonicalImageObservation(
+  value: unknown,
+  expectedAssetId: string,
+): AtlasCanonicalImageObservation {
+  if (
+    !isRecord(value)
+    || !hasExactKeys(value, [
+      "object",
+      "schema_version",
+      "status",
+      "authority",
+      "provenance_status",
+      "asset_id",
+      "analysis_binding",
+      "source_binding_sha256",
+      "projection",
+      "stages",
+      "reason_code",
+    ])
+    || value.object !== "memolens.canonical_image_observation"
+    || value.schema_version !== "1"
+    || value.status !== "current"
+    || value.authority !== "canonical_image_analysis"
+    || value.provenance_status !== "verified_current"
+    || value.asset_id !== expectedAssetId
+    || typeof value.source_binding_sha256 !== "string"
+    || !SHA256_PATTERN.test(value.source_binding_sha256)
+    || value.reason_code !== null
+  ) {
+    return invalidAtlasObservation();
+  }
+  return {
+    object: "memolens.canonical_image_observation",
+    schema_version: "1",
+    status: "current",
+    authority: "canonical_image_analysis",
+    provenance_status: "verified_current",
+    asset_id: expectedAssetId,
+    analysis_binding: normalizeAnalysisBinding(value.analysis_binding),
+    source_binding_sha256: value.source_binding_sha256,
+    projection: normalizeProjection(value.projection),
+    stages: normalizeStages(value.stages),
+    reason_code: null,
+  };
+}
+
+const ATLAS_GENERATE_MAX_CONTEXT_ASSETS = 24;
+const ATLAS_ASSET_OBSERVATIONS_MAX_CANONICAL_BYTES = 256 * 1024;
+
+function exactAtlasGenerateObservations(
+  options: AtlasRequestOptions,
+): AtlasCanonicalImageObservation[] | undefined {
+  const assetIds = options.assetIds;
+  const observations = options.assetObservations;
+  if (!assetIds || assetIds.length === 0) {
+    if (observations && observations.length > 0) {
+      return invalidAtlasObservation();
+    }
+    return undefined;
+  }
+  if (
+    assetIds.length > ATLAS_GENERATE_MAX_CONTEXT_ASSETS
+    || new Set(assetIds).size !== assetIds.length
+    || !observations
+    || observations.length !== assetIds.length
+  ) {
+    return invalidAtlasObservation();
+  }
+  const normalized = observations.map((observation, index) =>
+    normalizeAtlasCanonicalImageObservation(observation, assetIds[index]),
+  );
+  if (
+    new TextEncoder().encode(JSON.stringify(normalized)).byteLength
+    > ATLAS_ASSET_OBSERVATIONS_MAX_CANONICAL_BYTES
+  ) {
+    return invalidAtlasObservation();
+  }
+  return normalized;
+}
+
+export function normalizeAtlasAsset(value: unknown): AtlasAsset {
+  if (
+    !isRecord(value)
+    || value.object !== "atlas.asset"
+    || typeof value.id !== "string"
+    || value.id.length === 0
+    || value.asset_id !== value.id
+    || value.analysis_status !== "current"
+  ) {
+    return invalidAtlasObservation();
+  }
+  const observation = normalizeAtlasCanonicalImageObservation(
+    value.canonical_image_observation,
+    value.id,
+  );
+  const binding = normalizeAnalysisBinding(value.analysis_binding);
+  const projection = normalizeProjection(value.projection);
+  if (
+    !sameAnalysisBinding(binding, observation.analysis_binding)
+    || !sameProjection(projection, observation.projection)
+  ) {
+    return invalidAtlasObservation();
+  }
+  return {
+    ...value,
+    asset_id: value.id,
+    analysis_status: "current",
+    analysis_binding: binding,
+    projection,
+    canonical_image_observation: observation,
+  } as AtlasAsset;
+}
+
+function looksLikeAtlasAsset(value: UnknownRecord): boolean {
+  return value.object === "atlas.asset"
+    || (
+      "relative_path" in value
+      && "layout_version" in value
+      && "cluster_id" in value
+      && "quality_score" in value
+    );
+}
+
+function normalizeAtlasTree<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeAtlasTree(item)) as T;
+  }
+  if (!isRecord(value)) {
+    return value;
+  }
+  if (looksLikeAtlasAsset(value)) {
+    return normalizeAtlasAsset(value) as T;
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, normalizeAtlasTree(item)]),
+  ) as T;
+}
+
+function normalizeAtlasRetrievalImage(value: unknown): RetrievalApiImage {
+  if (
+    !isRecord(value)
+    || typeof value.id !== "string"
+    || value.id.length === 0
+    || value.asset_id !== value.id
+    || value.analysis_status !== "current"
+  ) {
+    return invalidAtlasObservation();
+  }
+  const observation = normalizeAtlasCanonicalImageObservation(
+    value.canonical_image_observation,
+    value.id,
+  );
+  const binding = normalizeAnalysisBinding(value.analysis_binding);
+  const projection = normalizeProjection(value.projection);
+  if (
+    !sameAnalysisBinding(binding, observation.analysis_binding)
+    || !sameProjection(projection, observation.projection)
+  ) {
+    return invalidAtlasObservation();
+  }
+  return {
+    ...value,
+    asset_id: value.id,
+    analysis_status: "current",
+    analysis_binding: binding,
+    projection,
+    canonical_image_observation: observation,
+  } as unknown as RetrievalApiImage;
+}
+
 function inferSlot(image: RetrievalApiImage, index: number): string {
   const searchable = `${image.filename} ${image.description} ${image.tags.join(" ")}`.toLowerCase();
   const matched = SLOT_KEYWORDS.find(({ keywords }) =>
@@ -291,6 +636,10 @@ function toPhotoAsset(
     imageUrl,
     score: image.score,
     matchedTerms: image.matched_terms,
+    canonicalImageObservation: normalizeAtlasCanonicalImageObservation(
+      image.canonical_image_observation,
+      image.id,
+    ),
   };
 }
 
@@ -441,13 +790,17 @@ export async function fetchDraftFromBackend(
   if (payload.status !== "completed" || !Array.isArray(payload.data) || payload.data.length === 0) {
     return null;
   }
+  const normalizedPayload: RetrievalApiResponse = {
+    ...payload,
+    data: payload.data.map(normalizeAtlasRetrievalImage),
+  };
 
   if (options.onCopyUpdate) {
     void fetchGeneratedCopyFromBackend({
       apiBase,
       prompt,
       imageLibraryDir: options.imageLibraryDir,
-      images: payload.data,
+      images: normalizedPayload.data,
       signal: options.signal,
     })
       .then((copyUpdate) => {
@@ -459,7 +812,7 @@ export async function fetchDraftFromBackend(
   }
 
   return buildDraftResult({
-    payload,
+    payload: normalizedPayload,
     prompt,
     variant,
     apiBase,
@@ -538,17 +891,23 @@ export function atlasAssetToPhotoAsset(
   apiBase: string,
   imageLibraryDir: string | null | undefined,
 ): PhotoAsset {
+  const normalized = normalizeAtlasAsset(asset);
   return toPhotoAsset(
     {
-      id: asset.id,
-      filename: asset.filename,
-      relative_path: asset.relative_path,
-      taken_at: asset.taken_at,
-      place_name: asset.place_name,
-      country: asset.country,
-      description: asset.description,
-      tags: asset.tags,
-      score: asset.quality_score,
+      id: normalized.id,
+      asset_id: normalized.asset_id,
+      analysis_status: normalized.analysis_status,
+      analysis_binding: normalized.analysis_binding,
+      projection: normalized.projection,
+      canonical_image_observation: normalized.canonical_image_observation,
+      filename: normalized.filename,
+      relative_path: normalized.relative_path,
+      taken_at: normalized.taken_at,
+      place_name: normalized.place_name,
+      country: normalized.country,
+      description: normalized.description,
+      tags: normalized.tags,
+      score: normalized.quality_score,
       matched_terms: [],
     },
     index,
@@ -582,11 +941,11 @@ export async function fetchAtlasOverview(
   appendAtlasSearchParams(params, options);
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`${apiBase}/v1/atlas/overview${suffix}`);
-  const payload = (await response.json().catch(() => ({}))) as AtlasOverview & { message?: string };
+  const wire = (await response.json().catch(() => ({}))) as AtlasOverview & { message?: string };
   if (!response.ok) {
-    throw new Error(payload.message ?? `atlas overview failed with status ${response.status}`);
+    throw new Error(wire.message ?? `atlas overview failed with status ${response.status}`);
   }
-  return payload;
+  return normalizeAtlasTree(wire);
 }
 
 export async function fetchAtlasWorkbench(
@@ -599,11 +958,11 @@ export async function fetchAtlasWorkbench(
   const response = await fetch(`${apiBase}/v1/atlas/workbench${suffix}`, {
     signal: options.signal,
   });
-  const payload = (await response.json().catch(() => ({}))) as AtlasWorkbench & { message?: string };
+  const wire = (await response.json().catch(() => ({}))) as AtlasWorkbench & { message?: string };
   if (!response.ok) {
-    throw new Error(payload.message ?? `atlas workbench failed with status ${response.status}`);
+    throw new Error(wire.message ?? `atlas workbench failed with status ${response.status}`);
   }
-  return payload;
+  return normalizeAtlasTree(wire);
 }
 
 export async function fetchAtlasBasket(
@@ -618,14 +977,14 @@ export async function fetchAtlasBasket(
   const response = await fetch(`${apiBase}/v1/atlas/basket${suffix}`, {
     signal: options.signal,
   });
-  const payload = (await response.json().catch(() => ({}))) as {
+  const wire = (await response.json().catch(() => ({}))) as {
     message?: string;
     basket?: AtlasBasket;
   };
-  if (!response.ok || !payload.basket) {
-    throw new Error(payload.message ?? `atlas basket failed with status ${response.status}`);
+  if (!response.ok || !wire.basket) {
+    throw new Error(wire.message ?? `atlas basket failed with status ${response.status}`);
   }
-  return payload.basket;
+  return normalizeAtlasTree(wire.basket);
 }
 
 export async function fetchAtlasMemoryDetail(
@@ -639,11 +998,11 @@ export async function fetchAtlasMemoryDetail(
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`${apiBase}/v1/atlas/memory/${encodeURIComponent(memoryId)}${suffix}`);
-  const payload = (await response.json().catch(() => ({}))) as AtlasMemoryDetail & { message?: string };
+  const wire = (await response.json().catch(() => ({}))) as AtlasMemoryDetail & { message?: string };
   if (!response.ok) {
-    throw new Error(payload.message ?? `atlas memory failed with status ${response.status}`);
+    throw new Error(wire.message ?? `atlas memory failed with status ${response.status}`);
   }
-  return payload;
+  return normalizeAtlasTree(wire);
 }
 
 export async function fetchAtlasCleanup(
@@ -656,11 +1015,11 @@ export async function fetchAtlasCleanup(
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`${apiBase}/v1/atlas/cleanup${suffix}`);
-  const payload = (await response.json().catch(() => ({}))) as AtlasWorkbench["cleanup"] & { message?: string };
+  const wire = (await response.json().catch(() => ({}))) as AtlasWorkbench["cleanup"] & { message?: string };
   if (!response.ok) {
-    throw new Error(payload.message ?? `atlas cleanup failed with status ${response.status}`);
+    throw new Error(wire.message ?? `atlas cleanup failed with status ${response.status}`);
   }
-  return payload;
+  return normalizeAtlasTree(wire);
 }
 
 export async function searchAtlas(options: AtlasRequestOptions = {}): Promise<AtlasOverview> {
@@ -672,11 +1031,11 @@ export async function searchAtlas(options: AtlasRequestOptions = {}): Promise<At
     },
     body: JSON.stringify(buildAtlasPayload(options)),
   });
-  const payload = (await response.json().catch(() => ({}))) as AtlasOverview & { message?: string };
+  const wire = (await response.json().catch(() => ({}))) as AtlasOverview & { message?: string };
   if (!response.ok) {
-    throw new Error(payload.message ?? `atlas search failed with status ${response.status}`);
+    throw new Error(wire.message ?? `atlas search failed with status ${response.status}`);
   }
-  return payload;
+  return normalizeAtlasTree(wire);
 }
 
 export async function selectAtlas(options: AtlasRequestOptions = {}): Promise<AtlasOverview> {
@@ -688,11 +1047,11 @@ export async function selectAtlas(options: AtlasRequestOptions = {}): Promise<At
     },
     body: JSON.stringify(buildAtlasPayload(options)),
   });
-  const payload = (await response.json().catch(() => ({}))) as AtlasOverview & { message?: string };
+  const wire = (await response.json().catch(() => ({}))) as AtlasOverview & { message?: string };
   if (!response.ok) {
-    throw new Error(payload.message ?? `atlas select failed with status ${response.status}`);
+    throw new Error(wire.message ?? `atlas select failed with status ${response.status}`);
   }
-  return payload;
+  return normalizeAtlasTree(wire);
 }
 
 export async function fetchAtlasQueryPreview(
@@ -710,11 +1069,11 @@ export async function fetchAtlasQueryPreview(
       text,
     }),
   });
-  const payload = (await response.json().catch(() => ({}))) as AtlasQueryPreview & { message?: string };
+  const wire = (await response.json().catch(() => ({}))) as AtlasQueryPreview & { message?: string };
   if (!response.ok) {
-    throw new Error(payload.message ?? `atlas query preview failed with status ${response.status}`);
+    throw new Error(wire.message ?? `atlas query preview failed with status ${response.status}`);
   }
-  return payload;
+  return normalizeAtlasTree(wire);
 }
 
 export async function sendAtlasFeedback(input: AtlasRequestOptions & {
@@ -762,11 +1121,11 @@ export async function saveAtlasBasket(input: AtlasRequestOptions & {
     }),
     signal: input.signal,
   });
-  const payload = (await response.json().catch(() => ({}))) as { message?: string; basket?: AtlasBasket };
-  if (!response.ok || !payload.basket) {
-    throw new Error(payload.message ?? `atlas basket failed with status ${response.status}`);
+  const wire = (await response.json().catch(() => ({}))) as { message?: string; basket?: AtlasBasket };
+  if (!response.ok || !wire.basket) {
+    throw new Error(wire.message ?? `atlas basket failed with status ${response.status}`);
   }
-  return payload.basket;
+  return normalizeAtlasTree(wire.basket);
 }
 
 export async function sendAtlasStackAction(input: AtlasRequestOptions & {
@@ -799,6 +1158,7 @@ export async function fetchAtlasDraftFromBackend(
   options: AtlasRequestOptions = {},
 ): Promise<DraftResult | null> {
   const apiBase = options.apiBase ?? "";
+  const assetObservations = exactAtlasGenerateObservations(options);
   const response = await fetch(`${apiBase}/v1/atlas/generate`, {
     method: "POST",
     headers: {
@@ -806,19 +1166,24 @@ export async function fetchAtlasDraftFromBackend(
     },
     body: JSON.stringify({
       ...buildAtlasPayload(options),
+      asset_observations: assetObservations,
       text: prompt,
       top_k: 9,
       include_copy: true,
     }),
     signal: options.signal,
   });
-  const payload = (await response.json().catch(() => ({}))) as RetrievalApiResponse;
+  const wire = (await response.json().catch(() => ({}))) as RetrievalApiResponse;
   if (!response.ok) {
-    throw new Error(payload.message ?? `atlas generate failed with status ${response.status}`);
+    throw new Error(wire.message ?? `atlas generate failed with status ${response.status}`);
   }
-  if (payload.status !== "completed" || !Array.isArray(payload.data) || payload.data.length === 0) {
+  if (wire.status !== "completed" || !Array.isArray(wire.data) || wire.data.length === 0) {
     return null;
   }
+  const payload = normalizeAtlasTree({
+    ...wire,
+    data: wire.data.map(normalizeAtlasRetrievalImage),
+  });
   return buildDraftResult({
     payload,
     prompt,

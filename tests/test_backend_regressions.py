@@ -17,20 +17,24 @@ import yaml
 
 from backend.src import (
     DESKTOP_TOKEN_HEADER,
+    MAIN_AUTHORITY_HEADER,
     MEMOLENS_API_VERSION,
     MEMOLENS_SERVICE_ID,
     build_runtime_extensions,
     create_app,
+    shutdown_runtime_extensions,
     swap_runtime,
 )
 from backend.src.api.routes import _is_local_remote_addr
 from backend.src.retrieval import RetrievalCopywriter
+from backend.src.retrieval.retrieval import CanonicalRetrievalResponse
 from core.config import Settings
 from core.db import ImageIndexRepository
+from core.image_analysis_contract import IMAGE_ANALYSIS_STAGES
 from core.media_db import MediaRepository
+from core.sqlite_runtime import UnsafeSQLiteRuntimeError
 from core.schemas import (
     GeneratedCopy,
-    RetrievalResponse,
     RetrievedImageSummary,
     StoredImageRecord,
 )
@@ -247,6 +251,75 @@ class ImageIndexRepositoryRegressionTests(unittest.TestCase):
                 )
 
 
+class BackendSQLiteAdmissionRegressionTests(unittest.TestCase):
+    def test_create_app_fails_before_flask_settings_directories_or_database(self) -> None:
+        unsafe = UnsafeSQLiteRuntimeError(
+            {
+                "sqlite_version": "3.47.1",
+                "wal_reset_safe": False,
+            }
+        )
+        with (
+            patch(
+                "backend.src.require_safe_sqlite_runtime",
+                side_effect=unsafe,
+            ) as admission,
+            patch("backend.src.Flask") as flask_factory,
+            patch("backend.src.Settings.from_env") as settings_factory,
+            patch("backend.src.configure_runtime") as configure,
+        ):
+            with self.assertRaises(UnsafeSQLiteRuntimeError) as captured:
+                create_app()
+
+        self.assertIs(captured.exception, unsafe)
+        self.assertEqual(captured.exception.code, "sqlite_wal_reset_unsafe")
+        admission.assert_called_once_with()
+        flask_factory.assert_not_called()
+        settings_factory.assert_not_called()
+        configure.assert_not_called()
+
+    def test_runtime_factory_fails_before_directories_or_database(self) -> None:
+        unsafe = UnsafeSQLiteRuntimeError(
+            {
+                "sqlite_version": "3.47.1",
+                "wal_reset_safe": False,
+            }
+        )
+        settings = unittest.mock.Mock()
+        settings.ensure_directories.side_effect = AssertionError(
+            "runtime factory touched directories before admission"
+        )
+
+        with patch(
+            "backend.src.require_safe_sqlite_runtime",
+            side_effect=unsafe,
+        ) as admission:
+            with self.assertRaises(UnsafeSQLiteRuntimeError) as captured:
+                build_runtime_extensions(settings)
+
+        self.assertIs(captured.exception, unsafe)
+        admission.assert_called_once_with()
+        settings.ensure_directories.assert_not_called()
+
+    def test_repository_is_not_closed_when_a_runner_cannot_quiesce(self) -> None:
+        media_runner = unittest.mock.Mock()
+        media_runner.shutdown.side_effect = RuntimeError("cancel write failed")
+        render_runner = unittest.mock.Mock()
+        repository = unittest.mock.Mock()
+
+        shutdown_runtime_extensions(
+            {
+                "media_job_runner": media_runner,
+                "render_job_runner": render_runner,
+                "media_repository": repository,
+            }
+        )
+
+        media_runner.shutdown.assert_called_once_with()
+        render_runner.shutdown.assert_called_once_with()
+        repository.close.assert_not_called()
+
+
 class BackendBoundaryRegressionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory(prefix="memolens-api-test-")
@@ -254,6 +327,7 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
         self.photos_dir = root / "photos"
         self.photos_dir.mkdir()
         self.desktop_token = "test-desktop-session-token"
+        self.main_token = "test-main-authority-token"
         self.desktop_headers = {DESKTOP_TOKEN_HEADER: self.desktop_token}
         self.environment = patch.dict(
             os.environ,
@@ -268,6 +342,7 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
                 "VERTEX_ACCESS_TOKEN": "",
                 "GOOGLE_OAUTH_ACCESS_TOKEN": "",
                 "MEMOLENS_DESKTOP_SESSION_TOKEN": self.desktop_token,
+                "MEMOLENS_MAIN_AUTHORITY_TOKEN": self.main_token,
             },
         )
         self.environment.start()
@@ -275,6 +350,7 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
         self.client = self.app.test_client()
 
     def tearDown(self) -> None:
+        shutdown_runtime_extensions(self.app.extensions)
         self.environment.stop()
         self.temporary_directory.cleanup()
 
@@ -295,20 +371,144 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             set(response.json),
-            {"status", "object", "service", "api_version", "challenge_proof"},
+            {
+                "status",
+                "object",
+                "service",
+                "api_version",
+                "challenge_proof",
+                "sqlite_runtime",
+            },
         )
         self.assertEqual(response.json["service"], MEMOLENS_SERVICE_ID)
         self.assertEqual(response.json["api_version"], MEMOLENS_API_VERSION)
         self.assertEqual(
             response.json["challenge_proof"],
             hmac.new(
-                self.desktop_token.encode(), challenge.encode(), "sha256"
+                self.desktop_token.encode(),
+                "\n".join(
+                    [
+                        "memolens.health.v1",
+                        f"challenge={challenge}",
+                        "object=health.check",
+                        "status=ok",
+                        f"service={MEMOLENS_SERVICE_ID}",
+                        f"api_version={MEMOLENS_API_VERSION}",
+                        f"policy_id={response.json['sqlite_runtime']['policy_id']}",
+                        f"sqlite_version={sqlite3.sqlite_version}",
+                        "wal_reset_safe=true",
+                        "journal_policy=wal",
+                    ]
+                ).encode(),
+                "sha256",
             ).hexdigest(),
+        )
+        self.assertEqual(
+            response.json["sqlite_runtime"],
+            {
+                "policy_id": self.app.config["SQLITE_RUNTIME_CAPABILITY"]["policy_id"],
+                "sqlite_version": sqlite3.sqlite_version,
+                "wal_reset_safe": True,
+                "journal_policy": "wal",
+            },
+        )
+        self.assertNotIn("python_version", response.json["sqlite_runtime"])
+        self.assertFalse(
+            any(
+                "path" in key or "executable" in key
+                for key in response.json["sqlite_runtime"]
+            )
         )
         self.assertEqual(response.headers["Access-Control-Allow-Origin"], "http://127.0.0.1:5173")
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def test_production_runtime_lease_exposes_coverage_materialization(self) -> None:
+        bundle = self.app.extensions["runtime_manager"].current_bundle
+        repository = bundle.extension("media_repository")
+        blueprint_service = bundle.extension("blueprint_service")
+        self.assertIsNotNone(bundle.extension("coverage_service"))
+        project = repository.create_project(
+            "Production Coverage",
+            {"goal": "legacy production coverage", "candidate_refs": []},
+            {"created_by": "production-runtime-test"},
+        )
+        project_id = str(project["id"])
+        brief = repository.get_brief(project_id, 1)
+        assert brief is not None
+        semantic = {
+            "intent": {
+                "goal": "turn local memories into a short film",
+                "stance": "ordinary moments deserve attention",
+                "audience": "individual creators",
+                "platform": "short-video",
+            },
+            "script": {
+                "blocks": [
+                    {"block_id": "opening", "text": "These moments were waiting."},
+                    {"block_id": "ending", "text": "Now they have a place."},
+                ]
+            },
+            "direction": {
+                "theme": "rediscovery",
+                "narrative_arc": "forgotten to found",
+                "emotion": "warm",
+                "tone": "restrained",
+                "pace": "measured",
+            },
+            "output": {"duration_target_ms": 8_000, "aspect_ratio": "9:16"},
+            "constraints": {"must_include": [], "must_exclude": []},
+            "material_hints": [],
+            "reference_refs": [],
+            "technique_refs": [],
+            "bindings": {"creator_context": None, "wiki_generation": None},
+            "assumptions": [],
+            "missing_evidence": [],
+            "open_decisions": [],
+        }
+        blueprint_service.commit_proposal(
+            project_id,
+            {
+                "expected_head": None,
+                "initial_legacy_brief": {
+                    "revision": 1,
+                    "content_sha256": brief["content_sha256"],
+                },
+                "source_candidate_sha256": None,
+                "semantic": semantic,
+            },
+            idempotency_key="production-blueprint",
+        )
+        blueprint = repository.get_blueprint_head(project_id)
+        assert blueprint is not None
+        response = self.client.post(
+            f"/v1/creative/projects/{project_id}/coverage/materialize",
+            query_string={
+                "db_path": str(repository.db_path),
+                "expected_database_uuid": repository.database_uuid,
+            },
+            json={
+                "expected_blueprint": {
+                    "revision": blueprint["revision"],
+                    "content_sha256": blueprint["content_sha256"],
+                    "semantic_sha256": blueprint["semantic_sha256"],
+                },
+                "expected_plan_head": None,
+            },
+            headers={
+                **self.desktop_headers,
+                "Idempotency-Key": "production-coverage",
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        read = self.client.get(
+            f"/v1/creative/projects/{project_id}/coverage",
+            query_string={"db_path": str(repository.db_path)},
+        )
+        self.assertEqual(read.status_code, 200)
+        self.assertEqual(read.json["coverage_plan"]["revision"], 1)
+        self.assertEqual(read.json["freshness"]["state"], "current")
 
     def test_cors_requires_token_for_opaque_renderer_origins(self) -> None:
         with patch(
@@ -407,6 +607,43 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
         persisted_after = settings_path.read_bytes() if settings_path.exists() else None
         self.assertEqual(persisted_after, persisted_before)
 
+    def test_settings_reject_candidate_store_and_generation_scope_without_runtime_swap(
+        self,
+    ) -> None:
+        invalid_db_path = Path(self.temporary_directory.name) / "scope-not-sqlite.db"
+        invalid_db_path.write_text("not sqlite", encoding="utf-8")
+        missing_library = Path(self.temporary_directory.name) / "missing-library"
+        settings_before = self.app.config["SETTINGS"]
+        settings_path = settings_before.persisted_settings_path
+        persisted_before = settings_path.read_bytes() if settings_path.exists() else None
+        manager = self.app.extensions["runtime_manager"]
+        bundle_before = manager.current_bundle
+        repository_before = self.app.extensions["media_repository"]
+        runner_before = self.app.extensions["media_job_runner"]
+
+        cases = (
+            {"db_path": str(invalid_db_path)},
+            {"image_library_dir": str(missing_library)},
+            {"settings_path": str(Path(self.temporary_directory.name) / "outside.yaml")},
+            {"runtime_generation": "forged-generation"},
+        )
+        for index, payload in enumerate(cases):
+            with self.subTest(index=index, fields=sorted(payload)):
+                response = self.client.put(
+                    "/v1/settings",
+                    json=payload,
+                    headers=self.desktop_headers,
+                )
+                self.assertEqual(response.status_code, 400, response.get_json())
+                self.assertIs(manager.current_bundle, bundle_before)
+                self.assertIs(self.app.config["SETTINGS"], settings_before)
+                self.assertIs(self.app.extensions["media_repository"], repository_before)
+                self.assertIs(self.app.extensions["media_job_runner"], runner_before)
+                persisted_after = (
+                    settings_path.read_bytes() if settings_path.exists() else None
+                )
+                self.assertEqual(persisted_after, persisted_before)
+
     def test_settings_swap_failure_rolls_back_persistence_and_keeps_old_runner(self) -> None:
         settings_path = self.app.config["SETTINGS"].persisted_settings_path
         persisted_before = settings_path.read_bytes() if settings_path.exists() else None
@@ -468,6 +705,7 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
 
     def test_settings_persist_failure_does_not_interrupt_jobs_in_the_unadopted_database(self) -> None:
         candidate_db = Path(self.temporary_directory.name) / "candidate.db"
+        ImageIndexRepository(candidate_db).ensure_schema()
         candidate_repository = MediaRepository(candidate_db)
         candidate_repository.ensure_schema(self.photos_dir)
         root = candidate_repository.register_library_root(self.photos_dir)
@@ -518,6 +756,7 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
         old_runner = old_bundle.extension("media_job_runner")
         old_render_runner = old_bundle.extension("render_job_runner")
         old_db_path = old_repository.db_path
+        teardown_order = unittest.mock.Mock()
 
         candidate_root = Path(self.temporary_directory.name) / "runtime-b"
         candidate_library = candidate_root / "photos"
@@ -588,19 +827,37 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
                 "shutdown",
                 wraps=old_render_runner.shutdown,
             ) as render_shutdown,
+            patch.object(
+                old_repository,
+                "close",
+                wraps=old_repository.close,
+            ) as repository_close,
         ):
+            teardown_order.attach_mock(shutdown, "media_runner")
+            teardown_order.attach_mock(render_shutdown, "render_runner")
+            teardown_order.attach_mock(repository_close, "media_repository")
             request_thread = threading.Thread(target=send_old_request)
             request_thread.start()
             self.assertTrue(validated.wait(timeout=10))
             swap_runtime(self.app, candidate_settings, candidate_extensions)
             shutdown.assert_not_called()
             render_shutdown.assert_not_called()
+            repository_close.assert_not_called()
             continue_request.set()
             request_thread.join(timeout=10)
             self.assertFalse(request_thread.is_alive())
             self.assertEqual(response_holder[0].status_code, 200)
             shutdown.assert_called_once_with()
             render_shutdown.assert_called_once_with()
+            repository_close.assert_called_once_with()
+            self.assertEqual(
+                teardown_order.mock_calls,
+                [
+                    unittest.mock.call.media_runner(),
+                    unittest.mock.call.render_runner(),
+                    unittest.mock.call.media_repository(),
+                ],
+            )
 
         old_review = old_repository.get_asset(str(asset["id"]))["review"]
         self.assertTrue(old_review["favorite"])
@@ -647,6 +904,135 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
         )
         self.assertEqual(current.status_code, 200)
         self.assertTrue(new_repository.get_asset(str(candidate_asset["id"]))["review"]["favorite"])
+
+    def test_settings_activation_and_export_admission_are_serialized_before_lease(self) -> None:
+        candidate_entered = threading.Event()
+        release_candidate = threading.Event()
+        settings_responses: list[object] = []
+        export_responses: list[object] = []
+        export_finished = threading.Event()
+
+        def blocked_candidate(_settings):
+            candidate_entered.set()
+            if not release_candidate.wait(timeout=10):
+                raise RuntimeError("candidate barrier timed out")
+            raise ValueError("injected candidate rejection")
+
+        def update_settings_request() -> None:
+            with self.app.test_client() as client:
+                settings_responses.append(
+                    client.put(
+                        "/v1/settings",
+                        json={"process_image_width": 1234},
+                        headers=self.desktop_headers,
+                    )
+                )
+
+        def export_request() -> None:
+            try:
+                with self.app.test_client() as client:
+                    export_responses.append(
+                        client.post(
+                            "/v1/main/creative/projects/project-1/exports",
+                            json={
+                                "presentation": {},
+                                "presentation_sha256": "a" * 64,
+                                "native_gesture_nonce": "",
+                                "destination": {
+                                    "canonical_path": str(
+                                        Path(self.temporary_directory.name) / "exports"
+                                    ),
+                                    "package_basename": "project-1",
+                                    "selection_identity": {
+                                        "device": "1",
+                                        "inode": "2",
+                                    },
+                                },
+                            },
+                            headers={
+                                MAIN_AUTHORITY_HEADER: self.main_token,
+                                "Idempotency-Key": "serialized-export-admission",
+                            },
+                        )
+                    )
+            finally:
+                export_finished.set()
+
+        with patch(
+            "backend.src.api.routes.build_runtime_extensions",
+            side_effect=blocked_candidate,
+        ):
+            settings_thread = threading.Thread(target=update_settings_request)
+            settings_thread.start()
+            self.assertTrue(candidate_entered.wait(timeout=10))
+            export_thread = threading.Thread(target=export_request)
+            export_thread.start()
+            self.assertFalse(export_finished.wait(timeout=0.1))
+            release_candidate.set()
+            settings_thread.join(timeout=10)
+            export_thread.join(timeout=10)
+
+        self.assertFalse(settings_thread.is_alive())
+        self.assertFalse(export_thread.is_alive())
+        self.assertEqual(settings_responses[0].status_code, 400)
+        self.assertEqual(export_responses[0].status_code, 403)
+        self.assertEqual(
+            export_responses[0].json["code"],
+            "native_confirmation_required",
+        )
+
+    def test_canonical_recovery_failure_aborts_runtime_activation(self) -> None:
+        manager = self.app.extensions["runtime_manager"]
+        old_bundle = manager.current_bundle
+        candidate_root = Path(self.temporary_directory.name) / "recovery-gate"
+        candidate_library = candidate_root / "photos"
+        candidate_library.mkdir(parents=True)
+        candidate_settings = replace(
+            old_bundle.settings,
+            image_library_dir=candidate_library,
+            db_path=candidate_root / "recovery-gate.db",
+        )
+        candidate_extensions = build_runtime_extensions(candidate_settings)
+        candidate_repository = candidate_extensions["media_repository"]
+        try:
+            with patch.object(
+                candidate_repository,
+                "mark_canonical_export_jobs_interrupted",
+                side_effect=RuntimeError("injected recovery failure"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "injected recovery failure"):
+                    swap_runtime(self.app, candidate_settings, candidate_extensions)
+            self.assertIs(manager.current_bundle, old_bundle)
+        finally:
+            shutdown_runtime_extensions(candidate_extensions)
+
+    def test_provider_egress_recovery_failure_aborts_runtime_activation(self) -> None:
+        manager = self.app.extensions["runtime_manager"]
+        old_bundle = manager.current_bundle
+        candidate_root = Path(self.temporary_directory.name) / "provider-recovery-gate"
+        candidate_library = candidate_root / "photos"
+        candidate_library.mkdir(parents=True)
+        candidate_settings = replace(
+            old_bundle.settings,
+            image_library_dir=candidate_library,
+            db_path=candidate_root / "provider-recovery-gate.db",
+        )
+        candidate_extensions = build_runtime_extensions(candidate_settings)
+        candidate_repository = candidate_extensions["media_repository"]
+        try:
+            with patch.object(
+                candidate_repository,
+                "recover_provider_egress_state",
+                side_effect=RuntimeError("injected provider recovery failure"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "injected provider recovery failure",
+                ):
+                    swap_runtime(self.app, candidate_settings, candidate_extensions)
+            self.assertIs(manager.current_bundle, old_bundle)
+        finally:
+            shutdown_runtime_extensions(candidate_extensions)
 
     def test_runtime_swap_keeps_creator_write_on_the_validated_bundle(self) -> None:
         manager = self.app.extensions["runtime_manager"]
@@ -747,9 +1133,17 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
         )
 
     def test_indexing_distinguishes_empty_and_all_failed_jobs(self) -> None:
+        root_metadata = self.photos_dir.stat()
         empty_response = self.client.post(
             "/v1/indexing/jobs",
-            json={"image_dir": str(self.photos_dir), "persist_to_server": True},
+            json={
+                "image_dir": str(self.photos_dir),
+                "library_root_identity": {
+                    "device": str(root_metadata.st_dev),
+                    "inode": str(root_metadata.st_ino),
+                },
+                "persist_to_server": True,
+            },
             headers=self.desktop_headers,
         )
         failed_response = self.client.post(
@@ -767,9 +1161,11 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
 
         self.assertEqual(empty_response.status_code, 200)
         self.assertEqual(empty_response.json["status"], "empty")
-        self.assertEqual(failed_response.status_code, 200)
-        self.assertEqual(failed_response.json["status"], "failed")
-        self.assertEqual(len(failed_response.json["errors"]), 1)
+        self.assertEqual(failed_response.status_code, 409)
+        self.assertEqual(
+            failed_response.json["code"],
+            "legacy_inline_image_unmanaged",
+        )
 
     def test_indexing_rejects_non_object_json(self) -> None:
         response = self.client.post(
@@ -816,9 +1212,71 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
         self.assertEqual(missing_response.status_code, 400)
         self.assertEqual(invalid_response.status_code, 400)
 
+    def test_retrieval_copy_accepts_indexed_metadata_without_vision_text(
+        self,
+    ) -> None:
+        response = self.client.post(
+            "/v1/retrieval/copy",
+            json={
+                "query_text": "quiet beach sunset",
+                "image_library_dir": str(self.photos_dir),
+                "images": [
+                    {
+                        "id": "asset_" + "0" * 24,
+                        "filename": "quiet-beach.jpg",
+                        "relative_path": "quiet-beach.jpg",
+                        "description": "",
+                        "tags": [],
+                        "score": 1.0,
+                        "matched_terms": [],
+                    }
+                ],
+            },
+            headers=self.desktop_headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json["generated_copy"]["model"], "local_fallback")
+        self.assertIsInstance(response.json["caption"], str)
+
     def test_retrieval_copy_routes_never_send_original_images(self) -> None:
+        asset_id = "asset_" + "0" * 24
+        analysis_binding = {
+            "analysis_run_id": "arun_" + "1" * 32,
+            "revision": 1,
+            "content_sha256": "2" * 64,
+        }
+        projection = {
+            "status": "current",
+            "generation_id": "generation_active",
+            "processing_generation_id": "generation_processing",
+            "receipt_sha256": "3" * 64,
+            "row_sha256": "4" * 64,
+            "reason_code": None,
+        }
+        observation = {
+            "object": "memolens.canonical_image_observation",
+            "schema_version": "1",
+            "status": "current",
+            "authority": "canonical_image_analysis",
+            "provenance_status": "verified_current",
+            "asset_id": asset_id,
+            "analysis_binding": analysis_binding,
+            "source_binding_sha256": "5" * 64,
+            "projection": projection,
+            "stages": {
+                stage: {
+                    "status": "disabled",
+                    "provenance": {},
+                    "output": None,
+                    "reason_code": "test_disabled",
+                }
+                for stage in IMAGE_ANALYSIS_STAGES
+            },
+            "reason_code": None,
+        }
         retrieved = RetrievedImageSummary(
-            id="image-1",
+            id=asset_id,
             filename="one.jpg",
             relative_path="one.jpg",
             taken_at=None,
@@ -836,20 +1294,43 @@ class BackendBoundaryRegressionTests(unittest.TestCase):
             highlights=["mountain"],
             image_count=0,
         )
-        retrieval_response = RetrievalResponse(
+        retrieval_response = CanonicalRetrievalResponse(
             id="query-1",
             query_text="mountain lake",
             current_datetime="2026-01-01T00:00:00+00:00",
             parsed_query=None,
             data=[retrieved],
             status="completed",
+            canonical_projection_bindings={
+                asset_id: {
+                    "generation_id": projection["generation_id"],
+                    "analysis_binding": analysis_binding,
+                    "row_sha256": projection["row_sha256"],
+                }
+            },
         )
         bundle = self.app.extensions["runtime_manager"].current_bundle
         retrieval_service = bundle.extension("retrieval_service")
         copywriter = bundle.extension("retrieval_copywriter")
+        media_repository = bundle.extension("media_repository")
         with (
             patch.object(retrieval_service, "run", return_value=retrieval_response),
+            patch.object(
+                media_repository,
+                "canonical_image_consumer_states",
+                return_value={
+                    asset_id: {
+                        "analysis_status": "current",
+                        "canonical_image_observation": observation,
+                    }
+                },
+                create=True,
+            ),
             patch.object(copywriter, "generate", return_value=generated) as generate,
+            patch(
+                "backend.src.api.routes._legacy_provider_egress_authorized",
+                return_value=True,
+            ),
         ):
             query_response = self.client.post(
                 "/v1/retrieval/query",

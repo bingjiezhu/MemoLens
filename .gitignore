@@ -26,6 +26,7 @@ __pycache__/
 .cache/
 .chrome-tmp/
 .electron-cache/
+claude code/
 
 # Python virtualenvs and caches
 .venv/
@@ -66,6 +67,8 @@ exports/
 # Personal documents
 *.pdf
 *.docx
+docs/project/
+docs/archive/pending-trash-*/
 
 # Local HyperFrames workshop. The published walkthrough is docs/assets/memolens-promo.mp4
 videos/

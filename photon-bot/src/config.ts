@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { requireLocalServiceUrl } from "./networkPolicy.js";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export type BotConfig = {
@@ -11,6 +13,7 @@ export type BotConfig = {
   backendSendPathOverrides: boolean;
   discordSendImageWidth: number;
   discordBotToken: string;
+  discordExpectedBotUserId: string;
   discordAllowedUserIds: string[];
   discordAllowedChannelIds: string[];
   backendRequestTimeoutMs: number;
@@ -50,7 +53,7 @@ export function loadConfig(): BotConfig {
   );
   const backendSendPathOverrides = readBoolean(
     process.env.BACKEND_SEND_PATH_OVERRIDES,
-    true,
+    false,
   );
   const discordSendImageWidth = readInteger(
     process.env.DISCORD_SEND_IMAGE_WIDTH,
@@ -66,6 +69,10 @@ export function loadConfig(): BotConfig {
       )
     : readOptionalFilePath(process.env.SQLITE_DB_PATH);
   const discordBotToken = readRequiredString(process.env.DISCORD_BOT_TOKEN, "DISCORD_BOT_TOKEN");
+  const discordExpectedBotUserId = readDiscordSnowflake(
+    process.env.DISCORD_EXPECTED_BOT_USER_ID,
+    "DISCORD_EXPECTED_BOT_USER_ID",
+  );
   const discordAllowedChannelIds = readStringList(process.env.DISCORD_ALLOWED_CHANNEL_IDS);
   const backendRequestTimeoutMs = readInteger(
     process.env.BACKEND_REQUEST_TIMEOUT_MS,
@@ -102,6 +109,7 @@ export function loadConfig(): BotConfig {
     backendSendPathOverrides,
     discordSendImageWidth,
     discordBotToken,
+    discordExpectedBotUserId,
     discordAllowedUserIds,
     discordAllowedChannelIds,
     backendRequestTimeoutMs,
@@ -153,9 +161,12 @@ function stripWrappingQuotes(value: string): string {
 
 function readUrl(value: string, key: string): string {
   try {
+    requireLocalServiceUrl(value);
     return new URL(value).toString().replace(/\/$/, "");
   } catch {
-    throw new Error(`${key} must be a valid absolute URL.`);
+    throw new Error(
+      `${key} must be an absolute HTTP(S) URL with a literal loopback host.`,
+    );
   }
 }
 
@@ -175,9 +186,7 @@ function readDirectory(value: string, key: string, createIfMissing = false): str
 
 function memolensStateDir(): string {
   const configured = process.env.MEMOLENS_APP_STATE_DIR?.trim();
-  if (configured) {
-    return path.resolve(configured);
-  }
+  if (configured) return path.resolve(configured);
   if (process.platform === "darwin") {
     return path.join(process.env.HOME ?? "", "Library/Application Support/MemoLens");
   }
@@ -189,7 +198,7 @@ function memolensStateDir(): string {
 
 function readJsonObject(filePath: string): Record<string, unknown> | null {
   try {
-    const payload = JSON.parse(fs.readFileSync(filePath, "utf8")) as unknown;
+    const payload: unknown = JSON.parse(fs.readFileSync(filePath, "utf8"));
     return payload !== null && typeof payload === "object" && !Array.isArray(payload)
       ? (payload as Record<string, unknown>)
       : null;
@@ -199,40 +208,36 @@ function readJsonObject(filePath: string): Record<string, unknown> | null {
 }
 
 function existingFile(value: unknown): string | null {
-  if (typeof value !== "string" || !value.trim()) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const resolved = path.resolve(value.trim());
+  try {
+    return fs.statSync(resolved).isFile() ? resolved : null;
+  } catch {
     return null;
   }
-  const resolved = path.resolve(value.trim());
-  return fs.existsSync(resolved) && fs.statSync(resolved).isFile() ? resolved : null;
 }
 
 function resolveManagedSqlitePath(): string | null {
   const stateDir = memolensStateDir();
   const desktop = readJsonObject(path.join(stateDir, "desktop-settings.json"));
   const fromDesktop = existingFile(desktop?.defaultDbPath);
-  if (fromDesktop) {
-    return fromDesktop;
-  }
+  if (fromDesktop) return fromDesktop;
   const backend = readJsonObject(path.join(stateDir, "backend-settings.json"));
   const fromBackend = existingFile(backend?.db_path);
-  if (fromBackend) {
-    return fromBackend;
-  }
+  if (fromBackend) return fromBackend;
   const storageDir = path.join(stateDir, "storage");
-  if (fs.existsSync(storageDir) && fs.statSync(storageDir).isDirectory()) {
-    const hashed = fs
-      .readdirSync(storageDir)
-      .filter((name) => /^photo-index-[0-9a-f]{24}\.db$/i.test(name))
-      .map((name) => path.join(storageDir, name))
-      .filter((filePath) => fs.statSync(filePath).isFile())
-      .sort();
-    if (hashed.length === 1) {
-      const onlyHashedPath = hashed[0];
-      if (onlyHashedPath) {
-        return onlyHashedPath;
-      }
-    }
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(storageDir);
+  } catch {
+    return null;
   }
+  const hashed = names
+    .filter((name) => /^photo-index-[0-9a-f]{24}\.db$/i.test(name))
+    .map((name) => existingFile(path.join(storageDir, name)))
+    .filter((filePath): filePath is string => filePath !== null)
+    .sort();
+  if (hashed.length === 1) return hashed[0] ?? null;
   return existingFile(path.join(storageDir, "photo_index.db"));
 }
 
@@ -268,6 +273,14 @@ function readRequiredString(rawValue: string | undefined, key: string): string {
   const value = rawValue?.trim();
   if (!value) {
     throw new Error(`${key} must be set.`);
+  }
+  return value;
+}
+
+function readDiscordSnowflake(rawValue: string | undefined, key: string): string {
+  const value = readRequiredString(rawValue, key);
+  if (!/^[0-9]{16,32}$/.test(value)) {
+    throw new Error(`${key} must be a Discord numeric user ID.`);
   }
   return value;
 }

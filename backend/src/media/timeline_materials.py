@@ -5,6 +5,11 @@ from typing import Protocol
 
 from core.media_db import MediaRepository
 
+from .residual_parent import (
+    ResidualParentResolutionError,
+    resolve_current_residual_parent,
+)
+
 
 SUPPORTED_FITS = {"contain", "cover", "stretch"}
 
@@ -54,7 +59,48 @@ class TimelineMaterialValidator:
         if kind not in {"video", "image"} or kind != asset.get("kind"):
             issues.issue("kind_mismatch", pointer + "/kind", "Clip kind does not match the asset.")
         self._validate_source_range(clip, asset, asset_id, kind, pointer, issues)
+        self._validate_residual_lineage(clip, pointer, issues)
         self._validate_presentation(clip, pointer, issues)
+
+    def _validate_residual_lineage(
+        self,
+        clip: dict[str, object],
+        pointer: str,
+        issues: ValidationIssues,
+    ) -> None:
+        provenance = clip.get("provenance")
+        if not isinstance(provenance, dict) or "residual_binding" not in provenance:
+            return
+        binding = provenance.get("residual_binding")
+        if not isinstance(binding, dict):
+            issues.issue(
+                "residual_binding_invalid",
+                pointer + "/provenance/residual_binding",
+                "Residual clip provenance must carry one closed binding.",
+            )
+            return
+        candidate = {
+            "id": provenance.get("match_id"),
+            "parent_segment_id": provenance.get("parent_segment_id"),
+            "asset_id": clip.get("asset_id"),
+            "asset_source_id": clip.get("asset_source_id"),
+            "result_type": "video_segment",
+            "start_ms": clip.get("source_in_ms"),
+            "end_ms": clip.get("source_out_ms"),
+        }
+        try:
+            resolve_current_residual_parent(
+                self.repository,
+                binding,
+                candidate=candidate,
+                allow_subrange=True,
+            )
+        except ResidualParentResolutionError as exc:
+            issues.issue(
+                exc.code,
+                pointer + "/provenance/residual_binding",
+                str(exc),
+            )
 
     def _validate_source_range(
         self,

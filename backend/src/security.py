@@ -9,6 +9,7 @@ from flask import Flask, jsonify, request
 
 
 DESKTOP_TOKEN_HEADER = "X-MemoLens-Desktop-Token"
+MAIN_AUTHORITY_HEADER = "X-MemoLens-Main-Authority"
 
 
 def _configured_frontend_port() -> str:
@@ -124,6 +125,7 @@ def install_local_api_security(
                 f"Content-Type, Authorization, Idempotency-Key, {DESKTOP_TOKEN_HEADER}"
             )
             response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, OPTIONS"
+            response.headers["Access-Control-Expose-Headers"] = "Idempotency-Replayed"
             response.headers["Access-Control-Max-Age"] = "600"
 
         response.headers.setdefault("Cache-Control", "no-store")

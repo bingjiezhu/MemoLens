@@ -8,8 +8,11 @@ from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from urllib.parse import urlparse
 
+import httpx
 from openai import OpenAI
 import requests
+
+from core.network_policy import NetworkPolicyError, offline_networking_enabled, require_offline_safe_url
 
 
 def strip_wrapping_fences(text: str) -> str:
@@ -55,10 +58,12 @@ def coerce_json_object(content) -> dict[str, object]:
 
 
 def create_openai_client(*, api_key: str | None, base_url: str) -> OpenAI:
+    require_offline_safe_url(base_url)
     try:
         return OpenAI(
             api_key=api_key,
             base_url=base_url,
+            http_client=httpx.Client(trust_env=False),
         )
     except TypeError as exc:
         if "unexpected keyword argument 'proxies'" not in str(exc):
@@ -83,6 +88,7 @@ def request_minimax_chat_completion(
     max_tokens: int | None,
     response_format: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    require_offline_safe_url(base_url)
     if not api_key:
         raise RuntimeError("MINIMAX_KEY is not set.")
 
@@ -97,15 +103,17 @@ def request_minimax_chat_completion(
     if response_format:
         payload["response_format"] = response_format
 
-    response = requests.post(
-        f"{base_url.rstrip('/')}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=120,
-    )
+    with requests.Session() as session:
+        session.trust_env = False
+        response = session.post(
+            f"{base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=120,
+        )
     if response.status_code >= 400:
         raise RuntimeError(
             f"MiniMax request failed ({response.status_code}): {response.text[:500]}"
@@ -132,6 +140,7 @@ def request_vertex_generate_content(
     max_tokens: int | None,
     response_format: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    require_offline_safe_url(base_url)
     project = _resolve_vertex_project()
     location = _resolve_vertex_location(base_url)
     access_token = _resolve_vertex_access_token()
@@ -185,15 +194,17 @@ def request_vertex_generate_content(
     if generation_config:
         payload["generationConfig"] = generation_config
 
-    response = requests.post(
-        endpoint,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=120,
-    )
+    with requests.Session() as session:
+        session.trust_env = False
+        response = session.post(
+            endpoint,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=120,
+        )
     if response.status_code >= 400:
         raise RuntimeError(
             f"Vertex request failed ({response.status_code}): {response.text[:500]}"
@@ -355,6 +366,10 @@ def _resolve_vertex_thinking_budget(model: str) -> int | None:
 
 
 def _run_gcloud_text(command: list[str]) -> str | None:
+    if offline_networking_enabled():
+        raise NetworkPolicyError(
+            "Offline MemoLens denied an external credential helper before process start."
+        )
     try:
         completed = subprocess.run(
             command,
