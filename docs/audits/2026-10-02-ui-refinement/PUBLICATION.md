@@ -44,6 +44,18 @@
 
 ## 发布方式与证据边界
 
+### 默认桌面启动的追加修正
+
+首次 UI 发布为 `4acca16`。等待远端检查期间进一步验证了当前项目的默认运行环境（无额外 Python override）：Python `3.14.2` / SQLite `3.53.4` 通过安全检查。实际桌面准备在独立临时应用状态下完成，但发现旧 Darwin Rollup 补装会升级现有依赖：Vite 从锁定 `8.2.1` 漂移至 `8.3.2`，共 17 包发生变化。版本清单和锁文件本身未变，因此先前的静态一致性检查无法发现这次运行环境漂移。
+
+本仓库 Vite 8 使用 Rolldown，锁文件已有 ARM / Intel Mac 的对应 native binding。追加修正仅涉及 `scripts/bootstrap_mac.sh`、`scripts/prepare_desktop_runtime.sh` 和 `tests/test_sqlite_setup.py`：首次安装使用 `npm ci`，两条启动路径移除旧 Rollup 补装，不增加依赖或兼容分支。
+
+- 新 shell 回归直接运行脚本，覆盖 ARM / Intel 的首次安装和日常准备、依赖调用、构建、临时 runtime 复制/签名及 manifest / 已装版本保留。旧代码四个子场景均失败，修复后通过；SQLite 与既有离线门禁合计 25 项通过。
+- 当前项目重新恢复锁定依赖，再实际运行桌面准备与签名：40 个已装锁包零版本偏差，准备前后所有已装版本指纹、package / lock 指纹均相同。Vite `8.2.1`、Electron `43.7.7`、Rolldown `1.2.4`；真实构建和 runtime 签名通过。测试不启动真实用户工作区。
+- 追加修正后合并运行相关 Python 模块及离线门禁：74 项通过；Electron / Node 197、Renderer 151 再次通过，零失败、零跳过。Python 静态检查、脚本语法和空白检查通过。以上范围与前文计数重叠，不能相加。
+
+此追加修正与主项目逐字同步，package / lock 未修改。首次 `4acca16` 的 CI 不能代替追加修正提交的最终 CI；发布收尾以最新提交的实际远端结果为准。
+
 发布前检查候选内容、空白、当前远端主线和 fast-forward 关系。推送到 `main` 后必须读取 [GitHub CI](https://github.com/bingjiezhu/MemoLens/actions/workflows/ci.yml) 的实际结果，不能以本地通过代替远端成功；最终远端提交和 CI 结果在任务交付中报告。
 
 本轮没有访问真实用户素材库、调用付费提供方，或在真实 Codex / DeepSeek 宿主内执行完整安装验收。前轮 UI 截图仍是当时的浏览器证据，不冒充本轮新截图。本轮集成渲染使用合成素材且检查实际输出，不等同于真实用户素材的视觉品质评审。

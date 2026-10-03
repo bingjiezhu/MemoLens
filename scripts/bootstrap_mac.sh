@@ -164,25 +164,7 @@ if ! run_isolated_python "${VENV_PYTHON}" "${SQLITE_RUNTIME_CHECKER}" --quiet; t
 fi
 run_isolated_python "${VENV_PYTHON}" -m pip install --upgrade pip
 run_isolated_python "${VENV_PYTHON}" -m pip install -r requirements.txt
-npm install
-
-if [ "$(uname -s)" = "Darwin" ]; then
-  case "$(uname -m)" in
-    arm64)
-      ROLLUP_NATIVE_PACKAGE="@rollup/rollup-darwin-arm64"
-      ;;
-    x86_64)
-      ROLLUP_NATIVE_PACKAGE="@rollup/rollup-darwin-x64"
-      ;;
-    *)
-      ROLLUP_NATIVE_PACKAGE=""
-      ;;
-  esac
-
-  if [ -n "${ROLLUP_NATIVE_PACKAGE}" ] && ! node -e "require('${ROLLUP_NATIVE_PACKAGE}')" >/dev/null 2>&1; then
-    npm install --no-save --no-package-lock "${ROLLUP_NATIVE_PACKAGE}"
-  fi
-fi
+npm ci
 
 npm run build
 

@@ -55,24 +55,6 @@ elif [ "${OFFLINE_NETWORKING}" = "no" ] && [ ! -d "node_modules" ]; then
   bash "${SCRIPT_DIR}/bootstrap_mac.sh"
 fi
 
-if [ "${OFFLINE_NETWORKING}" = "no" ] && [ "$(uname -s)" = "Darwin" ]; then
-  case "$(uname -m)" in
-    arm64)
-      ROLLUP_NATIVE_PACKAGE="@rollup/rollup-darwin-arm64"
-      ;;
-    x86_64)
-      ROLLUP_NATIVE_PACKAGE="@rollup/rollup-darwin-x64"
-      ;;
-    *)
-      ROLLUP_NATIVE_PACKAGE=""
-      ;;
-  esac
-
-  if [ -n "${ROLLUP_NATIVE_PACKAGE}" ] && ! node -e "require('${ROLLUP_NATIVE_PACKAGE}')" >/dev/null 2>&1; then
-    npm install --no-save --no-package-lock "${ROLLUP_NATIVE_PACKAGE}"
-  fi
-fi
-
 if [ "${OFFLINE_NETWORKING}" = "yes" ]; then
   if [ ! -f "dist/index.html" ] \
     || [ ! -f "electron-dist/electron/main.js" ] \
