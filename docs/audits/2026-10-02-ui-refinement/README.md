@@ -2,6 +2,8 @@
 
 Date: 2026-10-02. Baseline: `origin/main` at `6c9013498a3f88e56445d5eb67b5dc0e9ff8e2ff`.
 
+Subsequent delivery status: the user authorized applying this version to the primary project, then explicitly requested a GitHub push after overall functional checks pass. See [publication verification](PUBLICATION.md). The local-only restrictions and test counts below describe the earlier review stage, not the current authorization or the later verification.
+
 Follow-up: [local-only closeout review](CLOSEOUT.md), including the keyboard-order and resize/input-preservation fixes. The verification totals below describe the earlier pass; the closeout lists its own fresh results. Do not merge into the primary checkout or publish without a new explicit user request.
 
 ## Scope and design rule
