@@ -36,16 +36,16 @@
     "check": "npm run lint:python && npm run test:unit && npm run test:plugin && npm run verify:local && npm run build && npm run test:node"
   },
   "dependencies": {
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
-    "@types/node": "^22.15.30",
-    "@types/react": "^19.1.2",
-    "@types/react-dom": "^19.1.2",
-    "@vitejs/plugin-react": "^6.0.5",
-    "electron": "^43.5.0",
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "electron": "^44.5.1",
     "typescript": "^7.0.2",
-    "vite": "^8.2.1"
+    "vite": "^8.3.2"
   }
 }
